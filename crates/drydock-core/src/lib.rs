@@ -1,5 +1,6 @@
 pub mod activation;
 pub mod administrator;
+pub mod app_payloads;
 pub mod catalog;
 pub mod cloud;
 pub mod config;
@@ -36,6 +37,7 @@ pub mod version;
 
 pub use activation::{ActivationError, ActivationRequestService, VerifiedEntitlement, normalize_short_code};
 pub use administrator::{ElevationError, ensure_elevated};
+pub use app_payloads::{AppPayloadStore, StoredPayload};
 pub use catalog::{
     AppCatalog, CatalogApp, CatalogError, RemoteCatalogClient, load_catalog_apps, save_catalog_apps,
 };

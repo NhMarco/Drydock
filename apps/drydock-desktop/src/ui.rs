@@ -8,21 +8,22 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use drydock_core::{
-    APP_VERSION, ActivationRequestService, AddedAppState, AppCatalog, AppUpdater, CatalogApp, CdnClient,
-    CloudProvider, CloudRedirect, CloudSettings, ConfigSource, ConflictingSoftwareStatus, DenuvoWatchClient,
-    DepotData, DownloadProgress, DownloadedDll, EmuTemplateInput, FixEntry, FixStatus, GameLanguageOptions,
-    LoadOutcome, OpenSteamTool, PeArch, PortablePaths, PreparedUpdate, ProxyClient, QueueEffect,
-    QueuedDownload, RepackApp, S3Credentials, Settings, SteamDiscovery, SteamManifest, SteamServiceState,
-    SteamServiceStatus, SteamStoreClient, SteamStoreDetails, SteamUriAction, StoreCapsule, StoreFeatured,
-    VerifiedEntitlement, achievement_image_urls, add_app_files, apply_denuvo_fix, apply_language,
-    clear_previous_token_files, cloud, depot, detect_conflicting_software, detect_pe_arch, discover_steam,
-    download_queue, ensure_toolchain, fetch_achievement_images, fetch_install_dir, fetch_reframework_dll,
-    fetch_windows_arch, fetch_windows_executables, fix_status, install_depot_manifests, install_magicfiles,
-    install_service, installed_app_luas, is_valid_steam_directory, load_cached_denuvo_appids,
-    load_catalog_apps, load_dll_files, load_manifests, open_link, open_steam_uri, overlay_sound_bytes,
-    read_denuvo_appids, read_language_options, remove_app_files, remove_paths, resolve_game_root,
-    restart_steam, run_and_capture_token_request, save_catalog_apps, save_denuvo_appids, scan_crack_files,
-    service_status, set_manifest_updates_enabled, start_steam, stop_steam, toolchain_dlls, uninstall_service,
+    APP_VERSION, ActivationRequestService, AddedAppState, AppCatalog, AppPayloadStore, AppUpdater,
+    CatalogApp, CdnClient, CloudProvider, CloudRedirect, CloudSettings, ConfigSource,
+    ConflictingSoftwareStatus, DenuvoWatchClient, DepotData, DownloadProgress, DownloadedDll,
+    EmuTemplateInput, FixEntry, FixStatus, GameLanguageOptions, LoadOutcome, OpenSteamTool, PeArch,
+    PortablePaths, PreparedUpdate, ProxyClient, QueueEffect, QueuedDownload, RepackApp, S3Credentials,
+    Settings, SteamDiscovery, SteamManifest, SteamServiceState, SteamServiceStatus, SteamStoreClient,
+    SteamStoreDetails, SteamUriAction, StoreCapsule, StoreFeatured, VerifiedEntitlement,
+    achievement_image_urls, add_app_files, apply_denuvo_fix, apply_language, clear_previous_token_files,
+    cloud, depot, detect_conflicting_software, detect_pe_arch, discover_steam, download_queue,
+    ensure_toolchain, fetch_achievement_images, fetch_install_dir, fetch_reframework_dll, fetch_windows_arch,
+    fetch_windows_executables, fix_status, install_depot_manifests, install_magicfiles, install_service,
+    installed_app_luas, is_valid_steam_directory, load_cached_denuvo_appids, load_catalog_apps,
+    load_dll_files, load_manifests, open_link, open_steam_uri, overlay_sound_bytes, read_denuvo_appids,
+    read_language_options, remove_app_files, remove_paths, resolve_game_root, restart_steam,
+    run_and_capture_token_request, save_catalog_apps, save_denuvo_appids, scan_crack_files, service_status,
+    set_manifest_updates_enabled, start_steam, stop_steam, toolchain_dlls, uninstall_service,
     updates_enabled,
 };
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke, Vec2};
@@ -342,6 +343,9 @@ pub struct DrydockApp {
     /// of what *this* installation added, and it is lost whenever the settings file is. Refreshed on
     /// page switches and after every add/remove, so the render loop never touches the disk.
     plugin_luas: std::collections::BTreeSet<u32>,
+    /// Drydock's own copy of each added app's Lua + depot manifests, so an install can restore them
+    /// after Steam has deleted its `depotcache` entries on uninstall.
+    payload_store: AppPayloadStore,
     cloud_dll_status: Option<drydock_core::DllStatus>,
     /// Cached provider from the CloudRedirect `config.json`, refreshed alongside the DLL state.
     cloud_provider: Option<CloudProvider>,
@@ -599,6 +603,8 @@ impl DrydockApp {
                     .collect()
             });
 
+        // Built before the struct literal, which moves `paths`.
+        let payload_store = AppPayloadStore::new(&paths.settings_dir());
         let header_resolver =
             HeaderResolver::new(paths.cache_dir().join("store-details"), context.egui_ctx.clone());
         let mut app = Self {
@@ -692,6 +698,7 @@ impl DrydockApp {
             cloud_download_receiver: None,
             cloud_oauth_receiver: None,
             plugin_luas: std::collections::BTreeSet::new(),
+            payload_store,
             cloud_dll_status: None,
             cloud_provider: None,
             service_status: None,
@@ -2001,6 +2008,7 @@ impl DrydockApp {
         // Naming the second half matters: fetching the depot package is the slow part (the upstream
         // builds it on demand), so without this the button looks stuck on a large title.
         self.busy_label = Some(format!("Adding {name} to Steam and caching its manifests…"));
+        let store = self.payload_store.clone();
         std::thread::spawn(move || {
             let result = (|| {
                 let client = ProxyClient::new().map_err(|error| error.to_string())?;
@@ -2015,11 +2023,13 @@ impl DrydockApp {
                 let file_name = format!("{app_id}.lua");
                 let installed_names = vec![file_name.clone()];
                 let mut payload = std::collections::BTreeMap::new();
-                payload.insert(file_name, bytes);
+                payload.insert(file_name.clone(), bytes.clone());
                 add_app_files(&root, &payload).map_err(|error| error.to_string())?;
                 // The unlock is in place; now cache the depot manifests so Steam does not have to
-                // fetch them itself. Best effort — see `copy_depot_manifests_to_cache`.
-                let manifests = copy_depot_manifests_to_cache(&client, &root, app_id);
+                // fetch them itself, and keep our own copy of both. Best effort — see
+                // `copy_depot_manifests_to_cache`.
+                let manifests =
+                    copy_depot_manifests_to_cache(&client, &root, &store, app_id, Some((&file_name, &bytes)));
                 Ok(ServiceOutcome::Added {
                     app_id,
                     files: installed_names,
@@ -2060,6 +2070,7 @@ impl DrydockApp {
         self.busy_label = Some(format!(
             "Adding the cracked version of {name} to Steam and caching its manifests…"
         ));
+        let store = self.payload_store.clone();
         std::thread::spawn(move || {
             let result = (|| {
                 let client = ProxyClient::new().map_err(|error| error.to_string())?;
@@ -2078,13 +2089,14 @@ impl DrydockApp {
                 let file_name = format!("{app_id}.lua");
                 let installed_names = vec![file_name.clone()];
                 let mut payload = std::collections::BTreeMap::new();
-                payload.insert(file_name, bytes);
+                payload.insert(file_name.clone(), bytes.clone());
                 add_app_files(&root, &payload).map_err(|error| error.to_string())?;
                 // Same as the normal add. A manifest file is named after the exact depot and
                 // manifest it belongs to, so caching the provider's current build alongside a
                 // build-locked Lua can never mislead Steam — it just will not find a name it is not
                 // looking for.
-                let manifests = copy_depot_manifests_to_cache(&client, &root, app_id);
+                let manifests =
+                    copy_depot_manifests_to_cache(&client, &root, &store, app_id, Some((&file_name, &bytes)));
                 Ok(ServiceOutcome::Added {
                     app_id,
                     files: installed_names,
@@ -2254,6 +2266,10 @@ impl DrydockApp {
                     }
                     Ok(ServiceOutcome::Removed { app_id, note }) => {
                         self.settings.added_apps.remove(&app_id);
+                        // Removing an app from Steam is the user saying they are done with it, so
+                        // the local copy goes too — unlike a Steam *uninstall*, which is exactly the
+                        // case the store exists to survive.
+                        let _ = self.payload_store.remove(app_id);
                         self.status_error = self.persist_settings().is_err();
                         self.status = note;
                         self.refresh_plugin_luas();
@@ -3696,14 +3712,37 @@ impl DrydockApp {
     }
 
     /// Asks Steam to install a game whose unlock Lua is already in place (`steam://install`).
+    /// Restores the app's Lua and depot manifests, then asks Steam to install it.
+    ///
+    /// The restore has to happen first, and it has to happen every time: Steam deletes an app's
+    /// manifests from `depotcache` when it is uninstalled, and putting them back afterwards is too
+    /// late — Steam has already decided to fetch them itself. Restoring from the local store keeps a
+    /// reinstall instant and works with no network at all.
     fn install_steam_game(&mut self, app_id: u32) {
-        match open_steam_uri(app_id, SteamUriAction::Install) {
-            Ok(()) => {
-                self.status = "Asking Steam to install the game".into();
-                self.status_error = false;
+        let restored = match self.steam.root.clone() {
+            Some(root) => restore_payload_into_steam(&self.payload_store, &root, app_id),
+            None => Ok((false, 0)),
+        };
+        // A failed restore is worth saying out loud but must not block the install: Steam can still
+        // fetch what it needs, it is just slower.
+        let prefix = match &restored {
+            Ok((_, 0)) => String::new(),
+            Ok((lua, manifests)) => {
+                let lua = if *lua { "unlock and " } else { "" };
+                format!("Restored the {lua}{manifests} depot manifest(s). ")
             }
             Err(error) => {
-                self.status = error.to_string();
+                self.status_error = true;
+                format!("The stored files could not be restored ({error}). ")
+            }
+        };
+        match open_steam_uri(app_id, SteamUriAction::Install) {
+            Ok(()) => {
+                self.status = format!("{prefix}Asking Steam to install the game");
+                self.status_error = restored.is_err();
+            }
+            Err(error) => {
+                self.status = format!("{prefix}{error}");
                 self.status_error = true;
             }
         }
@@ -9565,13 +9604,49 @@ fn github_access_mode() -> &'static str {
 ///
 /// Note that this is the slow half of the operation — the upstream packages a depot on demand, which
 /// takes seconds for a small title and minutes for a large one.
+/// Also writes the payload to Drydock's own store, so a later install can restore it without the
+/// network — see [`drydock_core::app_payloads`]. Steam deletes an app's manifests when it is
+/// uninstalled, so this local copy is the only one that survives.
 fn copy_depot_manifests_to_cache(
     proxy: &ProxyClient,
     steam_root: &Path,
+    store: &AppPayloadStore,
     app_id: u32,
+    lua: Option<(&str, &[u8])>,
 ) -> Result<usize, String> {
     let data = DepotData::fetch(proxy, app_id).map_err(|error| error.to_string())?;
-    install_depot_manifests(steam_root, &data.raw_manifests).map_err(|error| error.to_string())
+    let installed =
+        install_depot_manifests(steam_root, &data.raw_manifests).map_err(|error| error.to_string())?;
+    // Keeping our own copy is the point of the exercise, but failing to would not undo a successful
+    // add — the next install just falls back to fetching.
+    let _ = store.save(app_id, lua, &data.raw_manifests);
+    Ok(installed)
+}
+
+/// Puts a stored payload back where Steam expects it, before asking Steam to install.
+///
+/// Steam clears an app's manifests out of `depotcache` on uninstall, and re-adds nothing on
+/// install — so without this a reinstall would have to pull the depot package again. Returns
+/// `(lua restored, manifests restored)`.
+fn restore_payload_into_steam(
+    store: &AppPayloadStore,
+    steam_root: &Path,
+    app_id: u32,
+) -> Result<(bool, usize), String> {
+    let payload = store.load(app_id);
+    if payload.is_empty() {
+        return Ok((false, 0));
+    }
+    let mut lua_restored = false;
+    if let Some((name, bytes)) = &payload.lua {
+        let mut files = std::collections::BTreeMap::new();
+        files.insert(name.clone(), bytes.clone());
+        add_app_files(steam_root, &files).map_err(|error| error.to_string())?;
+        lua_restored = true;
+    }
+    let manifests =
+        install_depot_manifests(steam_root, &payload.manifests).map_err(|error| error.to_string())?;
+    Ok((lua_restored, manifests))
 }
 
 /// Renders the note shown after an add/update, folding in how the depot-manifest copy went.
