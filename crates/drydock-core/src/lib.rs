@@ -8,7 +8,6 @@ pub mod conflicts;
 pub mod denuvo;
 pub mod depot;
 pub mod download_queue;
-pub mod emu_load_dlls;
 pub mod emu_template;
 pub mod emu_toolchain;
 pub mod fixes;
@@ -64,7 +63,9 @@ pub use emu_toolchain::{
     load_dll_files, overlay_sound_bytes, toolchain_dlls, toolchain_ready,
 };
 pub use fixes::{FixError, FixStatus, apply_denuvo_fix, fix_status};
-pub use game_folder::{CRACK_ARTIFACT_NAMES, remove_paths, resolve_game_root, scan_crack_files};
+pub use game_folder::{
+    CRACK_ARTIFACT_NAMES, back_up_before_overwrite, remove_paths, resolve_game_root, scan_crack_files,
+};
 pub use harden::harden_dll_search;
 pub use language::{GameLanguageError, GameLanguageOptions, apply_language, read_language_options};
 pub use manifest_protection::{ManifestProtectionError, set_manifest_updates_enabled, updates_enabled};
@@ -87,8 +88,8 @@ pub use steam_appinfo::{
 pub use steam_process::{SteamProcessError, is_steam_running, restart_steam, start_steam, stop_steam};
 pub use steam_service::{
     ServiceError, SteamServiceState, SteamServiceStatus, add_app_files, build_app_payload, has_app_lua_files,
-    install_depot_manifests, install_service, installed_app_luas, remove_app_files, service_status,
-    uninstall_service,
+    install_depot_manifests, install_service, installed_app_luas, missing_depot_manifests, remove_app_files,
+    service_status, uninstall_service,
 };
 pub use steam_uri::{SteamUriAction, SteamUriError, open_steam_uri};
 pub use store::{

@@ -359,6 +359,29 @@ pub fn install_depot_manifests(
     Ok(manifests.len())
 }
 
+/// The `expected` manifests that are not sitting correctly in Steam's `depotcache`.
+///
+/// Steam drops an app's manifests on an account switch, a `depotcache` clear or an uninstall, and
+/// puts nothing back — so they have to be watched. Only names and byte sizes are compared, one
+/// `metadata` call per manifest and no file contents, which keeps this cheap enough to run on a
+/// timer. A size mismatch counts as missing too, so a half-written file is replaced rather than
+/// trusted.
+#[must_use]
+pub fn missing_depot_manifests(steam_directory: &Path, expected: &BTreeMap<String, u64>) -> Vec<String> {
+    let target = steam_directory.join(DEPOTCACHE_SUBDIR);
+    expected
+        .iter()
+        .filter(|(name, size)| {
+            let safe = file_name_of(name);
+            if safe.is_empty() || safe != **name {
+                return false; // never chase a name we would refuse to write anyway
+            }
+            !fs::metadata(target.join(name)).is_ok_and(|found| found.is_file() && found.len() == **size)
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
 /// Removes the given Lua unlock file names for an app, with backup and rollback.
 ///
 /// Returns the number of files actually removed.
@@ -754,6 +777,44 @@ mod tests {
         fs::write(dir.path().join("steam.exe"), b"MZfake").expect("steam.exe");
         fs::create_dir_all(dir.path().join("steamapps")).expect("steamapps");
         dir
+    }
+
+    #[test]
+    fn missing_manifests_are_found_by_absence_and_by_wrong_size() {
+        let steam = fake_steam_dir();
+        let cache = steam.path().join(DEPOTCACHE_SUBDIR);
+        fs::create_dir_all(&cache).expect("depotcache");
+        fs::write(cache.join("1_ok.manifest"), b"abcde").expect("write");
+        fs::write(cache.join("1_short.manifest"), b"ab").expect("write");
+
+        let expected: BTreeMap<String, u64> = [
+            ("1_ok.manifest".to_owned(), 5),
+            ("1_short.manifest".to_owned(), 5),
+            ("1_gone.manifest".to_owned(), 5),
+        ]
+        .into_iter()
+        .collect();
+
+        let missing = missing_depot_manifests(steam.path(), &expected);
+        assert_eq!(missing, ["1_gone.manifest", "1_short.manifest"]);
+    }
+
+    #[test]
+    fn nothing_is_missing_when_the_depotcache_matches() {
+        let steam = fake_steam_dir();
+        let cache = steam.path().join(DEPOTCACHE_SUBDIR);
+        fs::create_dir_all(&cache).expect("depotcache");
+        fs::write(cache.join("1_ok.manifest"), b"abcde").expect("write");
+        let expected: BTreeMap<String, u64> = [("1_ok.manifest".to_owned(), 5)].into_iter().collect();
+        assert!(missing_depot_manifests(steam.path(), &expected).is_empty());
+    }
+
+    #[test]
+    fn a_traversing_manifest_name_is_never_chased() {
+        // These would be rejected on write, so reporting them missing would mean retrying forever.
+        let steam = fake_steam_dir();
+        let expected: BTreeMap<String, u64> = [("../evil.manifest".to_owned(), 5)].into_iter().collect();
+        assert!(missing_depot_manifests(steam.path(), &expected).is_empty());
     }
 
     fn make_package(version: &str, files: &[(&str, &[u8])]) -> SteamServicePackage {

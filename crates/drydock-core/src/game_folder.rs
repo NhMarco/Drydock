@@ -176,9 +176,68 @@ fn strip_relative_suffix(path: &Path, relative: &Path) -> Option<PathBuf> {
     Some(root)
 }
 
+/// Moves `target` aside to `<target>.bak` so the game's own file survives being overwritten.
+/// Returns whether a backup was made.
+///
+/// Nothing happens in two cases. A `target` that doesn't exist has nothing to preserve. And a `.bak`
+/// that is already there is left strictly alone: it holds the genuine original, whereas the file
+/// sitting at `target` on a second run is the *previous crack's* output — backing that up would bury
+/// the real original under a copy of a crack file and make the game unrecoverable.
+pub fn back_up_before_overwrite(target: &Path) -> io::Result<bool> {
+    if !target.exists() {
+        return Ok(false);
+    }
+    let mut backup = target.as_os_str().to_owned();
+    backup.push(".bak");
+    let backup = PathBuf::from(backup);
+    if backup.exists() {
+        return Ok(false);
+    }
+    fs::rename(target, &backup)?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_original_file_is_moved_aside_before_being_overwritten() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let target = directory.path().join("steam_api64.dll");
+        fs::write(&target, b"original game file").expect("write");
+
+        assert!(back_up_before_overwrite(&target).expect("backup"));
+        assert!(!target.exists(), "the original is moved, not copied");
+        let backup = directory.path().join("steam_api64.dll.bak");
+        assert_eq!(fs::read(&backup).expect("read"), b"original game file");
+    }
+
+    #[test]
+    fn a_second_crack_never_buries_the_real_original() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let target = directory.path().join("steam_api64.dll");
+        fs::write(&target, b"original game file").expect("write");
+        back_up_before_overwrite(&target).expect("first backup");
+        // What a first crack left behind, now being re-cracked.
+        fs::write(&target, b"crack file").expect("write");
+
+        assert!(!back_up_before_overwrite(&target).expect("second backup"));
+        let backup = directory.path().join("steam_api64.dll.bak");
+        assert_eq!(
+            fs::read(&backup).expect("read"),
+            b"original game file",
+            "the genuine original must survive re-cracking"
+        );
+    }
+
+    #[test]
+    fn a_file_that_does_not_exist_yet_needs_no_backup() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let target = directory.path().join("version.dll");
+        assert!(!back_up_before_overwrite(&target).expect("backup"));
+        assert!(!directory.path().join("version.dll.bak").exists());
+    }
 
     #[test]
     fn resolves_root_from_nested_subfolder() {

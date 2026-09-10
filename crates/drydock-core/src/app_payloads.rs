@@ -122,6 +122,35 @@ impl AppPayloadStore {
         payload
     }
 
+    /// The stored manifests' file names and byte sizes, without reading a single manifest.
+    ///
+    /// This is the cheap half of keeping Steam's `depotcache` intact: comparing names and sizes only
+    /// costs a directory listing, so it can run on a timer, while [`Self::load`] — which pulls
+    /// megabytes into memory — is reserved for the rare case where something actually went missing.
+    #[must_use]
+    pub fn manifest_index(&self, app_id: u32) -> BTreeMap<String, u64> {
+        let mut index = BTreeMap::new();
+        let Ok(entries) = fs::read_dir(self.app_directory(app_id)) else {
+            return index;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str().filter(|name| is_safe_name(name)) else {
+                continue;
+            };
+            if !name.to_ascii_lowercase().ends_with(".manifest") {
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_file() {
+                index.insert(name.to_owned(), metadata.len());
+            }
+        }
+        index
+    }
+
     /// Deletes the stored payload for one app. Already absent counts as success.
     pub fn remove(&self, app_id: u32) -> io::Result<()> {
         match fs::remove_dir_all(self.app_directory(app_id)) {
@@ -165,6 +194,34 @@ mod tests {
             .iter()
             .map(|(name, bytes)| ((*name).to_owned(), (*bytes).to_vec()))
             .collect()
+    }
+
+    #[test]
+    fn the_manifest_index_lists_names_and_sizes_without_the_lua() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let store = AppPayloadStore::new(directory.path());
+        store
+            .save(
+                480,
+                Some(("480.lua", b"addappid(480)")),
+                &manifests(&[("1_2.manifest", b"abc"), ("1_3.manifest", b"defgh")]),
+            )
+            .expect("save");
+
+        let index = store.manifest_index(480);
+        assert_eq!(index.len(), 2, "the Lua does not belong in the manifest index");
+        assert_eq!(index.get("1_2.manifest"), Some(&3));
+        assert_eq!(index.get("1_3.manifest"), Some(&5));
+    }
+
+    #[test]
+    fn the_manifest_index_of_an_unknown_app_is_empty() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        assert!(
+            AppPayloadStore::new(directory.path())
+                .manifest_index(7)
+                .is_empty()
+        );
     }
 
     #[test]

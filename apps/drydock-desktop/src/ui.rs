@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -9,22 +9,22 @@ use std::time::{Duration, Instant, SystemTime};
 
 use drydock_core::{
     APP_VERSION, ActivationRequestService, AddedAppState, AppCatalog, AppPayloadStore, AppUpdater,
-    CatalogApp, CdnClient, CloudProvider, CloudRedirect, CloudSettings, ConfigSource,
+    CRACK_ARTIFACT_NAMES, CatalogApp, CdnClient, CloudProvider, CloudRedirect, CloudSettings, ConfigSource,
     ConflictingSoftwareStatus, DenuvoWatchClient, DepotData, DownloadProgress, DownloadedDll,
     EmuTemplateInput, FixEntry, FixStatus, GameLanguageOptions, LoadOutcome, OpenSteamTool, PeArch,
     PortablePaths, PreparedUpdate, ProxyClient, QueueEffect, QueuedDownload, RepackApp, S3Credentials,
     Settings, SteamDiscovery, SteamManifest, SteamServiceState, SteamServiceStatus, SteamStoreClient,
     SteamStoreDetails, SteamUriAction, StoreCapsule, StoreFeatured, VerifiedEntitlement,
-    achievement_image_urls, add_app_files, apply_denuvo_fix, apply_language, clear_previous_token_files,
-    cloud, depot, detect_conflicting_software, detect_pe_arch, discover_steam, download_queue,
-    ensure_toolchain, fetch_achievement_images, fetch_install_dir, fetch_reframework_dll, fetch_windows_arch,
-    fetch_windows_executables, fix_status, install_depot_manifests, install_magicfiles, install_service,
-    installed_app_luas, is_valid_steam_directory, load_cached_denuvo_appids, load_catalog_apps,
-    load_dll_files, load_manifests, open_link, open_steam_uri, overlay_sound_bytes, read_denuvo_appids,
-    read_language_options, remove_app_files, remove_paths, resolve_game_root, restart_steam,
-    run_and_capture_token_request, save_catalog_apps, save_denuvo_appids, scan_crack_files, service_status,
-    set_manifest_updates_enabled, start_steam, stop_steam, toolchain_dlls, uninstall_service,
-    updates_enabled,
+    achievement_image_urls, add_app_files, apply_denuvo_fix, apply_language, back_up_before_overwrite,
+    clear_previous_token_files, cloud, depot, detect_conflicting_software, detect_pe_arch, discover_steam,
+    download_queue, ensure_toolchain, fetch_achievement_images, fetch_install_dir, fetch_reframework_dll,
+    fetch_windows_arch, fetch_windows_executables, fix_status, install_depot_manifests, install_magicfiles,
+    install_service, installed_app_luas, is_steam_running, is_valid_steam_directory,
+    load_cached_denuvo_appids, load_catalog_apps, load_dll_files, load_manifests, missing_depot_manifests,
+    open_link, open_steam_uri, overlay_sound_bytes, read_denuvo_appids, read_language_options,
+    remove_app_files, remove_paths, resolve_game_root, restart_steam, run_and_capture_token_request,
+    save_catalog_apps, save_denuvo_appids, scan_crack_files, service_status, set_manifest_updates_enabled,
+    start_steam, stop_steam, toolchain_dlls, uninstall_service, updates_enabled,
 };
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke, Vec2};
 
@@ -118,6 +118,11 @@ const UPDATE_CHECK_COOLDOWN: Duration = Duration::from_secs(15 * 60);
 /// Shortest gap between network-backed Steam Service status checks triggered by page
 /// switches, so rapidly flipping tabs does not hammer the payload repository.
 const SERVICE_RECHECK_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// How long the depot-manifest guard waits between routine sweeps. Long on purpose: manifests only
+/// vanish through a deliberate act (an account switch, a cleared cache, an uninstall), and Steam
+/// starting or stopping re-checks immediately anyway, so the timer is just the backstop.
+const MANIFEST_RECHECK_COOLDOWN: Duration = Duration::from_secs(600);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Page {
@@ -264,8 +269,20 @@ pub struct DrydockApp {
     download_limiter: RateLimiter,
     search: String,
     steam_directory_draft: String,
+    /// Draft of the folder fresh Drydock downloads install into. Empty means "use Steam's
+    /// `steamapps\common`", which is what Drydock did before the folder was configurable.
+    games_directory_draft: String,
     /// Cache of the last validated draft path and its result, to avoid re-checking every frame.
     validated_steam_path: Option<(String, SteamDirValidation)>,
+    /// Apps already warned about launching uncracked, so the reminder doesn't repeat on every Play
+    /// click. Session-only: a fresh start reminds again, as long as the game is still uncracked.
+    launch_warned: HashSet<u32>,
+    /// Running depot-manifest guard sweep, if any: `(manifests restored, apps repaired)`.
+    manifest_guard_receiver: Option<Receiver<(usize, Vec<u32>)>>,
+    last_manifest_check: Option<Instant>,
+    /// Whether Steam was running at the previous guard tick — a flip means an account switch or a
+    /// client restart may just have emptied `depotcache`, which is the moment worth re-checking.
+    steam_was_running: bool,
     selected_app: Option<u32>,
     /// The game highlighted in the Steam-style Library rail (right-hand overview shows this one).
     library_selected: Option<u32>,
@@ -584,6 +601,7 @@ impl DrydockApp {
             || settings.steam_directory.clone(),
             |path| path.display().to_string(),
         );
+        let games_directory_draft = settings.games_directory.clone();
         let conflicts = detect_conflicting_software(steam.root.as_deref());
         // Prefer the cached Ryuu game list; otherwise show the small embedded catalog instantly
         // while the full list is fetched in the background.
@@ -645,7 +663,12 @@ impl DrydockApp {
             download_limiter: RateLimiter::new(1, Duration::from_secs(60)),
             search: String::new(),
             steam_directory_draft,
+            games_directory_draft,
             validated_steam_path: None,
+            launch_warned: HashSet::new(),
+            manifest_guard_receiver: None,
+            last_manifest_check: None,
+            steam_was_running: is_steam_running(),
             selected_app: None,
             library_selected: None,
             add_game_folder: None,
@@ -1456,6 +1479,7 @@ impl DrydockApp {
             .iter()
             .find(|manifest| manifest.app_id == app_id)
             .map(SteamManifest::install_dir);
+        let games_directory = self.games_directory();
         // Parallel connections (0 = fall back to the default 8) and an optional MB/s cap, from Settings.
         let connections = match self.settings.max_download_connections {
             0 => 8,
@@ -1476,6 +1500,7 @@ impl DrydockApp {
                 kind,
                 steam_root,
                 installed_dir,
+                games_directory,
                 connections,
                 max_bps,
                 &thread_cancel,
@@ -2347,6 +2372,7 @@ impl DrydockApp {
                 self.response_code = std::array::from_fn(|_| String::new());
             }
         }
+        self.guard_depot_manifests();
         let due = self
             .last_service_check
             .is_none_or(|at| at.elapsed() >= SERVICE_RECHECK_COOLDOWN);
@@ -2438,8 +2464,15 @@ impl DrydockApp {
         result
     }
 
+    /// The configured games folder, if one is set — where a fresh Drydock download installs. `None`
+    /// falls back to Steam's `steamapps\common`, see [`depot_install_root`].
+    fn games_directory(&self) -> Option<PathBuf> {
+        path_if_present(&self.settings.games_directory).map(Path::to_path_buf)
+    }
+
     fn save_settings(&mut self) -> bool {
         self.settings.steam_directory = self.steam_directory_draft.trim().to_owned();
+        self.settings.games_directory = self.games_directory_draft.trim().to_owned();
         match self.write_settings() {
             Ok(()) => {
                 self.status = "Settings saved".into();
@@ -3650,6 +3683,9 @@ impl DrydockApp {
     /// Launches a library game: a stored `.exe` (for games activated outside Steam) wins; otherwise
     /// Steam is asked to run the App ID.
     fn launch_library_game(&mut self, app_id: u32) {
+        if !self.confirm_uncracked_launch(app_id) {
+            return;
+        }
         if let Some(path) = self.settings.launch_paths.get(&app_id).cloned() {
             let exe = PathBuf::from(&path);
             let mut command = Command::new(&exe);
@@ -3678,6 +3714,144 @@ impl DrydockApp {
                 self.status_error = true;
             }
         }
+    }
+
+    /// Keeps Steam's `depotcache` stocked for every app Drydock added.
+    ///
+    /// Steam drops an app's manifests on an account switch, a cleared cache or an uninstall and puts
+    /// nothing back, so the unlock quietly stops resolving and the user would have to press Update on
+    /// each game again. This notices instead and restores Drydock's own stored copies — no network,
+    /// no re-packaging upstream.
+    ///
+    /// Two things keep it from being a nuisance. It only looks when something plausibly changed —
+    /// Steam started or stopped — or after [`MANIFEST_RECHECK_COOLDOWN`] as a backstop. And a look is
+    /// one `metadata` call per manifest, never a read: the expensive part, pulling bytes back off
+    /// disk, happens only for the files actually gone.
+    fn guard_depot_manifests(&mut self) {
+        if self.manifest_guard_receiver.is_some() {
+            return;
+        }
+        let Some(steam_root) = self.steam.root.clone() else {
+            return;
+        };
+        let running = is_steam_running();
+        let flipped = running != self.steam_was_running;
+        self.steam_was_running = running;
+        let due = self
+            .last_manifest_check
+            .is_none_or(|at| at.elapsed() >= MANIFEST_RECHECK_COOLDOWN);
+        if !flipped && !due {
+            return;
+        }
+        self.last_manifest_check = Some(Instant::now());
+        let apps: Vec<u32> = self.settings.added_apps.keys().copied().collect();
+        if apps.is_empty() {
+            return;
+        }
+        let store = self.payload_store.clone();
+        let (sender, receiver) = mpsc::channel();
+        self.manifest_guard_receiver = Some(receiver);
+        std::thread::spawn(move || {
+            let mut restored = 0usize;
+            let mut repaired = Vec::new();
+            for app_id in apps {
+                let index = store.manifest_index(app_id);
+                if index.is_empty() {
+                    continue; // nothing stored for this app — Update would have to fetch it
+                }
+                let missing = missing_depot_manifests(&steam_root, &index);
+                if missing.is_empty() {
+                    continue;
+                }
+                // Only now is it worth reading the manifests back into memory.
+                let wanted: std::collections::BTreeMap<String, Vec<u8>> = store
+                    .load(app_id)
+                    .manifests
+                    .into_iter()
+                    .filter(|(name, _)| missing.contains(name))
+                    .collect();
+                if wanted.is_empty() {
+                    continue;
+                }
+                if let Ok(count) = install_depot_manifests(&steam_root, &wanted) {
+                    restored += count;
+                    repaired.push(app_id);
+                }
+            }
+            let _ = sender.send((restored, repaired));
+        });
+    }
+
+    /// Reports a finished guard sweep — but only when it actually put something back. A sweep that
+    /// found everything in place says nothing, which is the normal case.
+    fn poll_manifest_guard(&mut self) {
+        let Some(receiver) = self.manifest_guard_receiver.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok((restored, repaired)) => {
+                self.manifest_guard_receiver = None;
+                if restored > 0 {
+                    self.status = format!(
+                        "Steam had dropped {restored} depot manifest(s) for {} game(s) — restored from \
+                         Drydock's copy.",
+                        repaired.len()
+                    );
+                    self.status_error = false;
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => self.manifest_guard_receiver = None,
+        }
+    }
+
+    /// Warns before launching a game Drydock downloaded that has no crack deployed, because it will
+    /// simply refuse to start. Returns whether the launch should go ahead.
+    ///
+    /// Only Drydock's own installs are checked — a game Steam installed is Steam's business, and an
+    /// unlock Lua covers it there. The question is asked once per app per session: it is a reminder,
+    /// not a gate, and repeating it on every Play click would be noise.
+    fn confirm_uncracked_launch(&mut self, app_id: u32) -> bool {
+        if self.launch_warned.contains(&app_id) {
+            return true;
+        }
+        let Some(game) = self.settings.installed_games.get(&app_id).cloned() else {
+            return true;
+        };
+        // Prefer the folder the launch exe sits in — that is where the cracker deploys — and fall
+        // back to the install root when no exe has been picked yet.
+        let folder = self
+            .settings
+            .launch_paths
+            .get(&app_id)
+            .map(PathBuf::from)
+            .and_then(|exe| exe.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| PathBuf::from(&game.install_dir));
+        if crack_deployed_in(&folder) {
+            return true;
+        }
+        self.launch_warned.insert(app_id);
+        let name = if game.name.is_empty() {
+            self.app_display_name(app_id)
+        } else {
+            game.name.clone()
+        };
+        let answer = rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Warning)
+            .set_title("Game is not cracked")
+            .set_description(format!(
+                "\"{name}\" has no crack in its folder, so it will most likely refuse to start — a \
+                 game downloaded in Drydock needs one (or an activation, for Denuvo titles).\n\n\
+                 Crack it now?"
+            ))
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show();
+        if answer == rfd::MessageDialogResult::Yes {
+            self.crack_drydock_game(app_id);
+            // Cracking runs in the background; the user presses Play again once it reports success.
+            return false;
+        }
+        true
     }
 
     /// Picks the launch `.exe` for a game activated outside Steam, and remembers it so the Play
@@ -3985,23 +4159,13 @@ impl DrydockApp {
             .iter()
             .find(|manifest| manifest.app_id == app_id)
             .map(SteamManifest::install_dir);
+        let games_directory = self.games_directory();
         let (sender, receiver) = mpsc::channel();
         self.download_install_receiver = Some(receiver);
         std::thread::spawn(move || {
             let result = (|| -> Result<AddGameOutcome, String> {
-                // The same install root the depot engine wrote to (mirrors run_depot_job).
-                let install_root = match installed_dir {
-                    Some(dir) => dir,
-                    None => {
-                        let root = steam_root.ok_or_else(|| "Steam folder not found.".to_owned())?;
-                        let installdir = fetch_install_dir(app_id)
-                            .map_err(|error| error.to_string())?
-                            .ok_or_else(|| {
-                                "Steam did not report an install folder for this game.".to_owned()
-                            })?;
-                        root.join("steamapps").join("common").join(installdir)
-                    }
-                };
+                // The very same folder the depot engine wrote to.
+                let install_root = depot_install_root(app_id, installed_dir, games_directory, steam_root)?;
                 let executables = fetch_windows_executables(app_id).map_err(|error| error.to_string())?;
                 // The depot writes straight into the install root; resolve a nested root only if the
                 // launch exe lives in a subfolder.
@@ -5252,6 +5416,84 @@ impl DrydockApp {
         page_heading(ui, "SETTINGS");
         ui.add_space(22.0);
         content_column(ui, CONTENT_WIDTH, |ui| {
+            // Where Drydock installs the games it downloads itself. Empty keeps the old behaviour
+            // (Steam's own library), so an existing setup is unaffected until the user picks a folder.
+            panel(ui, |ui| {
+                section_label(ui, "GAMES FOLDER");
+                ui.add_space(10.0);
+                ui.add_sized(
+                    [ui.available_width(), 42.0],
+                    egui::TextEdit::singleline(&mut self.games_directory_draft)
+                        .hint_text("Install folder for games downloaded in Drydock")
+                        .margin(egui::Margin::symmetric(12, 10)),
+                );
+                let draft = self.games_directory_draft.trim().to_owned();
+                if draft.is_empty() {
+                    let fallback = self.steam.root.as_ref().map_or_else(
+                        || "Steam folder not set — pick a games folder here".to_owned(),
+                        |root| root.join("steamapps").join("common").display().to_string(),
+                    );
+                    ui.label(
+                        RichText::new(format!("Using Steam's library: {fallback}"))
+                            .size(11.0)
+                            .color(MUTED),
+                    );
+                } else if Path::new(&draft).is_dir() {
+                    ui.label(RichText::new("Folder found").size(11.0).color(VERDIGRIS));
+                } else {
+                    ui.label(
+                        RichText::new("Folder does not exist yet — it is created on the first download")
+                            .size(11.0)
+                            .color(AMBER),
+                    );
+                }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(primary_button("SAVE"))
+                        .on_hover_text("Save the folder new downloads install into")
+                        .clicked()
+                    {
+                        self.save_settings();
+                    }
+                    if ui
+                        .add(ghost_button("BROWSE"))
+                        .on_hover_text("Open a file picker to select the games folder")
+                        .clicked()
+                    {
+                        let mut dialog = rfd::FileDialog::new().set_title("Select games folder");
+                        let current = Path::new(self.games_directory_draft.trim());
+                        if current.is_dir() {
+                            dialog = dialog.set_directory(current);
+                        }
+                        if let Some(folder) = dialog.pick_folder() {
+                            self.games_directory_draft = folder.display().to_string();
+                            self.status = "Games folder selected. Save to apply it.".into();
+                            self.status_error = false;
+                        }
+                    }
+                    if !self.games_directory_draft.trim().is_empty()
+                        && ui
+                            .add(ghost_button("USE STEAM LIBRARY"))
+                            .on_hover_text("Clear the folder and install into Steam's library again")
+                            .clicked()
+                    {
+                        self.games_directory_draft.clear();
+                        self.save_settings();
+                    }
+                });
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(
+                        "Only applies to new downloads. A game Steam already has installed is always \
+                         updated where it is.",
+                    )
+                    .size(10.0)
+                    .color(MUTED),
+                );
+            });
+
+            ui.add_space(16.0);
             panel(ui, |ui| {
                 section_label(ui, "STEAM FOLDER");
                 ui.add_space(10.0);
@@ -6252,6 +6494,7 @@ impl eframe::App for DrydockApp {
         self.poll_download();
         self.poll_add_game();
         self.poll_download_install();
+        self.poll_manifest_guard();
         self.poll_cloud_download();
         self.poll_cloud_oauth();
         // Entering a new page re-checks installed games and the Service status, so the
@@ -6828,6 +7071,150 @@ impl egui::Widget for PillButton {
         }
         response
     }
+}
+
+/// One entry in a [`split_button`] dropdown.
+struct MenuItem<'a> {
+    label: &'a str,
+    hover: &'a str,
+}
+
+/// A primary pill with a dropdown arrow on its right: clicking the label runs the main action,
+/// clicking the arrow opens the rest. Returns what was picked — `0` for the main action, `1..` for
+/// `items` in order.
+///
+/// With no items it renders as an ordinary pill and the arrow is left off entirely, so a game with
+/// nothing extra to offer doesn't grow a control that opens an empty menu.
+fn split_button(
+    ui: &mut egui::Ui,
+    id_source: &str,
+    label: &str,
+    hover: &str,
+    enabled: bool,
+    items: &[MenuItem],
+) -> Option<usize> {
+    if items.is_empty() {
+        return ui
+            .add_enabled(enabled, primary_button(label))
+            .on_hover_text(hover)
+            .clicked()
+            .then_some(0);
+    }
+
+    const ARROW_WIDTH: f32 = 30.0;
+    let font = FontId::proportional(10.5);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font.clone(), Color32::WHITE);
+    // Same padding as `PillButton` (16/9) so the two sit flush next to each other in a row.
+    let mut size = galley.size() + Vec2::new(32.0 + ARROW_WIDTH, 18.0);
+    size.y = size.y.max(32.0);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let split_x = rect.right() - ARROW_WIDTH;
+    let main_rect = egui::Rect::from_min_max(rect.min, egui::pos2(split_x, rect.max.y));
+    let arrow_rect = egui::Rect::from_min_max(egui::pos2(split_x, rect.min.y), rect.max);
+
+    // A disabled split button must not swallow clicks, so it only senses hover.
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let id = ui.make_persistent_id(id_source);
+    let main = ui.interact(main_rect, id.with("main"), sense);
+    let arrow = ui.interact(arrow_rect, id.with("arrow"), sense);
+
+    let fade = |response: &egui::Response| {
+        if enabled {
+            ui.ctx().animate_bool(response.id, response.hovered())
+        } else {
+            0.0
+        }
+    };
+    let mut fill_main = lerp_color(ACCENT_DEEP, ACCENT_SOFT, fade(&main));
+    let mut fill_arrow = lerp_color(ACCENT_DEEP, ACCENT_SOFT, fade(&arrow));
+    let mut text_color = Color32::WHITE;
+    if !enabled {
+        fill_main = lerp_color(fill_main, BACKGROUND, 0.45);
+        fill_arrow = lerp_color(fill_arrow, BACKGROUND, 0.45);
+        text_color = MUTED;
+    }
+
+    if ui.is_rect_visible(rect) {
+        let left = egui::CornerRadius {
+            nw: 9,
+            sw: 9,
+            ne: 0,
+            se: 0,
+        };
+        let right = egui::CornerRadius {
+            nw: 0,
+            sw: 0,
+            ne: 9,
+            se: 9,
+        };
+        let painter = ui.painter();
+        painter.rect(main_rect, left, fill_main, Stroke::NONE, egui::StrokeKind::Inside);
+        painter.rect(
+            arrow_rect,
+            right,
+            fill_arrow,
+            Stroke::NONE,
+            egui::StrokeKind::Inside,
+        );
+        // Hairline between the halves, so it reads as two targets rather than one wide button.
+        painter.line_segment(
+            [
+                egui::pos2(split_x, rect.top() + 7.0),
+                egui::pos2(split_x, rect.bottom() - 7.0),
+            ],
+            Stroke::new(1.0, Color32::from_black_alpha(70)),
+        );
+        let galley = painter.layout_no_wrap(label.to_owned(), font, text_color);
+        painter.galley(main_rect.center() - galley.size() / 2.0, galley, text_color);
+        let center = arrow_rect.center();
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(center.x - 4.0, center.y - 2.0),
+                egui::pos2(center.x + 4.0, center.y - 2.0),
+                egui::pos2(center.x, center.y + 3.0),
+            ],
+            text_color,
+            Stroke::NONE,
+        ));
+    }
+    if enabled && (main.hovered() || arrow.hovered()) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    main.clone().on_hover_text(hover);
+
+    // The entries are sized here rather than left to the popup's own justified layout: `PillButton`
+    // grows to the available size in a justified layout, and inside a popup that is the whole screen,
+    // which turns every entry into a screen-tall block. A plain top-down layout plus one shared width
+    // keeps them tidy and correct.
+    let entry_width = items
+        .iter()
+        .map(|item| {
+            ui.painter()
+                .layout_no_wrap(item.label.to_owned(), FontId::proportional(10.5), Color32::WHITE)
+                .size()
+                .x
+        })
+        .fold(rect.width(), f32::max)
+        + 32.0;
+
+    let mut chosen = if enabled && main.clicked() { Some(0) } else { None };
+    egui::Popup::menu(&arrow)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+        .layout(Layout::top_down(Align::Min))
+        .show(|ui| {
+            for (index, item) in items.iter().enumerate() {
+                if ui
+                    .add(ghost_button(item.label).min_size(Vec2::new(entry_width, 34.0)))
+                    .on_hover_text(item.hover)
+                    .clicked()
+                {
+                    chosen = Some(index + 1);
+                }
+            }
+        });
+    chosen
 }
 
 fn page_heading(ui: &mut egui::Ui, title: &str) {
@@ -7614,6 +8001,7 @@ struct LibraryEntry {
 
 /// What a Library card wants the page to do once the frame is laid out (applied after the borrow of
 /// the entries list ends).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LibraryAction {
     /// Highlight this game in the rail (right-hand overview switches to it).
     Select(u32),
@@ -7636,6 +8024,80 @@ enum LibraryAction {
     CrackDrydock(u32),
     /// Delete a Drydock-downloaded game's install folder (confirmed first).
     UninstallDrydock(u32),
+}
+
+/// The Library row's split button: the main action plus its dropdown entries, per row kind.
+///
+/// Playing (or the one thing standing in its way) is rendered separately as the prominent button, so
+/// everything here is the secondary set — maintenance, removal and the store link. Pure, so the
+/// composition can be checked without a frame.
+type LibraryMenuEntry = (&'static str, &'static str, LibraryAction);
+fn library_menu(source: LibrarySource, app_id: u32) -> (LibraryMenuEntry, Vec<LibraryMenuEntry>) {
+    let store_page = (
+        "STORE PAGE",
+        "Open this game's details page",
+        LibraryAction::Details(app_id),
+    );
+    match source {
+        LibrarySource::Available => (
+            (
+                "UPDATE LUA",
+                "Re-fetch and re-install the unlock Lua",
+                LibraryAction::UpdateLua(app_id),
+            ),
+            vec![store_page],
+        ),
+        LibrarySource::SteamInstalled => (
+            (
+                "UPDATE LUA",
+                "Re-fetch and re-install the unlock Lua",
+                LibraryAction::UpdateLua(app_id),
+            ),
+            vec![
+                (
+                    "UNINSTALL GAME",
+                    "Ask Steam to uninstall the game",
+                    LibraryAction::UninstallSteam(app_id),
+                ),
+                (
+                    "REMOVE LUA",
+                    "Delete the unlock Lua from Steam",
+                    LibraryAction::RemoveLua(app_id),
+                ),
+                store_page,
+            ],
+        ),
+        LibrarySource::DrydockInstalled => (
+            (
+                "UPDATE",
+                "Check the depot for updated files and download them",
+                LibraryAction::UpdateDrydock(app_id),
+            ),
+            vec![
+                (
+                    "VERIFY FILES",
+                    "Verify the downloaded files against the depot manifests",
+                    LibraryAction::VerifyDrydock(app_id),
+                ),
+                (
+                    "CRACK",
+                    "Generate and deploy the emu crack into this game's folder",
+                    LibraryAction::CrackDrydock(app_id),
+                ),
+                (
+                    "RELINK .EXE",
+                    "Point PLAY at a different executable",
+                    LibraryAction::SetExe(app_id),
+                ),
+                (
+                    "UNINSTALL",
+                    "Delete the downloaded game folder",
+                    LibraryAction::UninstallDrydock(app_id),
+                ),
+                store_page,
+            ],
+        ),
+    }
 }
 
 /// Height of one game row in the Library rail.
@@ -7787,103 +8249,53 @@ fn library_overview(ui: &mut egui::Ui, entry: &LibraryEntry, body_h: f32) -> Opt
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
                         let mut click = |a: LibraryAction| action = Some(a);
+                        // One prominent action per row — playing, or whatever stands in its way —
+                        // and every other action folded into the split button beside it.
                         match entry.source {
                             LibrarySource::Available => {
                                 if ui
                                     .add(primary_button("INSTALL").min_size(Vec2::new(150.0, bh)))
+                                    .on_hover_text("Ask Steam to install the game")
                                     .clicked()
                                 {
                                     click(LibraryAction::InstallSteam(entry.app_id));
                                 }
-                                if ui
-                                    .add(ghost_button("UPDATE").min_size(Vec2::new(110.0, bh)))
-                                    .on_hover_text("Re-fetch and re-install the unlock Lua")
-                                    .clicked()
-                                {
-                                    click(LibraryAction::UpdateLua(entry.app_id));
-                                }
                             }
-                            LibrarySource::SteamInstalled => {
+                            LibrarySource::DrydockInstalled if entry.launch_path.is_none() => {
                                 if ui
-                                    .add(success_button("▶  PLAY").min_size(Vec2::new(140.0, bh)))
-                                    .clicked()
-                                {
-                                    click(LibraryAction::Launch(entry.app_id));
-                                }
-                                if ui
-                                    .add(ghost_button("UPDATE").min_size(Vec2::new(110.0, bh)))
-                                    .on_hover_text("Re-fetch and re-install the unlock Lua")
-                                    .clicked()
-                                {
-                                    click(LibraryAction::UpdateLua(entry.app_id));
-                                }
-                                if ui
-                                    .add(ghost_button("UNINSTALL").min_size(Vec2::new(120.0, bh)))
-                                    .on_hover_text("Ask Steam to uninstall the game")
-                                    .clicked()
-                                {
-                                    click(LibraryAction::UninstallSteam(entry.app_id));
-                                }
-                                if ui
-                                    .add(ghost_button("REMOVE").min_size(Vec2::new(110.0, bh)))
-                                    .on_hover_text("Delete the unlock Lua from Steam")
-                                    .clicked()
-                                {
-                                    click(LibraryAction::RemoveLua(entry.app_id));
-                                }
-                            }
-                            LibrarySource::DrydockInstalled => {
-                                if entry.launch_path.is_some() {
-                                    if ui
-                                        .add(success_button("▶  PLAY").min_size(Vec2::new(140.0, bh)))
-                                        .clicked()
-                                    {
-                                        click(LibraryAction::Launch(entry.app_id));
-                                    }
-                                } else if ui
-                                    .add(primary_button("SET .EXE").min_size(Vec2::new(140.0, bh)))
+                                    .add(primary_button("SET .EXE").min_size(Vec2::new(150.0, bh)))
                                     .on_hover_text("Link the game's .exe so PLAY can launch it")
                                     .clicked()
                                 {
                                     click(LibraryAction::SetExe(entry.app_id));
                                 }
+                            }
+                            LibrarySource::SteamInstalled | LibrarySource::DrydockInstalled => {
                                 if ui
-                                    .add(ghost_button("VERIFY").min_size(Vec2::new(110.0, bh)))
-                                    .on_hover_text("Verify the downloaded files against the depot manifests")
+                                    .add(success_button("▶  PLAY").min_size(Vec2::new(150.0, bh)))
                                     .clicked()
                                 {
-                                    click(LibraryAction::VerifyDrydock(entry.app_id));
-                                }
-                                if ui
-                                    .add(ghost_button("UPDATE").min_size(Vec2::new(110.0, bh)))
-                                    .on_hover_text("Check the depot for updated files and download them")
-                                    .clicked()
-                                {
-                                    click(LibraryAction::UpdateDrydock(entry.app_id));
-                                }
-                                if ui
-                                    .add(ghost_button("CRACK").min_size(Vec2::new(110.0, bh)))
-                                    .on_hover_text(
-                                        "Generate and deploy the emu crack into this game's folder",
-                                    )
-                                    .clicked()
-                                {
-                                    click(LibraryAction::CrackDrydock(entry.app_id));
-                                }
-                                if ui
-                                    .add(ghost_button("UNINSTALL").min_size(Vec2::new(120.0, bh)))
-                                    .on_hover_text("Delete the downloaded game folder")
-                                    .clicked()
-                                {
-                                    click(LibraryAction::UninstallDrydock(entry.app_id));
+                                    click(LibraryAction::Launch(entry.app_id));
                                 }
                             }
                         }
-                        if ui
-                            .add(ghost_button("STORE PAGE").min_size(Vec2::new(130.0, bh)))
-                            .clicked()
-                        {
-                            click(LibraryAction::Details(entry.app_id));
+                        let (main, entries) = library_menu(entry.source, entry.app_id);
+                        let items: Vec<MenuItem> = entries
+                            .iter()
+                            .map(|(label, hover, _)| MenuItem { label, hover })
+                            .collect();
+                        if let Some(index) = split_button(
+                            ui,
+                            &format!("library_actions_{}", entry.app_id),
+                            main.0,
+                            main.1,
+                            true,
+                            &items,
+                        ) {
+                            click(match index.checked_sub(1) {
+                                None => main.2,
+                                Some(extra) => entries[extra].2,
+                            });
                         }
                     });
                 });
@@ -8050,7 +8462,7 @@ fn build_emu_crack(
     if let Some(sound) = overlay_sound_bytes(cache_dir) {
         files.push((format!("{ss}sounds\\overlay_achievement_notification.wav"), sound));
     }
-    for (rel, bytes) in load_dll_files(arch) {
+    for (rel, bytes) in load_dll_files(cache_dir, arch) {
         files.push((format!("{ss}{rel}"), bytes));
     }
     if include_reframework {
@@ -8081,6 +8493,7 @@ fn build_emu_crack(
 
     match output {
         EmuOutput::Deploy(folder) => {
+            let mut backed_up = 0usize;
             for (relative, contents) in &files {
                 // Skeleton-ZIP entries reach us as author-controlled relative paths, so every
                 // segment goes through the shared safety filter — `..` and a bare `C:` alike would
@@ -8093,6 +8506,13 @@ fn build_emu_crack(
                     std::fs::create_dir_all(parent)
                         .map_err(|error| format!("{}: {error}", parent.display()))?;
                 }
+                // Never destroy a game file: whatever the crack would overwrite is moved to
+                // `<name>.bak` first, so the install can be put back by hand.
+                if back_up_before_overwrite(&target)
+                    .map_err(|error| format!("{}: {error}", target.display()))?
+                {
+                    backed_up += 1;
+                }
                 std::fs::write(&target, contents)
                     .map_err(|error| format!("{}: {error}", target.display()))?;
             }
@@ -8100,9 +8520,14 @@ fn build_emu_crack(
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| folder.display().to_string());
+            let backup_note = if backed_up == 0 {
+                String::new()
+            } else {
+                format!(" {backed_up} original file(s) kept as .bak.")
+            };
             Ok(format!(
                 "Cracked App {app_id} ({}) into {folder_name} — {config_count} configs + \
-                 {dll_count} DLLs{extras_note}, {achievements_count} achievement(s).",
+                 {dll_count} DLLs{extras_note}, {achievements_count} achievement(s).{backup_note}",
                 arch.folder(),
             ))
         }
@@ -8122,12 +8547,45 @@ fn build_emu_crack(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Where a depot download for `app_id` writes.
+///
+/// An install Steam already tracks always wins, so an update or repair lands on the files Steam
+/// knows about rather than starting a second copy elsewhere. Only a fresh install is free to choose,
+/// and then Drydock's configured games folder takes precedence over Steam's `steamapps\common`.
+///
+/// Both the download itself and the library registration that follows it resolve the folder through
+/// here, so they can't disagree about where the game ended up.
+fn depot_install_root(
+    app_id: u32,
+    installed_dir: Option<PathBuf>,
+    games_directory: Option<PathBuf>,
+    steam_root: Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    if let Some(dir) = installed_dir {
+        return Ok(dir);
+    }
+    let installdir = fetch_install_dir(app_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Steam did not report an install folder for this game.".to_owned())?;
+    match games_directory {
+        Some(games) => Ok(games.join(installdir)),
+        None => {
+            let root = steam_root.ok_or_else(|| {
+                "No games folder is set and Steam was not found. Set either one in Settings.".to_owned()
+            })?;
+            Ok(root.join("steamapps").join("common").join(installdir))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_depot_job(
     app_id: u32,
     name: &str,
     kind: DownloadKind,
     steam_root: Option<PathBuf>,
     installed_dir: Option<PathBuf>,
+    games_directory: Option<PathBuf>,
     connections: usize,
     max_bps: Option<u64>,
     cancel: &AtomicBool,
@@ -8148,16 +8606,7 @@ fn run_depot_job(
         ));
     }
 
-    let install_root = match installed_dir {
-        Some(dir) => dir,
-        None => {
-            let root = steam_root.ok_or_else(|| "Steam folder not found. Set it in Settings.".to_owned())?;
-            let installdir = fetch_install_dir(app_id)
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| "Steam did not report an install folder for this game.".to_owned())?;
-            root.join("steamapps").join("common").join(installdir)
-        }
-    };
+    let install_root = depot_install_root(app_id, installed_dir, games_directory, steam_root)?;
 
     let forward = |progress: DownloadProgress| {
         let _ = sender.send(DownloadUpdate::Progress(progress));
@@ -9047,7 +9496,7 @@ fn details_features(ui: &mut egui::Ui, details: &SteamStoreDetails, activation_r
 }
 
 /// A button the user pressed on an app's details page.
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DetailsAction {
     None,
     /// Add the normal unlock Lua so Steam installs/updates the game to its latest build.
@@ -9107,6 +9556,66 @@ struct DetailsState {
     busy: bool,
 }
 
+/// The Add-to-Steam split button's main action: label and hover text. Adding and updating are the
+/// same operation ([`DetailsAction::AddToSteam`]) — only the wording changes once the app is added.
+fn add_to_steam_main(is_added: bool) -> (&'static str, &'static str) {
+    if is_added {
+        (
+            "UPDATE VERSION IN STEAM",
+            "Re-fetch and re-install the unlock Lua and its depot manifests",
+        )
+    } else {
+        (
+            "ADD LATEST VERSION TO STEAM",
+            "Add the normal unlock so Steam installs the latest build",
+        )
+    }
+}
+
+/// The dropdown entries beside that main action. The cracked variant is offered only when a
+/// build-locked Denuvo fix exists for the app, and removing only once something is actually added —
+/// so the arrow appears exactly when there is a real choice to make.
+fn add_to_steam_extras(is_added: bool, has_denuvo: bool) -> Vec<(&'static str, &'static str, DetailsAction)> {
+    let mut extras = Vec::new();
+    if has_denuvo {
+        extras.push((
+            "ADD CRACKED VERSION TO STEAM",
+            "Add the build-locked unlock that pins the game to the cracked build",
+            DetailsAction::AddCracked,
+        ));
+    }
+    if is_added {
+        extras.push((
+            "REMOVE VERSION FROM STEAM",
+            "Remove the unlock Lua and its depot manifests again",
+            DetailsAction::RemoveFromSteam,
+        ));
+    }
+    extras
+}
+
+/// The repack sources as dropdown entries, one per repacker. Named only when there is more than one
+/// to tell apart.
+fn repack_entries(repackers: &[String]) -> Vec<(String, String, DetailsAction)> {
+    let single = repackers.len() == 1;
+    repackers
+        .iter()
+        .enumerate()
+        .map(|(index, repacker)| {
+            let label = if single {
+                "DOWNLOAD REPACK".to_owned()
+            } else {
+                format!("DOWNLOAD REPACK ({repacker})")
+            };
+            (
+                label,
+                format!("Open {repacker} in your browser"),
+                DetailsAction::Download(index),
+            )
+        })
+        .collect()
+}
+
 /// Renders the details-page action buttons (the hub for a game) and returns the one that was
 /// clicked: add the latest or cracked unlock, apply the Denuvo fix, download a repack, or jump
 /// to Activation.
@@ -9121,36 +9630,48 @@ fn steam_button_row(
     let busy_fix = panels.fix.is_some_and(|fix| fix.busy);
     let has_denuvo = panels.fix.is_some_and(|fix| fix.denuvo.is_some());
 
-    // Add-to-Steam workflow: latest and (when a Denuvo fix exists) cracked, or Update/Remove once added.
-    if state.is_added {
-        if ui
-            .add_enabled(!state.busy, primary_button("UPDATE"))
-            .on_hover_text("Re-fetch and re-install the latest unlock Lua")
-            .clicked()
-        {
-            action = DetailsAction::AddToSteam;
+    // The whole Add-to-Steam workflow plus the repack sources, collapsed into one split button:
+    // adding (or, once added, updating) the latest unlock is the primary action and everything else
+    // hangs off the dropdown, so the row stays two controls wide however many repackers there are.
+    let mut extras: Vec<(String, String, DetailsAction)> = Vec::new();
+    if state.is_added || state.service_current {
+        extras.extend(
+            add_to_steam_extras(state.is_added, has_denuvo)
+                .into_iter()
+                .map(|(label, hover, action)| (label.to_owned(), hover.to_owned(), action)),
+        );
+    }
+    if let Some(repack) = panels.repack {
+        extras.extend(repack_entries(&repack.repackers));
+    }
+    let items: Vec<MenuItem> = extras
+        .iter()
+        .map(|(label, hover, _)| MenuItem { label, hover })
+        .collect();
+
+    if state.is_added || state.service_current {
+        let (main_label, main_hover) = add_to_steam_main(state.is_added);
+        if let Some(index) = split_button(ui, "add_to_steam", main_label, main_hover, !state.busy, &items) {
+            action = match index.checked_sub(1) {
+                None => DetailsAction::AddToSteam,
+                Some(extra) => extras[extra].2,
+            };
         }
-        if ui
-            .add_enabled(!state.busy, ghost_button("REMOVE FROM STEAM"))
-            .clicked()
-        {
-            action = DetailsAction::RemoveFromSteam;
-        }
-    } else if state.service_current {
-        if ui
-            .add_enabled(!state.busy, primary_button("ADD LATEST VERSION TO STEAM"))
-            .on_hover_text("Add the normal unlock so Steam installs the latest build")
-            .clicked()
-        {
-            action = DetailsAction::AddToSteam;
-        }
-        if has_denuvo
-            && ui
-                .add_enabled(!state.busy, primary_button("ADD CRACKED VERSION TO STEAM"))
-                .on_hover_text("Add the build-locked unlock that pins the game to the cracked build")
-                .clicked()
-        {
-            action = DetailsAction::AddCracked;
+    } else if !items.is_empty() {
+        // Without the Steam Service nothing can be added, so installing it becomes the main action —
+        // the repack sources still ride along in the dropdown rather than disappearing.
+        if let Some(index) = split_button(
+            ui,
+            "add_to_steam",
+            "INSTALL STEAM SERVICE",
+            "The Steam Service must be installed before adding games. Click to install it now.",
+            !state.busy,
+            &items,
+        ) {
+            action = match index.checked_sub(1) {
+                None => DetailsAction::InstallService,
+                Some(extra) => extras[extra].2,
+            };
         }
     } else {
         // The Steam Service must be installed before any app can be added, so offer to install it
@@ -9190,25 +9711,6 @@ fn steam_button_row(
             };
             if response.clicked() {
                 action = DetailsAction::ApplyDenuvoFix;
-            }
-        }
-    }
-
-    // Download the game as an external repack — one button per repacker source.
-    if let Some(repack) = panels.repack {
-        let single = repack.repackers.len() == 1;
-        for (index, repacker) in repack.repackers.iter().enumerate() {
-            let label = if single {
-                "DOWNLOAD REPACK".to_owned()
-            } else {
-                format!("DOWNLOAD REPACK ({repacker})")
-            };
-            if ui
-                .add(ghost_button(&label))
-                .on_hover_text(format!("Open {repacker} in your browser"))
-                .clicked()
-            {
-                action = DetailsAction::Download(index);
             }
         }
     }
@@ -9574,6 +10076,18 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// Whether a crack has been deployed into `folder`.
+///
+/// Only that one folder is looked at, never the tree below it: this runs on a Play click, and
+/// walking a multi-gigabyte install would stall the UI. The cracker deploys next to the exe, so the
+/// shallow check is the accurate one anyway.
+fn crack_deployed_in(folder: &Path) -> bool {
+    folder.join("steam_settings").is_dir()
+        || CRACK_ARTIFACT_NAMES
+            .iter()
+            .any(|artifact| folder.join(artifact).exists())
+}
+
 fn path_if_present(value: &str) -> Option<&Path> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| Path::new(trimmed))
@@ -9677,6 +10191,144 @@ mod ui_tests {
         assert_eq!(characters[6], "X");
         assert_eq!(characters[7], "Y");
         assert_eq!(focus, 7);
+    }
+
+    #[test]
+    fn add_to_steam_main_action_switches_wording_once_added() {
+        assert_eq!(add_to_steam_main(false).0, "ADD LATEST VERSION TO STEAM");
+        assert_eq!(add_to_steam_main(true).0, "UPDATE VERSION IN STEAM");
+    }
+
+    #[test]
+    fn add_to_steam_dropdown_only_offers_what_applies() {
+        let labels = |is_added, has_denuvo| {
+            add_to_steam_extras(is_added, has_denuvo)
+                .into_iter()
+                .map(|(label, _, _)| label)
+                .collect::<Vec<_>>()
+        };
+        // Nothing extra to choose: the button stays a plain pill with no arrow.
+        assert!(labels(false, false).is_empty());
+        assert_eq!(labels(false, true), ["ADD CRACKED VERSION TO STEAM"]);
+        assert_eq!(labels(true, false), ["REMOVE VERSION FROM STEAM"]);
+        assert_eq!(
+            labels(true, true),
+            ["ADD CRACKED VERSION TO STEAM", "REMOVE VERSION FROM STEAM"]
+        );
+    }
+
+    #[test]
+    fn add_to_steam_dropdown_indices_map_onto_their_actions() {
+        // `split_button` returns 0 for the main action and 1.. for the entries in order, so the
+        // offset the caller applies has to line up with this list.
+        let extras = add_to_steam_extras(true, true);
+        assert_eq!(extras[0].2, DetailsAction::AddCracked);
+        assert_eq!(extras[1].2, DetailsAction::RemoveFromSteam);
+    }
+
+    #[test]
+    fn an_existing_steam_install_outranks_the_configured_games_folder() {
+        // Otherwise an update would start a second copy of the game somewhere else.
+        let existing = PathBuf::from("D:/Steam/steamapps/common/Game");
+        let root = depot_install_root(
+            480,
+            Some(existing.clone()),
+            Some(PathBuf::from("E:/Drydock Games")),
+            Some(PathBuf::from("D:/Steam")),
+        );
+        assert_eq!(root.expect("an installed game resolves offline"), existing);
+    }
+
+    #[test]
+    fn a_folder_counts_as_cracked_by_its_artifacts_alone() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let folder = directory.path();
+        assert!(!crack_deployed_in(folder));
+
+        fs::write(folder.join("readme.txt"), b"nothing to see").expect("write");
+        assert!(!crack_deployed_in(folder), "an unrelated file is not a crack");
+
+        fs::write(folder.join("coldloader.dll"), b"stub").expect("write");
+        assert!(crack_deployed_in(folder));
+    }
+
+    #[test]
+    fn steam_settings_alone_marks_a_folder_as_cracked() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let folder = directory.path();
+        fs::create_dir(folder.join("steam_settings")).expect("mkdir");
+        assert!(crack_deployed_in(folder));
+    }
+
+    #[test]
+    fn a_menu_entry_never_swells_to_fill_the_popup() {
+        // Regression: `PillButton` grows to the available size in a justified layout, and a popup's
+        // available height is the whole screen — which turned every dropdown entry into a
+        // screen-tall block. Entries must stay button-sized.
+        let mut heights = Vec::new();
+        egui::__run_test_ui(|ui| {
+            ui.allocate_ui_with_layout(Vec2::new(260.0, 600.0), Layout::top_down(Align::Min), |ui| {
+                let response =
+                    ui.add(ghost_button("REMOVE VERSION FROM STEAM").min_size(Vec2::new(240.0, 34.0)));
+                heights.push(response.rect.height());
+            });
+        });
+        for height in heights {
+            assert!(height < 60.0, "a dropdown entry grew to {height} px tall");
+        }
+    }
+
+    #[test]
+    fn a_single_repacker_is_not_named_in_its_label() {
+        let one = repack_entries(&["FitGirl".to_owned()]);
+        assert_eq!(one[0].0, "DOWNLOAD REPACK");
+        assert_eq!(one[0].2, DetailsAction::Download(0));
+
+        let two = repack_entries(&["FitGirl".to_owned(), "DODI".to_owned()]);
+        assert_eq!(two[0].0, "DOWNLOAD REPACK (FitGirl)");
+        assert_eq!(two[1].0, "DOWNLOAD REPACK (DODI)");
+        assert_eq!(
+            two[1].2,
+            DetailsAction::Download(1),
+            "the index must address the source"
+        );
+    }
+
+    #[test]
+    fn every_library_row_keeps_its_actions_reachable() {
+        // Nothing may be dropped by the regrouping: each row's main action plus its dropdown has to
+        // still cover everything that row can do.
+        for (source, expected) in [
+            (
+                LibrarySource::Available,
+                vec![LibraryAction::UpdateLua(7), LibraryAction::Details(7)],
+            ),
+            (
+                LibrarySource::SteamInstalled,
+                vec![
+                    LibraryAction::UpdateLua(7),
+                    LibraryAction::UninstallSteam(7),
+                    LibraryAction::RemoveLua(7),
+                    LibraryAction::Details(7),
+                ],
+            ),
+            (
+                LibrarySource::DrydockInstalled,
+                vec![
+                    LibraryAction::UpdateDrydock(7),
+                    LibraryAction::VerifyDrydock(7),
+                    LibraryAction::CrackDrydock(7),
+                    LibraryAction::SetExe(7),
+                    LibraryAction::UninstallDrydock(7),
+                    LibraryAction::Details(7),
+                ],
+            ),
+        ] {
+            let (main, extras) = library_menu(source, 7);
+            let mut actions = vec![main.2];
+            actions.extend(extras.iter().map(|(_, _, action)| *action));
+            assert_eq!(actions, expected);
+        }
     }
 
     #[test]

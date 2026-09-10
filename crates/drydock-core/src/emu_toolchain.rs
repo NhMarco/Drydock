@@ -1,14 +1,16 @@
-//! Fetches the Cold Client Loader emu toolchain (the shared DLLs) straight from the public GitHub
-//! releases and caches it in the Drydock data dir, so a generated template can ship the real emu
-//! binaries — no Steam account, no manual skeleton. **Both** architectures are downloaded once; the
-//! caller then picks the set matching the game's exe. Mirrors the download list in
-//! `cold_auto_cracker.py`:
+//! Fetches the Cold Client Loader emu toolchain (the shared DLLs) and caches it in the Drydock data
+//! dir, so a generated template can ship the real emu binaries — no Steam account, no manual
+//! skeleton. **Both** architectures are downloaded once; the caller then picks the set matching the
+//! game's exe.
 //!
-//!   * `coldloader-proxy-{arch}.zip`  → `version.dll` (the loader proxy; deployed as version.dll or
-//!     winmm.dll)
-//!   * `coldloader-release-{arch}.zip`→ `coldloader.dll`
-//!   * `emu-win-release.7z` (gbe_fork)→ the experimental `steamclient(64).dll` +
-//!     `GameOverlayRenderer(64).dll` + `steam_api(64).dll`
+//!   * the public Drydock repo's `emu/` folder → `version.dll` (the loader proxy; deployed as
+//!     version.dll or winmm.dll), `coldloader.dll`, and the SteamStub loader that goes into
+//!     `steam_settings\load_dlls\`
+//!   * `emu-win-release.7z` (gbe_fork, from its own GitHub release) → the experimental
+//!     `steamclient(64).dll` + `GameOverlayRenderer(64).dll` + `steam_api(64).dll`
+//!
+//! Hosting the first group ourselves means a DLL can be swapped by pushing to the repo, without a
+//! Drydock release and without depending on a third party's release assets staying put.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,14 +21,22 @@ use thiserror::Error;
 use crate::emu_template::PeArch;
 use crate::version::user_agent;
 
-const PROXY_X64: &str =
-    "https://github.com/denuvosanctuary/coldloader-proxy/releases/latest/download/coldloader-proxy-x64.zip";
-const PROXY_X86: &str =
-    "https://github.com/denuvosanctuary/coldloader-proxy/releases/latest/download/coldloader-proxy-x86.zip";
-const LOADER_X64: &str =
-    "https://github.com/denuvosanctuary/coldloader/releases/latest/download/coldloader-release-x64.zip";
-const LOADER_X86: &str =
-    "https://github.com/denuvosanctuary/coldloader/releases/latest/download/coldloader-release-x86.zip";
+/// The `emu/` folder of the public Drydock repository, which hosts every emulator DLL except the
+/// gbe_fork ones. Served raw over HTTPS: the repository is public, so no token and no proxy detour.
+const EMU_BASE: &str = "https://raw.githubusercontent.com/NhMarco/Drydock/main/emu";
+
+/// What to fetch from [`EMU_BASE`], as `(arch subfolder, file name in the repo, cached file name)`.
+/// The repo distinguishes architectures by suffix; the cache uses one subfolder per architecture, so
+/// the deployed names stay the plain ones Cold Client Loader expects.
+const REPO_DLLS: &[(&str, &str, &str)] = &[
+    ("x64", "version_x64.dll", "version.dll"),
+    ("x64", "coldloader_x64.dll", "coldloader.dll"),
+    ("x64", "steamstub_x64.dll", "steamstub_x64.dll"),
+    ("x86", "version_x32.dll", "version.dll"),
+    ("x86", "coldloader_x32.dll", "coldloader.dll"),
+    ("x86", "steamstub_x32.dll", "steamstub_x32.dll"),
+];
+
 const GBE: &str = "https://github.com/Detanup01/gbe_fork/releases/latest/download/emu-win-release.7z";
 /// praydog's REFramework nightly — the latest `REFramework.zip`, which contains `dinput8.dll`. Used
 /// only when the user opts a game in (some Denuvo/RE-Engine titles need it next to the exe).
@@ -40,8 +50,8 @@ const OVERLAY_SOUND_NAME: &str = "overlay_achievement_notification.wav";
 /// Written once the toolchain has been fully extracted, so a later run skips the download.
 // Bumped when the set/variant of extracted DLLs changes, so an existing cache re-extracts instead of
 // keeping stale files (v2: big `steamclient_experimental` steamclient + overlay; v3: added the gbe
-// experimental `steam_api`).
-const READY_MARKER: &str = ".ready3";
+// experimental `steam_api`; v4: loader/coldloader now come from the Drydock repo, plus steamstub).
+const READY_MARKER: &str = ".ready4";
 
 #[derive(Debug, Error)]
 pub enum EmuToolchainError {
@@ -70,15 +80,12 @@ pub struct ToolchainDll {
     pub source: PathBuf,
 }
 
-/// The DLLs the cache must hold, as `(arch subfolder, file name)`.
+/// The DLLs the cache must hold beyond [`REPO_DLLS`], as `(arch subfolder, file name)` — these are
+/// the ones extracted from the gbe_fork archive.
 const CACHED_DLLS: &[(&str, &str)] = &[
-    ("x64", "version.dll"),
-    ("x64", "coldloader.dll"),
     ("x64", "steamclient64.dll"),
     ("x64", "GameOverlayRenderer64.dll"),
     ("x64", "steam_api64.dll"),
-    ("x86", "version.dll"),
-    ("x86", "coldloader.dll"),
     ("x86", "steamclient.dll"),
     ("x86", "GameOverlayRenderer.dll"),
     ("x86", "steam_api.dll"),
@@ -93,6 +100,9 @@ pub fn toolchain_ready(data_root: &Path) -> bool {
         && CACHED_DLLS
             .iter()
             .all(|(arch, dll)| root.join(arch).join(dll).is_file())
+        && REPO_DLLS
+            .iter()
+            .all(|(arch, _, cached)| root.join(arch).join(cached).is_file())
         && root.join("shared").join(OVERLAY_SOUND_NAME).is_file()
 }
 
@@ -103,13 +113,26 @@ pub fn overlay_sound_bytes(data_root: &Path) -> Option<Vec<u8>> {
     fs::read(data_root.join("emu").join("shared").join(OVERLAY_SOUND_NAME)).ok()
 }
 
-/// The embedded SteamStub loader as `(relative path under steam_settings, bytes)` — the one matching
-/// the game's bitness. Re-exported from [`crate::emu_load_dlls`] so the cracker adds it alongside the
-/// toolchain. gbe_fork loads whatever it finds in `load_dlls`, so exactly one loader goes in there.
+/// The cached SteamStub loader for `arch` as `(relative path under steam_settings, bytes)`. gbe_fork
+/// loads whatever it finds in `load_dlls`, so exactly one loader goes in there. Returns nothing when
+/// the file is missing from the cache (e.g. antivirus removed it) — the caller still produces a
+/// usable crack, just without the SteamStub step.
 #[must_use]
-pub fn load_dll_files(arch: PeArch) -> Vec<(String, Vec<u8>)> {
-    let (name, bytes) = crate::emu_load_dlls::load_dll_stub(arch);
-    vec![(format!("load_dlls\\{name}"), bytes)]
+pub fn load_dll_files(data_root: &Path, arch: PeArch) -> Vec<(String, Vec<u8>)> {
+    let name = steamstub_name(arch);
+    match fs::read(data_root.join("emu").join(arch.folder()).join(name)) {
+        Ok(bytes) => vec![(format!("load_dlls\\{name}"), bytes)],
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The SteamStub loader's file name for `arch`, identical in the repo and in the cache.
+#[must_use]
+pub fn steamstub_name(arch: PeArch) -> &'static str {
+    match arch {
+        PeArch::X64 => "steamstub_x64.dll",
+        PeArch::X86 => "steamstub_x32.dll",
+    }
 }
 
 /// Ensures both architectures of the emu toolchain are cached under `data_root/emu/`. Downloads and
@@ -131,25 +154,11 @@ pub fn ensure_toolchain(data_root: &Path, force: bool) -> Result<PathBuf, EmuToo
 
     let client = http_client()?;
 
-    // The loader proxy (version.dll) and the coldloader.dll, per architecture, from their ZIPs.
-    for (arch, proxy_url, loader_url) in [("x64", PROXY_X64, LOADER_X64), ("x86", PROXY_X86, LOADER_X86)] {
-        let proxy_zip = get_archive(
-            &client,
-            proxy_url,
-            &archives.join(format!("coldloader-proxy-{arch}.zip")),
-            force,
-        )?;
-        let version_dll = zip_file_by_name(&proxy_zip, "version.dll")?;
-        write_file(&root.join(arch).join("version.dll"), &version_dll)?;
-
-        let loader_zip = get_archive(
-            &client,
-            loader_url,
-            &archives.join(format!("coldloader-release-{arch}.zip")),
-            force,
-        )?;
-        let coldloader_dll = zip_file_by_name(&loader_zip, "coldloader.dll")?;
-        write_file(&root.join(arch).join("coldloader.dll"), &coldloader_dll)?;
+    // The loader proxy, coldloader.dll and the SteamStub loader come straight from the Drydock repo
+    // as plain files — no archive to unpack, so a replaced DLL there reaches users on the next fetch.
+    for (arch, repo_name, cached_name) in REPO_DLLS {
+        let bytes = download(&client, &format!("{EMU_BASE}/{repo_name}"))?;
+        write_file(&root.join(arch).join(cached_name), &bytes)?;
     }
 
     // gbe_fork ships all steamclient DLLs in one 7z; cache the archive, then extract the four we need.
@@ -430,14 +439,39 @@ mod tests {
 
     #[test]
     fn load_dlls_gets_exactly_the_loader_for_the_architecture() {
+        let temp = tempfile::tempdir().expect("tempdir");
         for (arch, expected) in [
             (PeArch::X64, r"load_dlls\steamstub_x64.dll"),
             (PeArch::X86, r"load_dlls\steamstub_x32.dll"),
         ] {
-            let files = load_dll_files(arch);
+            let dir = temp.path().join("emu").join(arch.folder());
+            fs::create_dir_all(&dir).expect("cache dir");
+            fs::write(dir.join(steamstub_name(arch)), b"stub").expect("cache file");
+
+            let files = load_dll_files(temp.path(), arch);
             assert_eq!(files.len(), 1, "exactly one loader belongs in load_dlls");
             assert_eq!(files[0].0, expected);
-            assert!(!files[0].1.is_empty());
+            assert_eq!(files[0].1, b"stub");
+        }
+    }
+
+    #[test]
+    fn a_missing_cached_loader_is_skipped_rather_than_failing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        assert!(load_dll_files(temp.path(), PeArch::X64).is_empty());
+    }
+
+    #[test]
+    fn every_repo_dll_lands_in_an_architecture_folder() {
+        for (arch, repo_name, cached) in REPO_DLLS {
+            assert!(*arch == "x64" || *arch == "x86", "unexpected arch folder {arch}");
+            let suffix = if *arch == "x64" { "_x64.dll" } else { "_x32.dll" };
+            assert!(
+                repo_name.ends_with(suffix),
+                "{repo_name} does not carry the {arch} suffix, so it would be cached under the wrong \
+                 architecture"
+            );
+            assert!(cached.ends_with(".dll"));
         }
     }
 }
