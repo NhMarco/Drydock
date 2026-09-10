@@ -2,6 +2,25 @@
 
 All notable Drydock changes are documented here. The project follows semantic versioning.
 
+## 1.0.1 - 2026-09-10
+
+Hotfix for unlocks that were installed incomplete.
+
+- **Unlock Lua files were being truncated.** The proxy stripped every single-argument
+  `addappid(<id>)` line on the assumption that it was always a depot with no decryption key. It is
+  also how an app declares ownership of itself and its DLC, so those lines were deleted too — one
+  title went from 24 lines to 2, with the app's own ID gone. A bare line is now only dropped when the
+  same file pins that ID to a manifest and supplies no key for it, which is the case the guard was
+  written for. **Re-add or update any game added before this release**; the Lua already on disk is
+  not repaired retroactively.
+- Adding or updating a game now also copies its depot manifests into `Steam/depotcache`, so Steam
+  installs the exact build the unlock pins instead of resolving one itself.
+- Both files are additionally kept in Drydock's own store under the data directory, and restored
+  before an install. Steam deletes an app's manifests when it is uninstalled, so this is what makes a
+  reinstall work without fetching the depot package again.
+- The library reads installed unlock Lua files from `config/stplug-in` directly, so games no longer
+  disappear from it when the settings record of them is lost.
+
 ## 1.0.0 - 2026-09-10
 
 First release under the Drydock name. The version resets to 1.0.0 with the new project and its own
