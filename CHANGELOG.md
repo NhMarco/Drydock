@@ -2,6 +2,33 @@
 
 All notable Drydock changes are documented here. The project follows semantic versioning.
 
+## 1.0.0 - 2026-09-10
+
+First release under the Drydock name. The version resets to 1.0.0 with the new project and its own
+release channel; entries below this one belong to the predecessor and are kept for history.
+
+- Renamed the project throughout: binary, crates, data directory (`%LOCALAPPDATA%\Drydock`), request
+  headers, environment variables and release channel.
+- New visual identity: a palette built from brass, verdigris and rust on slate, replacing a scheme
+  that had used Steam's own brand blue, plus a new application mark.
+- **Configuration is now resolvable at runtime.** `DRYDOCK_PROXY_BASE_URL`, `DRYDOCK_HMAC_SECRET` and
+  `DRYDOCK_UPDATE_REPOSITORY` resolve from environment → settings → build-time default, so a stock
+  build can be pointed at a self-hosted proxy without rebuilding. Settings ▸ Proxy / Self-hosting
+  exposes them, and `--config` prints what resolved and from where, with secrets redacted.
+- The library now reads installed unlock Lua files from `config/stplug-in` directly instead of
+  trusting only its own settings record, so games no longer disappear when that record is lost.
+- Settings are loaded recoveringly: a corrupt or half-written `settings.json` falls back to its
+  backup, and an unsalvageable file is quarantined instead of being silently replaced by defaults.
+- Crash reports are written to `crash.log` in the data directory. Release builds have no console, so
+  panics previously left no trace at all.
+- Depot downloads check free space before writing, skip the resume verification for files they just
+  created, and reject archive paths that could escape the install root.
+- Caches are bounded: the image cache gained a stable key, a memory budget and an age sweep; the
+  store cache is swept on startup; the proxy's file cache evicts expired entries.
+- Proxy: per-provider credentials are only required when that provider is enabled, concurrent misses
+  for the same file collapse into one upstream fetch, and the hourly gamelist refresh no longer
+  round-trips ~100 MB of JSON through an extra parse.
+
 ## 2.1.1 - 2026-08-17
 
 - Always render the app in its dark theme regardless of the operating system's light/dark setting, fixing white search fields, combo boxes, scrollbars, and the panel separator on machines set to a light system theme.

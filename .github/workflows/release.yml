@@ -45,7 +45,8 @@ jobs:
           libgl1-mesa-dev libwayland-dev libx11-dev libxkbcommon-dev libxi-dev pkg-config
       - name: Build release with its update channel
         env:
-          # Shipped binaries check the public release repo for updates, not this private repo.
+          # The channel shipped binaries check for updates. Same repository as the source now, so a
+          # fork only has to change this line (or set DRYDOCK_UPDATE_REPOSITORY at runtime).
           DRYDOCK_UPDATE_REPOSITORY: NhMarco/Drydock
           # Baked into the shipped binary so it can reach the self-hosted proxy and sign its
           # requests. The proxy holds the steamtools key and GitHub token server-side, so the app
