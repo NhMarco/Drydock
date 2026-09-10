@@ -115,6 +115,9 @@ jobs:
           # needed back when this published into a *different* repository, which github.token
           # cannot do.)
           GH_TOKEN: ${{ github.token }}
+        # `--repo` is required: this job only downloads artifacts and never checks the repository
+        # out, so `gh` has no git directory to infer the target from. `github.repository` keeps that
+        # correct in forks too.
         run: >-
           gh release create "$GITHUB_REF_NAME" dist/*
-          --title "$GITHUB_REF_NAME" --generate-notes
+          --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
