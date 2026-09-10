@@ -27,7 +27,7 @@ zip.workspace = true
 # Depot download (DepotDownloader-equivalent): AES depot-chunk decryption + VZip(LZMA)/deflate.
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
-flate2 = "1"
+flate2.workspace = true
 lzma-rs = "0.3"
 zstd = "0.13"
 # Emu toolchain: gbe_fork ships its steamclient DLLs in a 7z archive.

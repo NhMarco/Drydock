@@ -19,6 +19,11 @@ base64 = "0.22"
 eframe = { version = "0.36.1", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 egui = "0.36.1"
 egui_extras = { version = "0.36.1", default-features = false, features = ["http", "image"] }
+# zlib-rs backend, not flate2's default miniz_oxide: Windows Explorer's built-in ZIP extractor
+# ("zipfldr") fails with "unexpected error" on miniz_oxide deflate streams past roughly 13 MiB of
+# compressible input, which silently drops steamclient64.dll from an exported crack. zlib-rs
+# streams extract fine. Also applies to `zip`, which compresses through flate2.
+flate2 = { version = "1", features = ["zlib-rs"] }
 hmac = "0.12"
 html-escape = "0.2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }

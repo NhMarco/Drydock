@@ -8043,7 +8043,8 @@ fn build_emu_crack(
     let dll_count = files.len() - config_count;
 
     // Static extras that complete the template like the reference tokenfiles: the gbe_fork overlay
-    // sound, the generic x64 load_dlls stubs, and (opt-in) the REFramework nightly. `ss` is the
+    // sound, the SteamStub loader for this bitness in load_dlls, and (opt-in) the REFramework
+    // nightly. `ss` is the
     // template's `steam_settings\` folder (already carries the exe-subfolder prefix).
     let ss = input.steam_settings_dir();
     if let Some(sound) = overlay_sound_bytes(cache_dir) {

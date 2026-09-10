@@ -103,18 +103,13 @@ pub fn overlay_sound_bytes(data_root: &Path) -> Option<Vec<u8>> {
     fs::read(data_root.join("emu").join("shared").join(OVERLAY_SOUND_NAME)).ok()
 }
 
-/// The embedded generic x64 `load_dlls` stub DLLs as `(relative path under steam_settings, bytes)`,
-/// for x64 deploys. Re-exported from [`crate::emu_load_dlls`] so the cracker adds them alongside the
-/// toolchain. x86 games get none (the stubs are x64-only).
+/// The embedded SteamStub loader as `(relative path under steam_settings, bytes)` — the one matching
+/// the game's bitness. Re-exported from [`crate::emu_load_dlls`] so the cracker adds it alongside the
+/// toolchain. gbe_fork loads whatever it finds in `load_dlls`, so exactly one loader goes in there.
 #[must_use]
 pub fn load_dll_files(arch: PeArch) -> Vec<(String, Vec<u8>)> {
-    if arch != PeArch::X64 {
-        return Vec::new();
-    }
-    crate::emu_load_dlls::load_dll_stubs()
-        .into_iter()
-        .map(|(name, bytes)| (format!("load_dlls\\{name}"), bytes))
-        .collect()
+    let (name, bytes) = crate::emu_load_dlls::load_dll_stub(arch);
+    vec![(format!("load_dlls\\{name}"), bytes)]
 }
 
 /// Ensures both architectures of the emu toolchain are cached under `data_root/emu/`. Downloads and
@@ -427,4 +422,22 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), EmuToolchainError> {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_dlls_gets_exactly_the_loader_for_the_architecture() {
+        for (arch, expected) in [
+            (PeArch::X64, r"load_dlls\steamstub_x64.dll"),
+            (PeArch::X86, r"load_dlls\steamstub_x32.dll"),
+        ] {
+            let files = load_dll_files(arch);
+            assert_eq!(files.len(), 1, "exactly one loader belongs in load_dlls");
+            assert_eq!(files[0].0, expected);
+            assert!(!files[0].1.is_empty());
+        }
+    }
 }
