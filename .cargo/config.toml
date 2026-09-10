@@ -1,0 +1,19 @@
+[build]
+incremental = true
+
+# `+crt-static`: link the C runtime statically so the release is a single self-contained EXE.
+# `/DEPENDENTLOADFLAG:0x800` (LOAD_LIBRARY_SEARCH_SYSTEM32): make the OS loader resolve the
+# EXE's dependent DLLs (opengl32.dll, gdi32.dll, …) from System32 only, never from the folder
+# the EXE sits in — so a stray 32-bit DLL in the Downloads folder can't hijack the load and
+# cause a 0xc000007b "invalid image" crash on launch.
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=/DEPENDENTLOADFLAG:0x800",
+]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=/DEPENDENTLOADFLAG:0x800",
+]

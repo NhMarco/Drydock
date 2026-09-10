@@ -1,0 +1,76 @@
+name: Rust validation
+
+# Manual-only to conserve Actions minutes: this never runs automatically on pushes or pull
+# requests. Release builds (release.yml, on v* tags) still compile and self-test every target,
+# and it can be triggered by hand from the Actions tab when needed.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  native-build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            runner: windows-2025
+            artifact: Drydock-windows-x64
+            binary: target/release/Drydock.exe
+          - name: Windows ARM64
+            runner: windows-11-arm
+            artifact: Drydock-windows-arm64
+            binary: target/release/Drydock.exe
+          - name: Linux x64
+            runner: ubuntu-24.04
+            artifact: Drydock-linux-x64
+            binary: target/release/Drydock
+          - name: Linux ARM64
+            runner: ubuntu-24.04-arm
+            artifact: Drydock-linux-arm64
+            binary: target/release/Drydock
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libgl1-mesa-dev libwayland-dev libx11-dev libxkbcommon-dev libxi-dev pkg-config
+      - run: cargo build --locked --release -p drydock-desktop
+      - name: Run packaged binary self-test on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: '"${{ matrix.binary }}" --self-test'
+      - name: Run packaged binary self-test on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = (Resolve-Path "${{ matrix.binary }}").Path
+          $stdout = Join-Path $env:RUNNER_TEMP "drydock-self-test.txt"
+          $stderr = Join-Path $env:RUNNER_TEMP "drydock-self-test-error.txt"
+          $process = Start-Process -FilePath $binary -ArgumentList "--self-test" `
+            -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          Get-Content $stdout
+          if (Test-Path $stderr) { Get-Content $stderr }
+          if ($process.ExitCode -ne 0) { exit $process.ExitCode }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.binary }}
+          if-no-files-found: error

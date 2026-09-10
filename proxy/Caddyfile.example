@@ -1,0 +1,13 @@
+# Example TLS-terminating reverse proxy for the Drydock proxy. Rename to Caddyfile, set your
+# domain, and run Caddy in front of the container. Caddy fetches and renews certificates
+# automatically. The Node service should NOT be exposed publicly on its own.
+
+proxy.example.com {
+	encode gzip zstd
+
+	# Pass the real client IP through so per-IP rate limiting works correctly.
+	reverse_proxy 127.0.0.1:8080 {
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+}

@@ -1,0 +1,117 @@
+name: Native release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            asset: Drydock-windows-x64.exe
+            binary: target/release/Drydock.exe
+          - runner: windows-11-arm
+            asset: Drydock-windows-arm64.exe
+            binary: target/release/Drydock.exe
+          - runner: ubuntu-24.04
+            asset: Drydock-linux-x64
+            binary: target/release/Drydock
+          - runner: ubuntu-24.04-arm
+            asset: Drydock-linux-arm64
+            binary: target/release/Drydock
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Derive and validate release version
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tags must use vMAJOR.MINOR.PATCH, for example v1.2.0" >&2
+            exit 1
+          fi
+          echo "DRYDOCK_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libgl1-mesa-dev libwayland-dev libx11-dev libxkbcommon-dev libxi-dev pkg-config
+      - name: Build release with its update channel
+        env:
+          # Shipped binaries check the public release repo for updates, not this private repo.
+          DRYDOCK_UPDATE_REPOSITORY: NhMarco/Drydock
+          # Baked into the shipped binary so it can reach the self-hosted proxy and sign its
+          # requests. The proxy holds the steamtools key and GitHub token server-side, so the app
+          # no longer embeds either. Absent secrets embed nothing, so an unconfigured build simply
+          # cannot reach the proxy (same safe fallback as before).
+          DRYDOCK_PROXY_BASE_URL: ${{ secrets.DRYDOCK_PROXY_BASE_URL }}
+          DRYDOCK_HMAC_SECRET: ${{ secrets.DRYDOCK_HMAC_SECRET }}
+        run: cargo build --locked --release -p drydock-desktop
+      - name: Run packaged binary self-test on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          "${{ matrix.binary }}" --self-test
+          actual=$("${{ matrix.binary }}" --version | tr -d '\r')
+          test "$actual" = "$DRYDOCK_RELEASE_VERSION"
+      - name: Run packaged binary self-test on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = (Resolve-Path "${{ matrix.binary }}").Path
+          function Invoke-DrydockCli([string]$Argument, [string]$Name) {
+            $stdout = Join-Path $env:RUNNER_TEMP "$Name.txt"
+            $stderr = Join-Path $env:RUNNER_TEMP "$Name-error.txt"
+            $process = Start-Process -FilePath $binary -ArgumentList $Argument `
+              -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            if ($process.ExitCode -ne 0) {
+              if (Test-Path $stderr) { Get-Content $stderr }
+              throw "Drydock $Argument failed with exit code $($process.ExitCode)"
+            }
+            [string]$text = Get-Content -Raw $stdout
+            return $text.Trim()
+          }
+          $selfTest = Invoke-DrydockCli "--self-test" "self-test"
+          Write-Host $selfTest
+          $actual = Invoke-DrydockCli "--version" "version"
+          if ($actual -ne $env:DRYDOCK_RELEASE_VERSION) {
+            throw "Packaged version '$actual' does not match '$env:DRYDOCK_RELEASE_VERSION'"
+          }
+      - name: Stage native binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "${{ matrix.binary }}" "dist/${{ matrix.asset }}"
+          cd dist
+          sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            dist/${{ matrix.asset }}
+            dist/${{ matrix.asset }}.sha256
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish GitHub release to the public repo
+        env:
+          # A PAT with `contents: write` on NhMarco/Drydock, stored as the RELEASE_PAT secret in
+          # this (private) repo. The default github.token cannot write to another repository.
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --repo NhMarco/Drydock --title "$GITHUB_REF_NAME" --generate-notes

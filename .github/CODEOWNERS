@@ -1,0 +1,6 @@
+# Every change to this repository requires review from the owner.
+#
+# Combined with the branch ruleset on `main` (pull request required, code-owner review required),
+# this means no change reaches `main` without an explicit approval here — including changes opened
+# by collaborators.
+*       @NhMarco

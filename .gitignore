@@ -1,0 +1,50 @@
+# --- Build output ---------------------------------------------------------
+/target/
+**/*.rs.bk
+*.pdb
+
+# Locally built release binaries. Official ones come from the release workflow, not from a
+# developer's machine — a stray commit here would put tens of megabytes into history permanently.
+/dist/
+/artifacts/
+
+# --- Secrets: never commit ------------------------------------------------
+# Build-time injected values live in git-ignored `*.secret` files next to `build.rs`
+# (proxy-base-url.secret, hmac-secret.secret). See README ▸ Configuration.
+*.secret
+*.pem
+*.key
+!**/public*.pem
+
+# Proxy runtime configuration. `.env.example` is the committed template; `.env` holds real
+# upstream keys and the shared HMAC secret.
+.env
+.env.*
+!.env.example
+
+# --- Runtime / user data --------------------------------------------------
+# Legacy portable data directory beside the executable, plus anything the app writes at runtime.
+/settings/
+crash.log
+crash.log.*
+
+# --- Proxy (Node) ---------------------------------------------------------
+node_modules/
+proxy/dist/
+proxy/data/
+npm-debug.log*
+yarn-error.log*
+*.tsbuildinfo
+
+# --- Editors and OS -------------------------------------------------------
+/.idea/
+/.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Logs and scratch -----------------------------------------------------
+*.log
+*.tmp

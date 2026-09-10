@@ -1,0 +1,45 @@
+[package]
+name = "drydock-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+hmac.workspace = true
+html-escape.workspace = true
+jiff.workspace = true
+open.workspace = true
+aes-gcm.workspace = true
+base64.workspace = true
+rand.workspace = true
+rsa.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+sysinfo.workspace = true
+walkdir = "2.5"
+zip.workspace = true
+# Depot download (DepotDownloader-equivalent): AES depot-chunk decryption + VZip(LZMA)/deflate.
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+flate2 = "1"
+lzma-rs = "0.3"
+zstd = "0.13"
+# Emu toolchain: gbe_fork ships its steamclient DLLs in a 7z archive.
+sevenz-rust = "0.6"
+
+[dev-dependencies]
+tempfile = "3.23"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+windows-sys = { version = "0.61", features = [
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }

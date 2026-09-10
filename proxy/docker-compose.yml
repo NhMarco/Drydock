@@ -1,0 +1,35 @@
+# Drydock proxy. Secrets come from a local .env file (never committed). Put this behind a
+# TLS-terminating reverse proxy (Caddy/nginx/Traefik) — an example Caddyfile is included.
+
+services:
+  drydock-proxy:
+    build: .
+    image: drydock-proxy:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Bind only to the compose network; the reverse proxy is the public entry point.
+      HOST: 0.0.0.0
+      PORT: 8080
+      NODE_ENV: production
+      DATA_DIR: /app/data
+      TRUST_PROXY: "true"
+    volumes:
+      - gamelist-data:/app/data
+    # Expose to the host only for local testing; comment out when a reverse proxy fronts it.
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8080/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  gamelist-data:
