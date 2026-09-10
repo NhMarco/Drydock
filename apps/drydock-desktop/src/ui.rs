@@ -17,12 +17,12 @@ use drydock_core::{
     VerifiedEntitlement, achievement_image_urls, add_app_files, apply_denuvo_fix, apply_language,
     clear_previous_token_files, cloud, depot, detect_conflicting_software, detect_pe_arch, discover_steam,
     download_queue, ensure_toolchain, fetch_achievement_images, fetch_install_dir, fetch_reframework_dll,
-    fetch_windows_arch, fetch_windows_executables, fix_status, install_magicfiles, install_service,
-    installed_app_luas, is_valid_steam_directory, load_cached_denuvo_appids, load_catalog_apps,
-    load_dll_files, load_manifests, open_link, open_steam_uri, overlay_sound_bytes, read_denuvo_appids,
-    read_language_options, remove_app_files, remove_paths, resolve_game_root, restart_steam,
-    run_and_capture_token_request, save_catalog_apps, save_denuvo_appids, scan_crack_files, service_status,
-    set_manifest_updates_enabled, start_steam, stop_steam, toolchain_dlls, uninstall_service,
+    fetch_windows_arch, fetch_windows_executables, fix_status, install_depot_manifests, install_magicfiles,
+    install_service, installed_app_luas, is_valid_steam_directory, load_cached_denuvo_appids,
+    load_catalog_apps, load_dll_files, load_manifests, open_link, open_steam_uri, overlay_sound_bytes,
+    read_denuvo_appids, read_language_options, remove_app_files, remove_paths, resolve_game_root,
+    restart_steam, run_and_capture_token_request, save_catalog_apps, save_denuvo_appids, scan_crack_files,
+    service_status, set_manifest_updates_enabled, start_steam, stop_steam, toolchain_dlls, uninstall_service,
     updates_enabled,
 };
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke, Vec2};
@@ -1998,7 +1998,9 @@ impl DrydockApp {
         let name = self.app_display_name(app_id);
         let (sender, receiver) = mpsc::channel();
         self.service_receiver = Some(receiver);
-        self.busy_label = Some(format!("Adding {name} to Steam…"));
+        // Naming the second half matters: fetching the depot package is the slow part (the upstream
+        // builds it on demand), so without this the button looks stuck on a large title.
+        self.busy_label = Some(format!("Adding {name} to Steam and caching its manifests…"));
         std::thread::spawn(move || {
             let result = (|| {
                 let client = ProxyClient::new().map_err(|error| error.to_string())?;
@@ -2015,10 +2017,13 @@ impl DrydockApp {
                 let mut payload = std::collections::BTreeMap::new();
                 payload.insert(file_name, bytes);
                 add_app_files(&root, &payload).map_err(|error| error.to_string())?;
+                // The unlock is in place; now cache the depot manifests so Steam does not have to
+                // fetch them itself. Best effort — see `copy_depot_manifests_to_cache`.
+                let manifests = copy_depot_manifests_to_cache(&client, &root, app_id);
                 Ok(ServiceOutcome::Added {
                     app_id,
                     files: installed_names,
-                    note: format!("\"{name}\" added to Steam."),
+                    note: added_note(&name, &manifests),
                 })
             })();
             let _ = sender.send(result);
@@ -2052,7 +2057,9 @@ impl DrydockApp {
         let name = self.app_display_name(app_id);
         let (sender, receiver) = mpsc::channel();
         self.service_receiver = Some(receiver);
-        self.busy_label = Some(format!("Adding the cracked version of {name} to Steam…"));
+        self.busy_label = Some(format!(
+            "Adding the cracked version of {name} to Steam and caching its manifests…"
+        ));
         std::thread::spawn(move || {
             let result = (|| {
                 let client = ProxyClient::new().map_err(|error| error.to_string())?;
@@ -2073,11 +2080,20 @@ impl DrydockApp {
                 let mut payload = std::collections::BTreeMap::new();
                 payload.insert(file_name, bytes);
                 add_app_files(&root, &payload).map_err(|error| error.to_string())?;
+                // Same as the normal add. A manifest file is named after the exact depot and
+                // manifest it belongs to, so caching the provider's current build alongside a
+                // build-locked Lua can never mislead Steam — it just will not find a name it is not
+                // looking for.
+                let manifests = copy_depot_manifests_to_cache(&client, &root, app_id);
                 Ok(ServiceOutcome::Added {
                     app_id,
                     files: installed_names,
                     note: format!(
-                        "Cracked version of \"{name}\" added to Steam. Apply the Denuvo fix, then restart Steam."
+                        "Cracked version of \"{name}\" added to Steam{}. Apply the Denuvo fix, then restart Steam.",
+                        match &manifests {
+                            Ok(0) | Err(_) => String::new(),
+                            Ok(count) => format!(" with {count} depot manifest(s)"),
+                        }
                     ),
                 })
             })();
@@ -9540,6 +9556,32 @@ fn github_access_mode() -> &'static str {
     }
 }
 
+/// Fetches the app's depot package and copies its manifests into `<steam>/depotcache`.
+///
+/// Runs after the unlock Lua is in place, on the same background thread. Deliberately **best
+/// effort**: the Lua alone is what unlocks the app, so a depot package that is slow, unavailable or
+/// still being built upstream must not undo an otherwise successful add. The outcome is folded into
+/// the status note instead.
+///
+/// Note that this is the slow half of the operation — the upstream packages a depot on demand, which
+/// takes seconds for a small title and minutes for a large one.
+fn copy_depot_manifests_to_cache(
+    proxy: &ProxyClient,
+    steam_root: &Path,
+    app_id: u32,
+) -> Result<usize, String> {
+    let data = DepotData::fetch(proxy, app_id).map_err(|error| error.to_string())?;
+    install_depot_manifests(steam_root, &data.raw_manifests).map_err(|error| error.to_string())
+}
+
+/// Renders the note shown after an add/update, folding in how the depot-manifest copy went.
+fn added_note(name: &str, manifests: &Result<usize, String>) -> String {
+    match manifests {
+        Ok(0) => format!("\"{name}\" added to Steam. No depot manifests were packaged for it."),
+        Ok(count) => format!("\"{name}\" added to Steam, with {count} depot manifest(s) cached."),
+        Err(_) => format!("\"{name}\" added to Steam. Depot manifests could not be cached."),
+    }
+}
 #[cfg(test)]
 mod ui_tests {
     use super::*;

@@ -1,6 +1,6 @@
 //! Fetch + parse orchestration and the download/verify engine.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -55,11 +55,18 @@ pub enum DepotDownloadError {
 }
 
 /// The depot key(s) and parsed manifest(s) for one app, ready to download or verify.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct DepotData {
     pub app_id: u32,
     pub keys: DepotKeys,
     pub manifests: Vec<DepotManifest>,
+    /// The manifest blobs exactly as they arrived, keyed by the name Steam stores them under in
+    /// `depotcache` (`<depot id>_<manifest gid>.manifest`).
+    ///
+    /// Kept verbatim rather than re-serialised from [`Self::manifests`]: Steam reads these files
+    /// itself, and only the untouched bytes are guaranteed to be what it expects. Parsing decrypts
+    /// file names in the parsed copy, which must never leak back into what is written to disk.
+    pub raw_manifests: BTreeMap<String, Vec<u8>>,
 }
 
 impl DepotData {
@@ -94,8 +101,14 @@ impl DepotData {
         }
 
         let mut manifests = Vec::new();
+        let mut stored: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         for bytes in &raw_manifests {
             let mut manifest = DepotManifest::parse(bytes)?;
+            // Record the untouched blob under Steam depotcache naming before decrypting names.
+            stored.insert(
+                format!("{}_{}.manifest", manifest.depot_id, manifest.manifest_gid),
+                bytes.clone(),
+            );
             if let Some(key) = keys.get(manifest.depot_id) {
                 manifest.decrypt_filenames(key)?;
             }
@@ -108,6 +121,7 @@ impl DepotData {
             app_id,
             keys,
             manifests,
+            raw_manifests: stored,
         })
     }
 
@@ -675,6 +689,7 @@ mod tests {
                     chunks: vec![],
                 },
             ])],
+            ..DepotData::default()
         };
         assert_eq!(data.total_bytes(), 150);
     }
@@ -697,6 +712,7 @@ mod tests {
             app_id: 3751260,
             keys,
             manifests: vec![manifest_for(228989)],
+            ..DepotData::default()
         };
         assert!(data.has_no_content());
         assert_eq!(data.manifest_depots(), vec![228989]);
@@ -714,6 +730,7 @@ mod tests {
             app_id: 2358720,
             keys,
             manifests: vec![manifest_for(228989), manifest_for(2358721)],
+            ..DepotData::default()
         };
         assert!(!data.has_no_content());
     }
@@ -779,6 +796,7 @@ mod tests {
                     compressed_len: 16,
                 }],
             }])],
+            ..DepotData::default()
         };
         let outcome = verify(&data, dir.path(), &AtomicBool::new(false), |_| {}).unwrap();
         assert_eq!(outcome.total_chunks, 1);
@@ -806,6 +824,7 @@ mod tests {
                     compressed_len: 16,
                 }],
             }])],
+            ..DepotData::default()
         };
         let outcome = verify(&data, dir.path(), &AtomicBool::new(false), |_| {}).unwrap();
         assert_eq!(outcome.bad_chunks, 0);

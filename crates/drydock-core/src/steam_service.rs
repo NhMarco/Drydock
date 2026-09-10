@@ -28,6 +28,8 @@ use crate::steam::is_valid_steam_directory;
 const MARKER_NAME: &str = ".drydock-service.json";
 const LEGACY_MARKER_NAME: &str = ".closedsteamloader-service.json";
 const PLUGIN_SUBDIR: [&str; 2] = ["config", "stplug-in"];
+/// Where Steam keeps the depot manifests it has already fetched, beside `steam.exe`.
+const DEPOTCACHE_SUBDIR: &str = "depotcache";
 
 /// The install state of the Steam Service, mirrored from the C# enum.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -322,6 +324,39 @@ pub fn add_app_files(
     let target = create_plugin_directory(steam_directory)?;
     install_files_transactionally(&target, payload, &[], None::<fn() -> Result<(), ServiceError>>)?;
     Ok(payload.len())
+}
+
+/// Copies depot manifests into `<steam>/depotcache` so Steam finds them already there.
+///
+/// Steam looks up `<depot id>_<manifest gid>.manifest` in that folder before asking its content
+/// servers for it. Placing the manifests that came with an unlock next to the Lua lets the game be
+/// installed from the exact build the unlock pins, instead of whatever Steam would resolve on its
+/// own.
+///
+/// Goes through the same transactional installer as everything else: staged, checksummed, existing
+/// files backed up, and rolled back as a batch on any failure. Returns how many files were written.
+/// An empty map is not an error — plenty of apps ship no packaged manifests.
+pub fn install_depot_manifests(
+    steam_directory: &Path,
+    manifests: &BTreeMap<String, Vec<u8>>,
+) -> Result<usize, ServiceError> {
+    ensure_steam_directory(steam_directory)?;
+    if manifests.is_empty() {
+        return Ok(0);
+    }
+    for (name, content) in manifests {
+        let safe = file_name_of(name);
+        if safe.is_empty() || safe != name || !safe.to_ascii_lowercase().ends_with(".manifest") {
+            return Err(ServiceError::InvalidManifestName(name.clone()));
+        }
+        if content.is_empty() {
+            return Err(ServiceError::EmptyFile(name.clone()));
+        }
+    }
+    let target = steam_directory.join(DEPOTCACHE_SUBDIR);
+    fs::create_dir_all(&target)?;
+    install_files_transactionally(&target, manifests, &[], None::<fn() -> Result<(), ServiceError>>)?;
+    Ok(manifests.len())
 }
 
 /// Removes the given Lua unlock file names for an app, with backup and rollback.
@@ -687,6 +722,8 @@ pub enum ServiceError {
     InvalidDll(String),
     #[error("No Lua file is available for this app.")]
     NoLuaFiles,
+    #[error("The depot data contains an invalid manifest filename: {0}")]
+    InvalidManifestName(String),
     #[error("The app data contains an invalid Lua filename.")]
     InvalidLuaName,
     #[error("The app data contains the duplicate Lua filename {0}.")]
@@ -887,6 +924,75 @@ mod tests {
         assert!(!legacy.join(MARKER_NAME).exists());
         // … but the per-app Lua unlock stays put.
         assert!(legacy.join("1234.lua").is_file());
+    }
+
+    /// Steam reads `<depot id>_<manifest gid>.manifest` straight out of this folder, so the bytes
+    /// must land verbatim under exactly that name.
+    #[test]
+    fn installs_depot_manifests_into_depotcache() {
+        let steam = fake_steam_dir();
+        let mut manifests = BTreeMap::new();
+        manifests.insert(
+            "228990_1829726630299308803.manifest".to_owned(),
+            b"raw-a".to_vec(),
+        );
+        manifests.insert(
+            "3751261_6667172545766883229.manifest".to_owned(),
+            b"raw-b".to_vec(),
+        );
+
+        assert_eq!(
+            install_depot_manifests(steam.path(), &manifests).expect("install"),
+            2
+        );
+        let cache = steam.path().join("depotcache");
+        assert_eq!(
+            fs::read(cache.join("228990_1829726630299308803.manifest")).expect("a"),
+            b"raw-a"
+        );
+        assert_eq!(
+            fs::read(cache.join("3751261_6667172545766883229.manifest")).expect("b"),
+            b"raw-b"
+        );
+    }
+
+    #[test]
+    fn installing_depot_manifests_replaces_an_existing_file() {
+        let steam = fake_steam_dir();
+        let cache = steam.path().join("depotcache");
+        fs::create_dir_all(&cache).expect("cache dir");
+        fs::write(cache.join("700_1.manifest"), b"stale").expect("seed");
+
+        let mut manifests = BTreeMap::new();
+        manifests.insert("700_1.manifest".to_owned(), b"fresh".to_vec());
+        assert_eq!(
+            install_depot_manifests(steam.path(), &manifests).expect("install"),
+            1
+        );
+        assert_eq!(fs::read(cache.join("700_1.manifest")).expect("read"), b"fresh");
+    }
+
+    #[test]
+    fn no_manifests_is_not_an_error() {
+        let steam = fake_steam_dir();
+        assert_eq!(
+            install_depot_manifests(steam.path(), &BTreeMap::new()).expect("install"),
+            0
+        );
+    }
+
+    /// The names come from remote data, so a path in one must never reach the filesystem.
+    #[test]
+    fn rejects_manifest_names_that_are_not_plain_file_names() {
+        let steam = fake_steam_dir();
+        for bad in ["../evil.manifest", "sub/700_1.manifest", "700_1.txt", ""] {
+            let mut manifests = BTreeMap::new();
+            manifests.insert(bad.to_owned(), b"x".to_vec());
+            assert!(
+                install_depot_manifests(steam.path(), &manifests).is_err(),
+                "{bad} must be rejected"
+            );
+        }
     }
 
     /// The plug-in folder is the ground truth for which apps are unlocked. The library used to read
