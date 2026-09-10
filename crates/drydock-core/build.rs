@@ -41,9 +41,13 @@ fn embed_secret(env_var: &str, secret_file: &str) {
     println!("cargo:rerun-if-env-changed={env_var}");
     println!("cargo:rerun-if-changed={secret_file}");
 
+    // Both sources are trimmed. A value pasted into a CI secret or produced by `echo` easily picks
+    // up trailing whitespace, and embedding that verbatim would ship a base URL ending in a newline
+    // or a signing secret that no longer matches the proxy's.
     let value = std::env::var(env_var)
         .ok()
-        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
         .or_else(|| {
             fs::read_to_string(Path::new(secret_file))
                 .ok()

@@ -130,6 +130,17 @@ export interface Config {
 
 export function loadConfig(): Config {
   const requireAuth = boolean("REQUIRE_AUTH", true);
+
+  // Resolve the active providers first: a provider's credential is only mandatory when that
+  // provider is actually switched on. Previously every provider key was unconditionally required,
+  // so running the default Ryu-only setup still demanded a SteamTools key and a DepotBox key that
+  // were never used — while `RYU_AUTH_CODE`, the one credential the default configuration does
+  // need, was optional and could be omitted silently.
+  const providerSources = depotSourceList("PROVIDER_SOURCES", depotSourceList("DEPOT_PACKAGE_SOURCES", ["ryu"]));
+  const activeProvider = (name: DepotPackageSourceName): boolean => providerSources.includes(name);
+  const credential = (name: string, provider: DepotPackageSourceName): string =>
+    activeProvider(provider) ? required(name) : optional(name, "");
+
   return {
     host: optional("HOST", "0.0.0.0"),
     port: integer("PORT", 8080),
@@ -137,7 +148,7 @@ export function loadConfig(): Config {
     requireAuth,
 
     upstreamBase: optional("STEAMTOOLS_API_BASE", "https://api.steamtools.app").replace(/\/+$/, ""),
-    upstreamApiKey: required("STEAMTOOLS_API_KEY"),
+    upstreamApiKey: credential("STEAMTOOLS_API_KEY", "steamtools"),
     steamWebApiKey: optional("STEAM_WEB_API_KEY", ""),
     upstreamTimeoutMs: integer("UPSTREAM_TIMEOUT_MS", 30_000),
     gamelistTimeoutMs: integer("GAMELIST_TIMEOUT_MS", 120_000),
@@ -145,19 +156,19 @@ export function loadConfig(): Config {
     fileCacheTtlSeconds: integer("FILE_CACHE_TTL_SECONDS", 86_400),
 
     depotboxBase: optional("DEPOTBOX_BASE", "https://depotbox.org").replace(/\/+$/, ""),
-    depotboxApiKey: required("DEPOTBOX_API_KEY"),
+    depotboxApiKey: credential("DEPOTBOX_API_KEY", "depotbox"),
 
     ryuBase: optional("RYU_API_BASE", "https://generator.ryuu.lol").replace(/\/+$/, ""),
-    ryuAuthCode: optional("RYU_AUTH_CODE", ""),
+    ryuAuthCode: credential("RYU_AUTH_CODE", "ryu"),
 
     // One global provider toggle for gamelist + Lua + depot. Default Ryu only; DepotBox/SteamTools
     // stay wired and come back by adding them here. `DEPOT_PACKAGE_SOURCES` is honoured as a fallback.
-    providerSources: depotSourceList("PROVIDER_SOURCES", depotSourceList("DEPOT_PACKAGE_SOURCES", ["ryu"])),
+    providerSources,
 
     githubOwner: optional("GITHUB_OWNER", "NhMarco"),
     githubRepo: optional("GITHUB_REPO", "MFB"),
     githubBranch: optional("GITHUB_BRANCH", "main"),
-    githubToken: required("GITHUB_TOKEN"),
+    githubToken: optional("GITHUB_TOKEN", ""),
     fixDirectory: optional("FIX_DIRECTORY", "Files/fix").replace(/^\/+|\/+$/g, ""),
     fixesManifestTtlSeconds: integer("FIXES_MANIFEST_TTL_SECONDS", 300),
     magicfilesDirectory: optional("MAGICFILES_DIRECTORY", "Files/magicfiles").replace(/^\/+|\/+$/g, ""),

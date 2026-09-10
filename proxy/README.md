@@ -1,11 +1,31 @@
 # Drydock Proxy
 
-A small, hardened reverse proxy that sits between the Drydock app and the private
-[steamtools.app](https://steamtools.app) API.
+A small, hardened reverse proxy that sits between the Drydock app and the upstream data providers.
 
-Why it exists:
+## Providers
 
-- **The real API key never ships in the app.** It lives only in the proxy's environment.
+The gamelist, the per-app Lua and the depot packages all come from **providers**, selected by one
+ordered list in `PROVIDER_SOURCES`. Order is priority: the first provider wins on shared App IDs and
+is tried first; the others fill what it is missing, so one being down does not take the proxy with it.
+
+| Provider | Credential | Notes |
+| --- | --- | --- |
+| `ryu` | `RYU_AUTH_CODE` | **The default.** `generator.ryuu.lol`; `secure_download` returns the manifests+lua ZIP |
+| `depotbox` | `DEPOTBOX_API_KEY` | `depotbox.org`; also the source for the per-variant game fixes |
+| `steamtools` | `STEAMTOOLS_API_KEY` | `api.steamtools.app`; also backs the on-demand `/v1/app-info` enrichment |
+
+`PROVIDER_SOURCES` defaults to `ryu` alone. A provider that is not listed is fully off and is never
+contacted — and **its credential is not required to boot**, so running Ryu-only needs no SteamTools
+or DepotBox key. Enable more by listing them, e.g. `PROVIDER_SOURCES=ryu,depotbox,steamtools`.
+
+A second group of payloads — the Steam Service (OST) files, the Denuvo fixes, the repacks list and
+the Ubisoft magicfiles — is served from a GitHub repository (`GITHUB_OWNER`/`GITHUB_REPO`) rather
+than from a provider. Those endpoints need `GITHUB_TOKEN` when that repository is private; without
+it the proxy still starts and everything else keeps working, with a warning at boot.
+
+Why the proxy exists:
+
+- **No upstream API key ever ships in the app.** They live only in the proxy's environment.
 - **The gamelist (~35 MB, ~246k apps) is fetched once per hour**, compacted to
   `{ appid, name, tags }` (NSFW entries filtered, `tag:` prefixes stripped), gzipped, and
   served to every client from cache — clients never hit the upstream gamelist endpoint.
@@ -103,10 +123,16 @@ DRYDOCK_HMAC_SECRET=yoursecret node scripts/sign.mjs GET /v1/app-info/730 http:/
 
 ## Configuration
 
-Copy `.env.example` to `.env` and set at least `STEAMTOOLS_API_KEY`, `DRYDOCK_HMAC_SECRET`, and
-`GITHUB_TOKEN` (read-only PAT for the private MFB repo, used for the per-app fixes/repacks/magicfiles). All
-variables and defaults are documented in `.env.example` and validated at boot
-(`src/config.ts`).
+Copy `.env.example` to `.env`. What you must set depends on which providers you enable:
+
+- **Always:** `DRYDOCK_HMAC_SECRET` — the shared signing secret, also entered in the Drydock client.
+- **Per active provider:** its credential from the table above. With the default
+  `PROVIDER_SOURCES=ryu` that is `RYU_AUTH_CODE` and nothing else.
+- **For the GitHub-hosted payloads:** `GITHUB_TOKEN`, a read-only PAT, when that repository is
+  private. Optional — the proxy boots without it and warns.
+
+Everything else has a documented default. All variables are listed in `.env.example` and validated
+at boot (`src/config.ts`), which fails fast on a missing credential for an *enabled* provider.
 
 Generate a secret:
 

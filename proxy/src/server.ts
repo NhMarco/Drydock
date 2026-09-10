@@ -88,6 +88,15 @@ async function main(): Promise<void> {
   if (!config.requireAuth) {
     app.log.warn("REQUIRE_AUTH is disabled — HMAC verification is OFF. Use this only for local testing.");
   }
+  if (!config.githubToken) {
+    // Not fatal: the gamelist, Lua and depot routes work without it. Say so explicitly, because the
+    // alternative is a self-hoster discovering it as four endpoints mysteriously returning 404.
+    app.log.warn(
+      { owner: config.githubOwner, repo: config.githubRepo },
+      "GITHUB_TOKEN is unset — /v1/service/*, /v1/denuvo-fixes*, /v1/repacks and /v1/magicfiles will " +
+        "fail if the payload repository is private. Everything else works.",
+    );
+  }
 
   // Bring the gamelist online before we accept traffic so early clients don't all 503.
   await cache.start();

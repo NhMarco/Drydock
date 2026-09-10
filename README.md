@@ -69,8 +69,14 @@ A blank value at one layer falls through to the next rather than blanking out wh
 | `DRYDOCK_PROXY_BASE_URL` | Proxy origin, e.g. `https://proxy.example` — origin only, no path or trailing slash |
 | `DRYDOCK_HMAC_SECRET` | Shared secret; must match one of the proxy's `DRYDOCK_HMAC_SECRET` values |
 | `DRYDOCK_UPDATE_REPOSITORY` | `owner/repo` the self-updater checks. Set this if you fork and publish your own releases |
-| `DRYDOCK_GITHUB_TOKEN` | Optional; raises the anonymous GitHub API rate limit. Environment-only, never written to settings |
+| `DRYDOCK_GITHUB_TOKEN` | Rarely needed — see below |
 | `DRYDOCK_RELEASE_VERSION` | Version the binary reports. The release workflow sets it from the git tag |
+
+**Drydock needs no GitHub token.** The client's only GitHub traffic is the self-updater asking the
+Releases API for the latest version, which works anonymously against a public repository.
+`DRYDOCK_GITHUB_TOKEN` exists for two edge cases: hitting the anonymous rate limit (60 requests per
+hour per IP), or pointing the updater at a *private* release repository. The token that reads the
+payload repository belongs to the proxy, not to the client — it never ships in the binary.
 
 To see what actually resolved and which layer it came from — secrets are redacted, so the output is
 safe to paste into an issue:

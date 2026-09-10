@@ -10,7 +10,7 @@
 //! Networking lives in [`crate::proxy`]; this module operates on data that the caller has
 //! already downloaded and verified, which keeps the transactional logic fully testable.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -385,6 +385,47 @@ pub fn remove_app_files(steam_directory: &Path, lua_names: &[String]) -> Result<
 pub fn app_lua_present(steam_directory: &Path, lua_file_name: &str) -> bool {
     let safe = file_name_of(lua_file_name);
     !safe.is_empty() && plugin_directory(steam_directory).join(safe).is_file()
+}
+
+/// Every App ID that currently has an unlock Lua sitting in `config/stplug-in`.
+///
+/// The plug-in folder is the **ground truth** for which apps are unlocked — it is what Steam itself
+/// reads. Callers should prefer this over any side record of "apps I added", because such a record
+/// drifts: it is lost when the settings file is reset or the data directory moves, it misses a Lua
+/// the user dropped in by hand or brought over from another machine, and it keeps claiming an app is
+/// added after the file was deleted outside the app.
+///
+/// Files are named `<appid>.lua` (see `add_app_to_steam`), so anything that does not parse as a
+/// decimal App ID is ignored — the Steam Service payload lives beside `steam.exe`, not here, and any
+/// unrelated file a user parked in the folder is skipped rather than guessed at.
+#[must_use]
+pub fn installed_app_luas(steam_directory: &Path) -> BTreeSet<u32> {
+    let mut found = BTreeSet::new();
+    let Ok(entries) = fs::read_dir(plugin_directory(steam_directory)) else {
+        return found; // no plug-in folder yet — nothing is added
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        // Case-insensitive `.lua`, then the stem must be exactly a decimal App ID.
+        let Some(stem) = name
+            .len()
+            .checked_sub(4)
+            .filter(|_| name[name.len().saturating_sub(4)..].eq_ignore_ascii_case(".lua"))
+            .map(|cut| &name[..cut])
+        else {
+            continue;
+        };
+        if let Ok(app_id) = stem.parse::<u32>()
+            && app_id != 0
+        {
+            found.insert(app_id);
+        }
+    }
+    found
 }
 
 /// Returns true when every Lua unlock file for `files` is present and matches its blob SHA.
@@ -846,6 +887,52 @@ mod tests {
         assert!(!legacy.join(MARKER_NAME).exists());
         // … but the per-app Lua unlock stays put.
         assert!(legacy.join("1234.lua").is_file());
+    }
+
+    /// The plug-in folder is the ground truth for which apps are unlocked. The library used to read
+    /// this from a record in `settings.json` alone, so games whose Lua was sitting right there went
+    /// missing whenever that record was lost — a settings reset, a moved data directory, or a Lua
+    /// the user dropped in by hand.
+    #[test]
+    fn installed_app_luas_reads_the_plugin_folder() {
+        let steam = fake_steam_dir();
+        let plugin = steam.path().join("config").join("stplug-in");
+        fs::create_dir_all(&plugin).expect("plugin dir");
+        fs::write(plugin.join("2638890.lua"), b"addappid(2638890)").expect("lua a");
+        fs::write(plugin.join("3751260.lua"), b"addappid(3751260)").expect("lua b");
+        fs::write(plugin.join("730.LUA"), b"addappid(730)").expect("uppercase lua");
+
+        let found = installed_app_luas(steam.path());
+        assert_eq!(
+            found.iter().copied().collect::<Vec<_>>(),
+            vec![730, 2_638_890, 3_751_260]
+        );
+    }
+
+    #[test]
+    fn installed_app_luas_ignores_anything_that_is_not_an_app_id() {
+        let steam = fake_steam_dir();
+        let plugin = steam.path().join("config").join("stplug-in");
+        fs::create_dir_all(&plugin).expect("plugin dir");
+        for name in [
+            "notes.txt",          // not a Lua at all
+            "steamclient.lua",    // Lua, but not an App ID
+            "1234_extra.lua",     // a companion file, not the app's own unlock
+            "0.lua",              // App ID zero is never real
+            "99999999999999.lua", // does not fit in a u32
+            ".lua",               // empty stem
+        ] {
+            fs::write(plugin.join(name), b"x").expect("write");
+        }
+        fs::create_dir_all(plugin.join("4242.lua")).expect("a directory, not a file");
+
+        assert!(installed_app_luas(steam.path()).is_empty());
+    }
+
+    #[test]
+    fn installed_app_luas_is_empty_without_a_plugin_folder() {
+        let steam = fake_steam_dir();
+        assert!(installed_app_luas(steam.path()).is_empty());
     }
 
     #[test]

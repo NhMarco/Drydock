@@ -107,11 +107,13 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Publish GitHub release to the public repo
+      - name: Publish the GitHub release
         env:
-          # A PAT with `contents: write` on NhMarco/Drydock, stored as the RELEASE_PAT secret in
-          # this (private) repo. The default github.token cannot write to another repository.
-          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+          # The built-in token suffices: code and releases live in the same repository, and the
+          # workflow already requests `contents: write` above. (A personal access token was only
+          # needed back when this published into a *different* repository, which github.token
+          # cannot do.)
+          GH_TOKEN: ${{ github.token }}
         run: >-
           gh release create "$GITHUB_REF_NAME" dist/*
-          --repo NhMarco/Drydock --title "$GITHUB_REF_NAME" --generate-notes
+          --title "$GITHUB_REF_NAME" --generate-notes

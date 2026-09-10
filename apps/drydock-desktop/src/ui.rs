@@ -18,11 +18,12 @@ use drydock_core::{
     clear_previous_token_files, cloud, depot, detect_conflicting_software, detect_pe_arch, discover_steam,
     download_queue, ensure_toolchain, fetch_achievement_images, fetch_install_dir, fetch_reframework_dll,
     fetch_windows_arch, fetch_windows_executables, fix_status, install_magicfiles, install_service,
-    is_valid_steam_directory, load_cached_denuvo_appids, load_catalog_apps, load_dll_files, load_manifests,
-    open_link, open_steam_uri, overlay_sound_bytes, read_denuvo_appids, read_language_options,
-    remove_app_files, remove_paths, resolve_game_root, restart_steam, run_and_capture_token_request,
-    save_catalog_apps, save_denuvo_appids, scan_crack_files, service_status, set_manifest_updates_enabled,
-    start_steam, stop_steam, toolchain_dlls, uninstall_service, updates_enabled,
+    installed_app_luas, is_valid_steam_directory, load_cached_denuvo_appids, load_catalog_apps,
+    load_dll_files, load_manifests, open_link, open_steam_uri, overlay_sound_bytes, read_denuvo_appids,
+    read_language_options, remove_app_files, remove_paths, resolve_game_root, restart_steam,
+    run_and_capture_token_request, save_catalog_apps, save_denuvo_appids, scan_crack_files, service_status,
+    set_manifest_updates_enabled, start_steam, stop_steam, toolchain_dlls, uninstall_service,
+    updates_enabled,
 };
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke, Vec2};
 
@@ -335,6 +336,12 @@ pub struct DrydockApp {
     cloud_oauth_receiver: Option<Receiver<Result<CloudSettings, String>>>,
     /// Cached CloudRedirect DLL state — `dll_status` hashes the file, so it is refreshed on page
     /// switches and after cloud actions rather than read from the render loop. `None` = no Steam root.
+    /// App IDs with an unlock Lua actually present in `<steam>/config/stplug-in`.
+    ///
+    /// That folder is the ground truth for what is unlocked; `settings.added_apps` is only a record
+    /// of what *this* installation added, and it is lost whenever the settings file is. Refreshed on
+    /// page switches and after every add/remove, so the render loop never touches the disk.
+    plugin_luas: std::collections::BTreeSet<u32>,
     cloud_dll_status: Option<drydock_core::DllStatus>,
     /// Cached provider from the CloudRedirect `config.json`, refreshed alongside the DLL state.
     cloud_provider: Option<CloudProvider>,
@@ -684,6 +691,7 @@ impl DrydockApp {
             cloud: CloudForm::default(),
             cloud_download_receiver: None,
             cloud_oauth_receiver: None,
+            plugin_luas: std::collections::BTreeSet::new(),
             cloud_dll_status: None,
             cloud_provider: None,
             service_status: None,
@@ -2150,13 +2158,21 @@ impl DrydockApp {
             return;
         }
         let name = self.app_display_name(app_id);
-        // Names to remove come from what we recorded when the app was added.
+        // Names to remove come from what we recorded when the app was added — plus the conventional
+        // `<appid>.lua`, because a Lua that this installation did not add (a fresh settings file, a
+        // moved data directory, a hand-placed file) has no record at all and would otherwise leave
+        // the remove doing nothing.
         let mut names: Vec<String> = self
             .settings
             .added_apps
             .get(&app_id)
             .map(|state| state.files.keys().cloned().collect())
             .unwrap_or_default();
+        let conventional = format!("{app_id}.lua");
+        if self.plugin_luas.contains(&app_id) && !names.iter().any(|n| n.eq_ignore_ascii_case(&conventional))
+        {
+            names.push(conventional);
+        }
         let (sender, receiver) = mpsc::channel();
         self.service_receiver = Some(receiver);
         self.busy_label = Some(format!("Removing {name} from Steam…"));
@@ -2216,11 +2232,15 @@ impl DrydockApp {
                         self.settings.added_apps.insert(app_id, state);
                         self.status_error = self.persist_settings().is_err();
                         self.status = note;
+                        // The plug-in folder just changed; re-scan so the library and the details
+                        // buttons reflect it immediately rather than at the next page switch.
+                        self.refresh_plugin_luas();
                     }
                     Ok(ServiceOutcome::Removed { app_id, note }) => {
                         self.settings.added_apps.remove(&app_id);
                         self.status_error = self.persist_settings().is_err();
                         self.status = note;
+                        self.refresh_plugin_luas();
                     }
                     Err(error) => {
                         self.status = error;
@@ -2254,8 +2274,33 @@ impl DrydockApp {
         self.cloud_provider = cloud::current_provider();
     }
 
+    /// Re-scans `<steam>/config/stplug-in` for the App IDs that actually have an unlock Lua.
+    ///
+    /// One directory listing, kept off the render path. Everything that asks "is this app added?"
+    /// reads the cached set via [`Self::is_app_added`].
+    fn refresh_plugin_luas(&mut self) {
+        self.plugin_luas = self
+            .steam
+            .root
+            .as_deref()
+            .map(installed_app_luas)
+            .unwrap_or_default();
+    }
+
+    /// Whether an app has an unlock Lua installed — on disk, or recorded by this installation.
+    ///
+    /// The disk is authoritative and comes first: a Lua sitting in `config/stplug-in` counts as
+    /// added even when `settings.added_apps` knows nothing about it, which is the normal situation
+    /// after the settings file is reset, the data directory moves, or the user drops a Lua in by
+    /// hand. The settings record is still consulted so an app added moments ago is recognised before
+    /// the next re-scan.
+    fn is_app_added(&self, app_id: u32) -> bool {
+        self.plugin_luas.contains(&app_id) || self.settings.added_apps.contains_key(&app_id)
+    }
+
     fn refresh_dynamic_state(&mut self) {
         self.refresh_cloud_state();
+        self.refresh_plugin_luas();
         if self.steam.root.is_none() {
             return;
         }
@@ -3380,7 +3425,17 @@ impl DrydockApp {
                 });
             }
         }
-        for app_id in self.settings.added_apps.keys().copied() {
+        // Apps that have an unlock Lua but no install: the union of what is actually in
+        // `config/stplug-in` and what this installation recorded. Disk first — the record is lost
+        // with the settings file, and these games would then silently vanish from the library even
+        // though Steam is still reading their Lua.
+        let available: std::collections::BTreeSet<u32> = self
+            .plugin_luas
+            .iter()
+            .copied()
+            .chain(self.settings.added_apps.keys().copied())
+            .collect();
+        for app_id in available {
             if !seen.insert(app_id) {
                 continue;
             }
@@ -4107,7 +4162,7 @@ impl DrydockApp {
         DetailsState {
             is_added: self
                 .details_app_id
-                .is_some_and(|app_id| self.settings.added_apps.contains_key(&app_id)),
+                .is_some_and(|app_id| self.is_app_added(app_id)),
             service_current: matches!(
                 self.service_status.as_ref().map(|status| status.state),
                 Some(SteamServiceState::Current)
