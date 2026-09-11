@@ -2,6 +2,28 @@
 
 All notable Drydock changes are documented here. The project follows semantic versioning.
 
+## 1.1.1 - 2026-09-11
+
+Fixes unlocks that were not pinned to a build and depot manifests that never reached Steam.
+
+- **The unlock Lua now comes from the depot package instead of the separate Lua API.** The two
+  disagreed. The package's Lua is cut from the same build as the manifests shipped beside it, so its
+  `setManifestid` lines are active and pin exactly those manifests. The Lua API answers for the
+  *current* build with every `setManifestid` commented out, and for one observed title it also
+  omitted two DLC ownership lines. Installing that left Steam free to resolve any build — and the
+  manifests cached alongside were then never the ones it asked for, which is why caching them
+  appeared to do nothing. Adding an app is also one request now instead of two, so the Lua API's
+  rate limit no longer applies. **Press Update on games added before this release** to replace the
+  Lua already on disk.
+- When the depot package is unavailable the Lua API is still used so the app can be unlocked, but
+  the status now says so plainly and notes that the unlock is not pinned to a build, instead of
+  reporting success.
+- **Depot packages that failed at add time are retried.** Caching them is best effort, and a failure
+  left the app with its unlock, nothing in `depotcache`, and nothing in Drydock's own store — so the
+  manifest guard could never repair it either, because it only restores what was stored. The guard
+  now picks up those apps: one per sweep and once per session, since packaging a depot upstream can
+  take minutes.
+
 ## 1.1.0 - 2026-09-11
 
 Drydock now hosts the emulator binaries itself, and the game pages were cut down to a couple of

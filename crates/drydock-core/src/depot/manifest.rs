@@ -354,7 +354,7 @@ impl<'a> ProtoReader<'a> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // --- tiny protobuf/manifest writers, used only to build test fixtures ---
@@ -400,7 +400,8 @@ mod tests {
         out.extend_from_slice(body);
     }
 
-    fn build_manifest(depot_id: u32, gid: u64, encrypted: bool, files: &[FileEntry]) -> Vec<u8> {
+    /// Also used by the download module's tests, to assemble a whole depot package.
+    pub(crate) fn build_manifest(depot_id: u32, gid: u64, encrypted: bool, files: &[FileEntry]) -> Vec<u8> {
         let mut payload = Vec::new();
         for file in files {
             let mut mapping = Vec::new();

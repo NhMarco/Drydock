@@ -67,6 +67,14 @@ pub struct DepotData {
     /// itself, and only the untouched bytes are guaranteed to be what it expects. Parsing decrypts
     /// file names in the parsed copy, which must never leak back into what is written to disk.
     pub raw_manifests: BTreeMap<String, Vec<u8>>,
+    /// The unlock Lua the package ships, as `(file name, bytes)`, when it has one.
+    ///
+    /// Preferred over the separate Lua API: this copy is cut from the same package as the manifests
+    /// beside it, so its `setManifestid` lines are active and pin exactly the manifest GIDs shipped
+    /// here. The Lua API returns the same app's unlock built against the *current* build instead —
+    /// with the pins commented out and, for at least one observed title, fewer DLC ownership lines.
+    /// Installing that leaves Steam unpinned and the cached manifests unused.
+    pub lua: Option<(String, Vec<u8>)>,
 }
 
 impl DepotData {
@@ -75,13 +83,18 @@ impl DepotData {
     /// `.lua` (`addappid(<depot>, 1, "<hex>")`) and/or any `.key` file. Encrypted filenames are
     /// decrypted with the matching depot key.
     pub fn fetch(proxy: &ProxyClient, app_id: u32) -> Result<Self, DepotDownloadError> {
-        let zip_bytes = proxy.depot_package(app_id)?;
+        Self::parse_package(app_id, proxy.depot_package(app_id)?)
+    }
+
+    /// The parsing half of [`Self::fetch`], split out so it can be exercised without a network.
+    pub fn parse_package(app_id: u32, zip_bytes: Vec<u8>) -> Result<Self, DepotDownloadError> {
         let mut archive = ZipArchive::new(std::io::Cursor::new(zip_bytes))
             .map_err(|error| DepotDownloadError::Archive(error.to_string()))?;
 
         // First pass: collect keys (from `.lua`/`.key`) and the raw manifest blobs.
         let mut keys = DepotKeys::default();
         let mut raw_manifests: Vec<Vec<u8>> = Vec::new();
+        let mut lua: Option<(String, Vec<u8>)> = None;
         for index in 0..archive.len() {
             let mut entry = archive
                 .by_index(index)
@@ -95,6 +108,12 @@ impl DepotData {
                 raw_manifests.push(bytes);
             } else if name.ends_with(".lua") {
                 keys.merge_from(DepotKeys::parse_lua(&String::from_utf8_lossy(&bytes)));
+                // Keep the first one only: a package carries the app's unlock, and a second `.lua`
+                // would be something else. The name is taken from the archive but never used as a
+                // path — the caller writes it as `<app id>.lua`.
+                if lua.is_none() {
+                    lua = Some((format!("{app_id}.lua"), bytes));
+                }
             } else if name.ends_with(".key") {
                 keys.merge_from(DepotKeys::parse(&String::from_utf8_lossy(&bytes)));
             }
@@ -122,6 +141,7 @@ impl DepotData {
             keys,
             manifests,
             raw_manifests: stored,
+            lua,
         })
     }
 
@@ -662,6 +682,59 @@ mod tests {
             filenames_encrypted: false,
             files,
         }
+    }
+
+    /// Packs `(name, bytes)` into a ZIP shaped like an upstream depot package.
+    fn package_zip(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        use std::io::Write;
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(&mut buffer);
+        let options: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (name, bytes) in entries {
+            writer.start_file(*name, options).expect("entry");
+            writer.write_all(bytes).expect("write");
+        }
+        writer.finish().expect("finish");
+        buffer.into_inner()
+    }
+
+    fn one_manifest(depot_id: u32, gid: u64) -> Vec<u8> {
+        crate::depot::manifest::tests::build_manifest(
+            depot_id,
+            gid,
+            false,
+            &[FileEntry {
+                path: "game.exe".into(),
+                size: 10,
+                flags: 0,
+                chunks: vec![],
+            }],
+        )
+    }
+
+    #[test]
+    fn the_packages_own_lua_is_taken_and_named_after_the_app() {
+        // The point of preferring it: this copy pins the very manifest shipped beside it, whereas
+        // the separate Lua API answers for the current build with its `setManifestid` commented out.
+        let lua = b"addappid(5)\nsetManifestid(9,\"123\")\n".to_vec();
+        let zip = package_zip(&[
+            ("9_123.manifest", one_manifest(9, 123)),
+            ("whatever-they-called-it.lua", lua.clone()),
+        ]);
+
+        let data = DepotData::parse_package(4242, zip).expect("package parses");
+        let (name, bytes) = data.lua.expect("the package's Lua is picked up");
+        assert_eq!(name, "4242.lua", "it is installed under the app's own name");
+        assert_eq!(bytes, lua, "and byte-for-byte as shipped");
+        assert!(data.raw_manifests.contains_key("9_123.manifest"));
+    }
+
+    #[test]
+    fn a_package_without_a_lua_reports_none() {
+        // The caller then falls back to the Lua API rather than leaving the app unlocked.
+        let zip = package_zip(&[("9_123.manifest", one_manifest(9, 123))]);
+        assert!(DepotData::parse_package(1, zip).expect("parses").lua.is_none());
     }
 
     #[test]

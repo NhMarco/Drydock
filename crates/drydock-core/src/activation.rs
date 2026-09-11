@@ -20,9 +20,15 @@ use thiserror::Error;
 
 use crate::version::user_agent;
 
+/// Wire constants. These are shared with the activation bot and are **not** branding: renaming one
+/// silently breaks activation for everybody, because the bot compares the bytes and nothing else.
+/// `CSL1` and `CSLTKN1\0` predate even the TIDES name. Leave them alone.
 const REQUEST_PREFIX: &str = "CSL1";
 /// Product discriminator embedded in a Ubisoft activation request (Steam requests omit it).
 const PRODUCT_UBISOFT: &str = "ubisoft";
+/// AES-GCM additional authenticated data for the request envelope, which the bot must supply
+/// byte-identically for the tag to verify. The rename to `Drydock` shipped in v1.0.0 and the bot
+/// follows it; it also still accepts the old `TIDES-` value so pre-rename clients keep working.
 const REQUEST_AAD: &[u8] = b"Drydock-ACTIVATION-REQUEST-V1";
 const SERVICE_HOST: &str = "paste.rtech.support";
 const CODE_LENGTH: usize = 8;
@@ -1059,6 +1065,17 @@ mod tests {
             )
             .expect("decrypt request");
         assert_eq!(plaintext, b"CSL1.example.checksum");
+    }
+
+    #[test]
+    fn the_wire_constants_are_pinned_to_what_the_bot_expects() {
+        // These bytes are the protocol, not the product name. A rename swept `TIDES` into the AAD
+        // once already, which silently broke every activation: the bot's AES-GCM tag check fails and
+        // the code is rejected with no hint as to why. If this test fails because the bot changed,
+        // change the bot and the client together — never one alone.
+        assert_eq!(REQUEST_AAD, b"Drydock-ACTIVATION-REQUEST-V1");
+        assert_eq!(REQUEST_PREFIX, "CSL1");
+        assert_eq!(TOKEN_MAGIC, b"CSLTKN1\0");
     }
 
     #[test]

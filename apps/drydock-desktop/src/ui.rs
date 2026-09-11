@@ -124,6 +124,10 @@ const SERVICE_RECHECK_COOLDOWN: Duration = Duration::from_secs(30);
 /// starting or stopping re-checks immediately anyway, so the timer is just the backstop.
 const MANIFEST_RECHECK_COOLDOWN: Duration = Duration::from_secs(600);
 
+/// What one depot-manifest guard sweep did: manifests restored, the apps repaired, and the app it
+/// spent its single depot fetch on (so the session does not retry that one again).
+type ManifestGuardSweep = (usize, Vec<u32>, Option<u32>);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Page {
     Home,
@@ -277,8 +281,12 @@ pub struct DrydockApp {
     /// Apps already warned about launching uncracked, so the reminder doesn't repeat on every Play
     /// click. Session-only: a fresh start reminds again, as long as the game is still uncracked.
     launch_warned: HashSet<u32>,
-    /// Running depot-manifest guard sweep, if any: `(manifests restored, apps repaired)`.
-    manifest_guard_receiver: Option<Receiver<(usize, Vec<u32>)>>,
+    /// Running depot-manifest guard sweep, if any.
+    manifest_guard_receiver: Option<Receiver<ManifestGuardSweep>>,
+    /// Apps whose missing depot package this session already tried to fetch, successfully or not.
+    /// Session-only: a restart is a fair moment to try again, since the upstream may have finished
+    /// packaging in the meantime.
+    manifest_fetch_attempted: HashSet<u32>,
     last_manifest_check: Option<Instant>,
     /// Whether Steam was running at the previous guard tick — a flip means an account switch or a
     /// client restart may just have emptied `depotcache`, which is the moment worth re-checking.
@@ -667,6 +675,7 @@ impl DrydockApp {
             validated_steam_path: None,
             launch_warned: HashSet::new(),
             manifest_guard_receiver: None,
+            manifest_fetch_attempted: HashSet::new(),
             last_manifest_check: None,
             steam_was_running: is_steam_running(),
             selected_app: None,
@@ -2044,21 +2053,47 @@ impl DrydockApp {
                 if service_status(&root, &manifest).state != SteamServiceState::Current {
                     return Err("Install or update the Steam Service before adding an app.".to_owned());
                 }
-                let bytes = client.download_lua(app_id).map_err(|error| error.to_string())?;
-                let file_name = format!("{app_id}.lua");
+                // One fetch for both halves. The package's own Lua is the one to install: it is cut
+                // from the same build as the manifests beside it, so its `setManifestid` lines are
+                // active and pin exactly those GIDs. The Lua API answers for the *current* build
+                // instead, with the pins commented out — Steam then resolves a build of its own
+                // choosing and the manifests cached here are never the ones it asks for.
+                let depot = DepotData::fetch(&client, app_id);
+                let (file_name, bytes, manifests) = match &depot {
+                    Ok(data) if data.lua.is_some() => {
+                        let (name, bytes) = data.lua.clone().expect("checked above");
+                        (name, bytes, Ok(&data.raw_manifests))
+                    }
+                    // No package, or one without a Lua: fall back to the Lua API so the app can
+                    // still be unlocked, and say so — that unlock is not pinned to a build.
+                    other => {
+                        let bytes = client.download_lua(app_id).map_err(|error| error.to_string())?;
+                        let error = match other {
+                            Err(error) => error.to_string(),
+                            Ok(_) => "the depot package carried no unlock Lua".to_owned(),
+                        };
+                        (format!("{app_id}.lua"), bytes, Err(error))
+                    }
+                };
                 let installed_names = vec![file_name.clone()];
                 let mut payload = std::collections::BTreeMap::new();
                 payload.insert(file_name.clone(), bytes.clone());
                 add_app_files(&root, &payload).map_err(|error| error.to_string())?;
-                // The unlock is in place; now cache the depot manifests so Steam does not have to
-                // fetch them itself, and keep our own copy of both. Best effort — see
-                // `copy_depot_manifests_to_cache`.
-                let manifests =
-                    copy_depot_manifests_to_cache(&client, &root, &store, app_id, Some((&file_name, &bytes)));
+
+                let installed = match manifests {
+                    Ok(raw) => {
+                        let count = install_depot_manifests(&root, raw).map_err(|e| e.to_string());
+                        // Our own copy of both, so a later reinstall needs no network. Failing to
+                        // keep it does not undo an otherwise successful add.
+                        let _ = store.save(app_id, Some((&file_name, &bytes)), raw);
+                        count
+                    }
+                    Err(error) => Err(error),
+                };
                 Ok(ServiceOutcome::Added {
                     app_id,
                     files: installed_names,
-                    note: added_note(&name, &manifests),
+                    note: added_note(&name, &installed),
                 })
             })();
             let _ = sender.send(result);
@@ -3749,15 +3784,24 @@ impl DrydockApp {
             return;
         }
         let store = self.payload_store.clone();
+        let fetch_attempted = self.manifest_fetch_attempted.clone();
         let (sender, receiver) = mpsc::channel();
         self.manifest_guard_receiver = Some(receiver);
         std::thread::spawn(move || {
             let mut restored = 0usize;
             let mut repaired = Vec::new();
+            let mut attempted: Option<u32> = None;
+            // Apps the add never managed to store manifests for. Caching the depot package is best
+            // effort at add time — an upstream that is slow, down, or still packaging leaves the app
+            // with its unlock and nothing else, and because nothing was stored the cheap local pass
+            // below can never repair it. Those need a fetch, which is expensive, so they are only
+            // collected here and one is retried at the end.
+            let mut never_stored = Vec::new();
             for app_id in apps {
                 let index = store.manifest_index(app_id);
                 if index.is_empty() {
-                    continue; // nothing stored for this app — Update would have to fetch it
+                    never_stored.push(app_id);
+                    continue;
                 }
                 let missing = missing_depot_manifests(&steam_root, &index);
                 if missing.is_empty() {
@@ -3778,7 +3822,21 @@ impl DrydockApp {
                     repaired.push(app_id);
                 }
             }
-            let _ = sender.send((restored, repaired));
+
+            // At most one fetch per sweep, and each app only once per session: packaging a depot
+            // upstream takes seconds for a small title and minutes for a large one, so retrying the
+            // whole backlog at once would hammer a service that is most likely already struggling.
+            // The sweep interval spaces the rest out on its own.
+            if let Some(app_id) = never_stored.into_iter().find(|id| !fetch_attempted.contains(id))
+                && let Ok(proxy) = ProxyClient::new()
+            {
+                attempted = Some(app_id);
+                if let Ok(count) = copy_depot_manifests_to_cache(&proxy, &steam_root, &store, app_id, None) {
+                    restored += count;
+                    repaired.push(app_id);
+                }
+            }
+            let _ = sender.send((restored, repaired, attempted));
         });
     }
 
@@ -3789,8 +3847,11 @@ impl DrydockApp {
             return;
         };
         match receiver.try_recv() {
-            Ok((restored, repaired)) => {
+            Ok((restored, repaired, attempted)) => {
                 self.manifest_guard_receiver = None;
+                if let Some(app_id) = attempted {
+                    self.manifest_fetch_attempted.insert(app_id);
+                }
                 if restored > 0 {
                     self.status = format!(
                         "Steam had dropped {restored} depot manifest(s) for {} game(s) — restored from \
@@ -10169,7 +10230,12 @@ fn added_note(name: &str, manifests: &Result<usize, String>) -> String {
     match manifests {
         Ok(0) => format!("\"{name}\" added to Steam. No depot manifests were packaged for it."),
         Ok(count) => format!("\"{name}\" added to Steam, with {count} depot manifest(s) cached."),
-        Err(_) => format!("\"{name}\" added to Steam. Depot manifests could not be cached."),
+        // Worth spelling out: without the package the unlock came from the Lua API, whose
+        // `setManifestid` lines are commented out — Steam is then free to install any build.
+        Err(reason) => format!(
+            "\"{name}\" added to Steam, but its depot package was unavailable ({reason}), so no \
+             manifests were cached and the unlock is not pinned to a build. Press Update later."
+        ),
     }
 }
 #[cfg(test)]
