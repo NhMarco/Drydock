@@ -1,0 +1,289 @@
+
+use eframe::egui::{self, Color32, FontId, RichText, Sense, Stroke, Vec2};
+
+use crate::ui::theme::*;
+use crate::ui::types::*;
+use crate::ui::widgets::*;
+use crate::ui::helpers::*;
+
+pub fn guide_tab(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
+    let font = FontId::proportional(11.0);
+    let width = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font.clone(), Color32::WHITE)
+        .size()
+        .x;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width + 40.0, 34.0), Sense::click());
+    let hover = ui.ctx().animate_bool(response.id, response.hovered());
+    let fill = if active {
+        ACCENT_DEEP
+    } else {
+        lerp_color(Color32::TRANSPARENT, SURFACE_RAISED, hover)
+    };
+    let text_color = if active {
+        Color32::WHITE
+    } else {
+        lerp_color(MUTED, TEXT, hover)
+    };
+    ui.painter().rect_filled(rect, 8, fill);
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), font, text_color);
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, text_color);
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response
+}
+
+/// One stage of the How It Works guide: a gradient index badge with a title and subtitle, then
+/// its numbered steps laid out as a connected vertical timeline. `step_number` continues across
+/// stages so the steps read 1..N over the whole flow.
+pub fn guide_stage(
+    ui: &mut egui::Ui,
+    index: usize,
+    title: &str,
+    subtitle: &str,
+    steps: &[(&str, &str)],
+    step_number: &mut usize,
+) {
+    panel(ui, |ui| {
+        // Header: a rounded gradient badge carrying the stage index, then the stage title.
+        ui.horizontal(|ui| {
+            let (badge, _) = ui.allocate_exact_size(Vec2::splat(42.0), Sense::hover());
+            let painter = ui.painter();
+            painter.rect_filled(badge, 12, ACCENT_DEEP);
+            // A soft top highlight fakes a vertical gradient on the badge.
+            painter.rect_filled(
+                egui::Rect::from_min_size(badge.min, Vec2::new(42.0, 21.0)),
+                egui::CornerRadius {
+                    nw: 12,
+                    ne: 12,
+                    sw: 0,
+                    se: 0,
+                },
+                Color32::from_rgba_unmultiplied(255, 255, 255, 24),
+            );
+            painter.text(
+                badge.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("{index:02}"),
+                FontId::proportional(17.0),
+                Color32::WHITE,
+            );
+            ui.add_space(12.0);
+            ui.vertical(|ui| {
+                ui.label(RichText::new(title).size(16.0).strong().color(TEXT));
+                ui.label(RichText::new(subtitle).size(10.5).color(ACCENT));
+            });
+        });
+        ui.add_space(16.0);
+
+        // Steps as a timeline: the connecting rail is drawn behind the numbered nodes so it reads
+        // as one continuous flow. Node centres are collected during layout, then painted after.
+        let rail_width = 34.0;
+        let node_radius = 11.0;
+        let mut nodes: Vec<f32> = Vec::new();
+        let mut rail_x = 0.0_f32;
+        ui.vertical(|ui| {
+            for (offset, (step_title, detail)) in steps.iter().enumerate() {
+                if offset > 0 {
+                    ui.add_space(16.0);
+                }
+                ui.horizontal_top(|ui| {
+                    rail_x = ui.cursor().min.x + rail_width / 2.0;
+                    ui.add_space(rail_width);
+                    let content = ui.vertical(|ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(*step_title).size(12.5).strong().color(TEXT))
+                                .wrap(),
+                        );
+                        ui.add_space(2.0);
+                        ui.add(egui::Label::new(RichText::new(*detail).size(10.5).color(MUTED)).wrap());
+                    });
+                    nodes.push(content.response.rect.top() + 9.0);
+                });
+            }
+        });
+
+        if let (Some(&first), Some(&last)) = (nodes.first(), nodes.last())
+            && nodes.len() > 1
+        {
+            ui.painter().line_segment(
+                [egui::pos2(rail_x, first), egui::pos2(rail_x, last)],
+                Stroke::new(2.0, lerp_color(BORDER, ACCENT_DEEP, 0.5)),
+            );
+        }
+        for &y in &nodes {
+            let center = egui::pos2(rail_x, y);
+            ui.painter()
+                .circle_filled(center, node_radius, lerp_color(SURFACE, ACCENT_DEEP, 0.32));
+            ui.painter().circle_stroke(
+                center,
+                node_radius,
+                Stroke::new(1.0, lerp_color(BORDER, ACCENT, 0.6)),
+            );
+            ui.painter().text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                step_number.to_string(),
+                FontId::proportional(10.5),
+                TEXT,
+            );
+            *step_number += 1;
+        }
+    });
+}
+
+/// A stacked label/value field for the narrow details column.
+
+impl DrydockApp {
+    pub fn guide_page(&mut self, ui: &mut egui::Ui) {
+        if back_button(ui, "Return to the game library").clicked() {
+            self.page = Page::Home;
+            return;
+        }
+        ui.add_space(14.0);
+        page_heading(ui, "HOW IT WORKS");
+        ui.add_space(18.0);
+
+        // Segmented switch between the two walkthroughs.
+        egui::Frame::new()
+            .fill(Color32::from_rgb(18, 21, 24))
+            .stroke(Stroke::new(1.0, BORDER))
+            .corner_radius(11)
+            .inner_margin(4)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    if guide_tab(ui, "ACTIVATION", self.guide_flow == GuideFlow::Activation).clicked() {
+                        self.guide_flow = GuideFlow::Activation;
+                    }
+                    if guide_tab(ui, "FIXES", self.guide_flow == GuideFlow::Fixes).clicked() {
+                        self.guide_flow = GuideFlow::Fixes;
+                    }
+                });
+            });
+        ui.add_space(20.0);
+
+        // Each flow is three clear stages so the whole process reads at a glance.
+        type GuideStep = (&'static str, &'static str);
+        type GuideStage = (&'static str, &'static str, &'static [GuideStep]);
+        const ACTIVATION_STAGES: [GuideStage; 3] = [
+            (
+                "PREPARE",
+                "Get your library and a game ready.",
+                &[
+                    (
+                        "Set your Steam folder",
+                        "Open Settings, point Drydock at your Steam folder, and it reads your installed games.",
+                    ),
+                    (
+                        "Install the Steam Service",
+                        "In Settings, install the Steam Service — it is required before a game can be added to Steam.",
+                    ),
+                    (
+                        "Download the game fully",
+                        "Add a supported game and let Steam finish downloading it completely before activating.",
+                    ),
+                ],
+            ),
+            (
+                "ACTIVATE",
+                "Turn a request code into a signed entitlement.",
+                &[
+                    (
+                        "Generate a request code",
+                        "Open Activation, pick the installed game, generate the request code, and copy it.",
+                    ),
+                    (
+                        "Submit it in Discord",
+                        "Open a Steam ticket in Discord, choose Activation Code, and paste the request code.",
+                    ),
+                    (
+                        "Enter the response code",
+                        "Type the eight-character response code the bot returns, then select Activate.",
+                    ),
+                ],
+            ),
+            (
+                "PLAY",
+                "Verified, protected, and ready.",
+                &[
+                    (
+                        "Automatic verification",
+                        "Drydock checks the signature, device, machine, App ID, lifetime, and payload integrity.",
+                    ),
+                    (
+                        "Keep updates paused",
+                        "Leave game updates disabled for the entitlement so it keeps working, then launch and play.",
+                    ),
+                ],
+            ),
+        ];
+        const FIXES_STAGES: [GuideStage; 3] = [
+            (
+                "PREPARE",
+                "Install the game you want to fix.",
+                &[
+                    (
+                        "Set your Steam folder",
+                        "Open Settings and point Drydock at your Steam folder so it can see your installed games.",
+                    ),
+                    (
+                        "Install the Steam Service",
+                        "In Settings, install the Steam Service — it must be current before a fix can be applied.",
+                    ),
+                    (
+                        "Install the game fully",
+                        "Add the game and let Steam finish downloading it completely, so there are files to patch.",
+                    ),
+                ],
+            ),
+            (
+                "APPLY THE FIX",
+                "One click installs everything the fix needs.",
+                &[
+                    (
+                        "Open the Fixes tab",
+                        "Pick a game that has a build-locked fix, then open its details page.",
+                    ),
+                    (
+                        "Select Apply Fix",
+                        "Drydock installs the matching unlock and downloads the fix files over your game install.",
+                    ),
+                    (
+                        "Let it finish",
+                        "Large fixes take a while to download and unpack — keep Drydock open until it reports success.",
+                    ),
+                ],
+            ),
+            (
+                "PLAY",
+                "Fixed, locked to a working build, and ready.",
+                &[
+                    (
+                        "Updates are paused for you",
+                        "The fix targets one game build, so Drydock blocks Steam updates to keep an update from breaking it.",
+                    ),
+                    (
+                        "Launch and play",
+                        "Start the game from Steam as usual — the fix is already in place.",
+                    ),
+                ],
+            ),
+        ];
+
+        let stages: &[GuideStage] = match self.guide_flow {
+            GuideFlow::Activation => &ACTIVATION_STAGES,
+            GuideFlow::Fixes => &FIXES_STAGES,
+        };
+        let mut step = 1;
+        for (index, (stage, stage_subtitle, steps)) in stages.iter().enumerate() {
+            if index > 0 {
+                ui.add_space(16.0);
+            }
+            guide_stage(ui, index + 1, stage, stage_subtitle, steps, &mut step);
+        }
+    }
+}
+
