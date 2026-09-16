@@ -9,7 +9,10 @@ permissions:
   contents: read
 
 jobs:
+  # The proxy is deployed on its own and is not part of an app release, so a release does not wait
+  # for it; run this workflow by hand to check proxy changes.
   proxy:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     defaults:
