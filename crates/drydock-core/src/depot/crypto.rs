@@ -22,6 +22,8 @@ const VZIP_FOOTER: u16 = 0x767A; // "zv"
 /// (u32 crc + u64 uncompressed size + "zsv").
 const VSZ_HEADER_LEN: usize = 8;
 const VSZ_FOOTER_LEN: usize = 15;
+/// Steam cuts depot files into chunks of at most 1 MiB; a container claiming far more is broken.
+const MAXIMUM_CHUNK_BYTES: u32 = 16 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum ChunkError {
@@ -104,19 +106,30 @@ fn vzip_decompress(data: &[u8]) -> Result<Vec<u8>, ChunkError> {
     if u16::from_le_bytes([footer[8], footer[9]]) != VZIP_FOOTER {
         return Err(ChunkError::Vzip("bad footer"));
     }
-    let output_size = u32::from_le_bytes([footer[4], footer[5], footer[6], footer[7]]) as u64;
-    let properties = &data[7..12];
+    let output_size = u32::from_le_bytes([footer[4], footer[5], footer[6], footer[7]]);
+    // The decoder sizes its dictionary from the declared output, so an absurd size is refused
+    // before anything is allocated.
+    if output_size > MAXIMUM_CHUNK_BYTES {
+        return Err(ChunkError::Vzip("declared size too large"));
+    }
+    let properties = data[7];
+    let dictionary_size = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
     let stream = &data[12..data.len() - 10];
 
-    // Reassemble the LZMA "alone" layout lzma-rs expects: 5 property bytes, an 8-byte little-endian
-    // uncompressed size, then the raw stream.
-    let mut alone = Vec::with_capacity(13 + stream.len());
-    alone.extend_from_slice(properties);
-    alone.extend_from_slice(&output_size.to_le_bytes());
-    alone.extend_from_slice(stream);
-
+    // Depot chunks are mostly already-compressed game data, which makes LZMA decoding the slowest
+    // step of a download by far; `lzma-rust2` decodes it about twice as fast as `lzma-rs` did.
+    let mut reader = lzma_rust2::LzmaReader::new_with_props(
+        stream,
+        u64::from(output_size),
+        properties,
+        dictionary_size,
+        None,
+    )
+    .map_err(|e| ChunkError::Lzma(e.to_string()))?;
     let mut out = Vec::with_capacity(output_size as usize);
-    lzma_rs::lzma_decompress(&mut &alone[..], &mut out).map_err(|e| ChunkError::Lzma(e.to_string()))?;
+    reader
+        .read_to_end(&mut out)
+        .map_err(|e| ChunkError::Lzma(e.to_string()))?;
     Ok(out)
 }
 
@@ -154,8 +167,19 @@ fn inflate(data: &[u8]) -> Result<Vec<u8>, ChunkError> {
 /// The chunk checksum Steam stores in the manifest (`ChunkData.crc`). This is SteamKit2's
 /// `Utils.AdlerHash`, which is an Adler-32 **variant that starts `a = 0, b = 0`** (not the standard
 /// `a = 1`), returning `a | (b << 16)`.
+///
+/// Every downloaded chunk and every chunk a verify reads goes through this, so it uses the SIMD
+/// implementation; starting it from the checksum 0 gives exactly this variant.
 #[must_use]
 pub fn steam_adler_hash(data: &[u8]) -> u32 {
+    let mut hash = simd_adler32::Adler32::from_checksum(0);
+    hash.write(data);
+    hash.finish()
+}
+
+/// The plain loop [`steam_adler_hash`] must agree with.
+#[cfg(test)]
+fn scalar_steam_adler_hash(data: &[u8]) -> u32 {
     const MOD: u32 = 65_521;
     let mut a: u32 = 0;
     let mut b: u32 = 0;
@@ -203,6 +227,43 @@ mod tests {
     }
 
     #[test]
+    fn the_fast_checksum_matches_the_plain_loop() {
+        // Lengths around the SIMD block sizes and the 5552-byte reduction interval, and bytes that
+        // push the sums towards their modulus.
+        for length in [
+            0,
+            1,
+            15,
+            16,
+            17,
+            31,
+            32,
+            33,
+            63,
+            64,
+            65,
+            5551,
+            5552,
+            5553,
+            70_000,
+            1 << 20,
+        ] {
+            let high = vec![0xFF_u8; length];
+            let mixed: Vec<u8> = (0..length).map(|index| (index * 131 % 251) as u8).collect();
+            assert_eq!(
+                steam_adler_hash(&high),
+                scalar_steam_adler_hash(&high),
+                "0xFF x {length}"
+            );
+            assert_eq!(
+                steam_adler_hash(&mixed),
+                scalar_steam_adler_hash(&mixed),
+                "mixed x {length}"
+            );
+        }
+    }
+
+    #[test]
     fn symmetric_decrypt_round_trips() {
         let key = [7u8; 32];
         let iv = [3u8; 16];
@@ -232,6 +293,50 @@ mod tests {
         container.extend_from_slice(&(raw.len() as u64).to_le_bytes()); // uncompressed size
         container.extend_from_slice(b"zsv"); // footer magic
         assert_eq!(decompress(&container).unwrap(), raw);
+    }
+
+    /// Packs `raw` the way Steam ships most depot chunks: a VZip container around a raw LZMA stream.
+    fn vzip(raw: &[u8], declared_size: u32) -> Vec<u8> {
+        use std::io::Write;
+        let options = lzma_rust2::LzmaOptions::with_preset(6);
+        let mut writer =
+            lzma_rust2::LzmaWriter::new(Vec::new(), &options, false, false, Some(raw.len() as u64)).unwrap();
+        writer.write_all(raw).unwrap();
+        let properties = writer.props();
+        let stream = writer.finish().unwrap();
+        let mut container = b"VZa".to_vec();
+        container.extend_from_slice(&0u32.to_le_bytes()); // timestamp
+        container.push(properties);
+        container.extend_from_slice(&options.dict_size.to_le_bytes());
+        container.extend_from_slice(&stream);
+        container.extend_from_slice(&0u32.to_le_bytes()); // crc
+        container.extend_from_slice(&declared_size.to_le_bytes());
+        container.extend_from_slice(b"zv");
+        container
+    }
+
+    #[test]
+    fn decompress_handles_vzip_lzma() {
+        let raw: Vec<u8> = b"most depot chunks are VZip; "
+            .iter()
+            .copied()
+            .cycle()
+            .take(300_000)
+            .enumerate()
+            .map(|(index, byte)| if index % 97 == 0 { index as u8 } else { byte })
+            .collect();
+        assert_eq!(decompress(&vzip(&raw, raw.len() as u32)).unwrap(), raw);
+    }
+
+    #[test]
+    fn a_vzip_claiming_a_huge_size_is_refused_before_decoding() {
+        let raw = b"tiny".to_vec();
+        assert!(matches!(
+            decompress(&vzip(&raw, u32::MAX)),
+            Err(ChunkError::Vzip(_))
+        ));
+        // A size that does not match the stream is an error, not a short or padded chunk.
+        assert!(!matches!(decompress(&vzip(&raw, 64)), Ok(out) if out.len() == 64));
     }
 
     #[test]

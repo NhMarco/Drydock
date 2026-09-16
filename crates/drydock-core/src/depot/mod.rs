@@ -7,17 +7,18 @@
 //!
 //! Submodules: [`crypto`] (chunk AES + VZip/deflate + Adler-32), [`keys`] (`.key` parsing),
 //! [`manifest`] (protobuf manifest parsing), [`cdn`] (content-server directory + chunk fetch),
-//! [`download`] (fetch/parse orchestration, download + verify with progress).
+//! [`download`] (fetch/parse orchestration, download with progress), [`verify`] (checking an install
+//! against its manifests).
 
 pub mod cdn;
 pub mod crypto;
 pub mod download;
 pub mod keys;
 pub mod manifest;
+pub mod verify;
 
 pub use cdn::{CdnClient, CdnError, ContentServer};
-pub use download::{
-    DepotData, DepotDownloadError, DownloadOutcome, DownloadProgress, DownloadStage, VerifyOutcome,
-};
+pub use download::{DepotData, DepotDownloadError, DownloadOutcome, DownloadProgress, DownloadStage};
 pub use keys::DepotKeys;
 pub use manifest::{ChunkEntry, DepotManifest, FileEntry};
+pub use verify::{MAXIMUM_VERIFY_THREADS, VerifyOutcome, verify, verify_threads};

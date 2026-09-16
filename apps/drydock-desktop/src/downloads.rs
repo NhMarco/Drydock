@@ -1,5 +1,16 @@
 //! Depot worker protocol and orchestration, independent of egui rendering.
 use drydock_core::{CdnClient, DepotData, DownloadProgress, ProxyClient, depot, fetch_install_dir};
+
+/// How hard a depot job may push the network and the disk, from Settings.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct JobLimits {
+    /// Parallel CDN connections for a download.
+    pub(crate) connections: usize,
+    /// Aggregate download cap in bytes per second.
+    pub(crate) max_bps: Option<u64>,
+    /// The verify thread setting; `0` lets the engine choose for the drive.
+    pub(crate) verify_threads: u32,
+}
 use std::{
     path::PathBuf,
     sync::{
@@ -98,8 +109,7 @@ pub(crate) fn run_depot_job(
     steam_root: Option<PathBuf>,
     installed_dir: Option<PathBuf>,
     games_directory: Option<PathBuf>,
-    connections: usize,
-    max_bps: Option<u64>,
+    limits: JobLimits,
     cancel: &AtomicBool,
     sender: &mpsc::Sender<DownloadUpdate>,
 ) -> Result<String, String> {
@@ -126,9 +136,16 @@ pub(crate) fn run_depot_job(
     match kind {
         DownloadKind::Download => {
             let cdn = CdnClient::new().map_err(|error| error.to_string())?;
-            let outcome =
-                depot::download::download(&data, &install_root, &cdn, cancel, connections, max_bps, forward)
-                    .map_err(|error| error.to_string())?;
+            let outcome = depot::download::download(
+                &data,
+                &install_root,
+                &cdn,
+                cancel,
+                limits.connections,
+                limits.max_bps,
+                forward,
+            )
+            .map_err(|error| error.to_string())?;
             let _ = sender.send(DownloadUpdate::Installed(outcome.install_root));
             Ok(format!(
                 "Downloaded {name} — {} files, {}",
@@ -137,7 +154,8 @@ pub(crate) fn run_depot_job(
             ))
         }
         DownloadKind::Verify => {
-            let outcome = depot::download::verify(&data, &install_root, cancel, forward)
+            let threads = depot::verify_threads(limits.verify_threads, &install_root);
+            let outcome = depot::verify(&data, &install_root, cancel, threads, forward)
                 .map_err(|error| error.to_string())?;
             let _ = sender.send(DownloadUpdate::Verified(outcome.is_complete()));
             if outcome.is_complete() {

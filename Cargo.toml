@@ -47,3 +47,7 @@ codegen-units = 1
 opt-level = "s"
 panic = "abort"
 strip = "symbols"
+
+# LZMA decoding is the hot loop of a depot download; it is worth the few extra bytes.
+[profile.release.package.lzma-rust2]
+opt-level = 3

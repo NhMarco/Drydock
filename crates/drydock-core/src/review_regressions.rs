@@ -77,7 +77,7 @@ fn verify_checks_lengths_and_empty_files() {
         }],
         ..Default::default()
     };
-    let outcome = download::verify(&data, dir.path(), &AtomicBool::new(false), |_| {}).unwrap();
+    let outcome = crate::depot::verify(&data, dir.path(), &AtomicBool::new(false), 2, |_| {}).unwrap();
     assert_eq!(outcome.bad_chunks, 0);
     assert_eq!(outcome.bad_files, 2);
     assert!(!outcome.is_complete());
@@ -87,7 +87,7 @@ fn verify_checks_lengths_and_empty_files() {
     fs::write(dir.path().join("data.bin"), b"good").unwrap();
     fs::write(dir.path().join("empty"), b"").unwrap();
     assert!(
-        download::verify(&data, dir.path(), &AtomicBool::new(false), |_| {})
+        crate::depot::verify(&data, dir.path(), &AtomicBool::new(false), 2, |_| {})
             .unwrap()
             .is_complete()
     );

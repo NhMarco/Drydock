@@ -15,7 +15,6 @@ pub mod fixes;
 pub mod game_folder;
 pub mod harden;
 pub mod language;
-pub mod manifest_protection;
 pub mod mfb;
 pub mod models;
 pub mod open_steam_tool;
@@ -35,6 +34,7 @@ pub mod steam_service;
 pub mod steam_uri;
 pub mod store;
 pub mod ubisoft;
+pub mod update_blocks;
 pub mod updater;
 pub mod version;
 
@@ -72,7 +72,6 @@ pub use game_folder::{
 };
 pub use harden::harden_dll_search;
 pub use language::{GameLanguageError, GameLanguageOptions, apply_language, read_language_options};
-pub use manifest_protection::{ManifestProtectionError, set_manifest_updates_enabled, updates_enabled};
 pub use mfb::{
     DenuvoFix, FixEntry, RepositoryFile, SteamServiceManifest, SteamServicePackage, compute_git_blob_sha,
     matches_git_blob_sha,
@@ -105,5 +104,6 @@ pub use ubisoft::{
     TOKEN_FILE, TOKEN_REQUEST_FILE, UbisoftError, clear_previous_token_files, install_magicfiles,
     run_and_capture_token_request, token_directory,
 };
+pub use update_blocks::{UpdateBlockError, UpdateBlockRelease, release_update_blocks};
 pub use updater::{AppUpdater, AppVersion, PreparedUpdate, UpdateError};
 pub use version::APP_VERSION;

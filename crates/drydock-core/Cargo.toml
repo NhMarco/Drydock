@@ -28,8 +28,11 @@ zip.workspace = true
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 flate2.workspace = true
-lzma-rs = "0.3"
+# The same build sevenz-rust2 already pulls in, so VZip decoding adds nothing to compile.
+lzma-rust2 = { version = "0.20", default-features = false, features = ["std", "optimization"] }
 zstd = "0.13"
+# Chunk checksums (already built for flate2); the SIMD path is picked at run time.
+simd-adler32 = { version = "0.3.10", default-features = false, features = ["std"] }
 # Emu toolchain: gbe_fork ships its steamclient DLLs in a 7z archive (LZMA2 with BCJ filters, which
 # need no optional feature). The defaults would add AES, BZip2 and PPMd decoders nothing here reads.
 sevenz-rust2 = { version = "0.22.2", default-features = false }
@@ -37,12 +40,17 @@ tempfile = "3.23"
 cap-std = "4.0.3"
 
 [dev-dependencies]
-# The toolchain tests build their fixture archives.
+# The toolchain and depot tests build their fixture archives and chunks.
 sevenz-rust2 = { version = "0.22.2", default-features = false, features = ["compress"] }
+lzma-rust2 = { version = "0.20", default-features = false, features = ["std", "optimization", "encoder"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
 windows-sys = { version = "0.61", features = [
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
     "Win32_System_LibraryLoader",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",

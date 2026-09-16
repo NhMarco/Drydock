@@ -1,23 +1,26 @@
 //! Fetch + parse orchestration and the download/verify engine.
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
 use zip::ZipArchive;
 
-use super::cdn::{CdnClient, CdnError, ContentServer};
+use super::cdn::{CdnClient, CdnError, ContentServer, ServerPool, process_chunk};
 use super::crypto::steam_adler_hash;
 use super::keys::DepotKeys;
 use super::manifest::{DepotManifest, ManifestError};
 use crate::proxy::{ProxyClient, ProxyError};
 
-/// How many times to try a chunk across rotating CDN hosts before giving up.
+/// How many times a chunk may be fetched before the download gives up: a failed request moves on to
+/// another server (and gets at least one try per server), and so does a response that does not
+/// decode and check out.
 const CHUNK_ATTEMPTS: usize = 4;
 
 #[derive(Debug, Error)]
@@ -209,23 +212,6 @@ pub struct DownloadOutcome {
     pub bytes_written: u64,
 }
 
-/// Result of a verify pass.
-#[derive(Clone, Debug)]
-pub struct VerifyOutcome {
-    pub app_id: u32,
-    pub total_chunks: u64,
-    /// Chunks whose on-disk bytes are missing or fail their Adler-32 (i.e. need re-downloading).
-    pub bad_chunks: u64,
-    pub bad_files: u64,
-}
-
-impl VerifyOutcome {
-    #[must_use]
-    pub fn is_complete(&self) -> bool {
-        self.bad_chunks == 0 && self.bad_files == 0
-    }
-}
-
 /// Downloads `data` into `install_root` (usually `steamapps/common/<installdir>`). Existing, already
 /// valid chunks (matching Adler-32 on disk) are skipped, so this both **resumes** and repairs. The
 /// callback receives progress ticks; set `cancel` to abort between chunks.
@@ -236,14 +222,41 @@ pub fn download(
     cancel: &AtomicBool,
     connections: usize,
     max_bps: Option<u64>,
+    progress: impl FnMut(DownloadProgress),
+) -> Result<DownloadOutcome, DepotDownloadError> {
+    let servers = cdn.content_servers(0, data.app_id)?;
+    download_from(
+        data,
+        install_root,
+        cdn,
+        servers,
+        cancel,
+        connections,
+        max_bps,
+        progress,
+    )
+}
+
+/// [`download`] from the given content servers.
+///
+/// `connections` threads fetch chunks while a second set of threads, one per CPU core, decrypts,
+/// decompresses and writes them. Decoding is the slow part — most chunks are LZMA, which manages
+/// only a few dozen MB per second per core — so doing it on the fetching threads would leave
+/// connections idle while their chunk is being unpacked.
+#[allow(clippy::too_many_arguments)]
+fn download_from(
+    data: &DepotData,
+    install_root: &Path,
+    cdn: &CdnClient,
+    servers: Vec<ContentServer>,
+    cancel: &AtomicBool,
+    connections: usize,
+    max_bps: Option<u64>,
     mut progress: impl FnMut(DownloadProgress),
 ) -> Result<DownloadOutcome, DepotDownloadError> {
     let total = data.total_bytes();
     let app_id = data.app_id;
-    let servers = cdn.content_servers(0)?;
-    if servers.is_empty() {
-        return Err(DepotDownloadError::Cdn(CdnError::NoServers));
-    }
+    let pool = ServerPool::new(servers)?;
 
     // Refuse before writing anything if the volume plainly cannot hold the download. Sizing every
     // file up front means a full disk would otherwise fail somewhere in the middle, leaving a
@@ -253,11 +266,11 @@ pub fn download(
     let scope =
         crate::safe_path::WriteRoot::new(install_root).map_err(|error| io_err(install_root, error))?;
 
-    // Create every directory + size every file up front, then flatten all chunks into one work list
-    // the workers pull from. `files_meta[i]` = (target path, manifest-relative path for display,
-    // whether the file was newly created by this call).
-    let mut files_meta: Vec<FileSlot> = Vec::new();
-    let mut tasks: Vec<(usize, u32, &super::manifest::ChunkEntry)> = Vec::new();
+    // Create every directory + size every file up front, then list every distinct chunk once, with
+    // each place it belongs.
+    let mut files: Vec<FileSlot> = Vec::new();
+    let mut chunks: Vec<ChunkTask> = Vec::new();
+    let mut by_content: HashMap<(u32, [u8; 20], u32, u32), usize> = HashMap::new();
     // Folders already created by this call. Thousands of files share a handful of folders, and each
     // creation also checks the path for links, so it is done once per folder.
     let mut created: HashSet<PathBuf> = HashSet::new();
@@ -290,128 +303,94 @@ pub fn download(
             // Adler-32-ing) the entire game before fetching a single byte of it.
             let existed = target.exists();
             open_sized(&scope, &target, file.size)?;
-            let index = files_meta.len();
-            files_meta.push(FileSlot {
+            let index = files.len();
+            files.push(FileSlot {
                 path: target,
                 relative: file.path.clone(),
                 may_resume: existed,
             });
             for chunk in &file.chunks {
-                tasks.push((index, depot_id, chunk));
+                // Games often repeat content. Like Steam, fetch each distinct chunk once and write it
+                // everywhere it belongs.
+                let identity = (depot_id, chunk.sha, chunk.crc, chunk.uncompressed_len);
+                match by_content.entry(identity) {
+                    Entry::Occupied(entry) => chunks[*entry.get()].copies.push((index, chunk.offset)),
+                    Entry::Vacant(entry) => {
+                        entry.insert(chunks.len());
+                        chunks.push(ChunkTask {
+                            depot_id,
+                            chunk,
+                            copies: vec![(index, chunk.offset)],
+                        });
+                    }
+                }
             }
         }
     }
-    let files_written = files_meta.len() as u64;
-    let task_count = tasks.len();
+    drop(by_content);
+    let files_written = files.len() as u64;
 
-    let cursor = AtomicUsize::new(0);
-    let completed = AtomicUsize::new(0);
-    let done = AtomicU64::new(0);
-    let bytes_written = AtomicU64::new(0);
-    let server_cursor = AtomicUsize::new(0);
-    let current_file: Mutex<String> = Mutex::new(String::new());
-    let hard_error: Mutex<Option<DepotDownloadError>> = Mutex::new(None);
-    let limiter = max_bps.filter(|bps| *bps > 0).map(RateLimiter::new);
-    let workers = connections.clamp(1, 32);
+    // One core is left to the rest of the app, so the window stays responsive on a small CPU.
+    let decoders = std::thread::available_parallelism()
+        .map_or(4, std::num::NonZeroUsize::get)
+        .saturating_sub(1)
+        .clamp(1, MAXIMUM_DECODERS);
+    let engine = Engine {
+        data,
+        cdn,
+        pool,
+        scope,
+        files,
+        chunks,
+        cancel,
+        limiter: max_bps.filter(|bps| *bps > 0).map(RateLimiter::new),
+        next: AtomicUsize::new(0),
+        retries: Mutex::new(Vec::new()),
+        completed: AtomicUsize::new(0),
+        done: AtomicU64::new(0),
+        bytes_written: AtomicU64::new(0),
+        current_file: Mutex::new(String::new()),
+        failure: Mutex::new(None),
+    };
 
-    // N worker threads download chunks concurrently (each with its own file handles, writing to its
-    // chunk's byte offset), while the coordinating thread reports aggregate progress. `thread::scope`
-    // lets the workers borrow the shared state without `Arc`.
+    // A bounded hand-over: when decoding falls behind, the fetchers wait instead of piling up
+    // megabytes of undecoded chunks.
+    let (sender, receiver) = mpsc::sync_channel::<Fetched>(decoders);
+    let receiver = Mutex::new(receiver);
     std::thread::scope(|threads| {
-        for _ in 0..workers {
-            threads.spawn(|| {
-                let mut handles: HashMap<usize, File> = HashMap::new();
-                loop {
-                    if cancel.load(Ordering::Relaxed) || hard_error.lock().unwrap().is_some() {
-                        break;
-                    }
-                    let index = cursor.fetch_add(1, Ordering::Relaxed);
-                    if index >= task_count {
-                        break;
-                    }
-                    let (file_index, depot_id, chunk) = tasks[index];
-                    let slot = &files_meta[file_index];
-                    let path = &slot.path;
-                    let Some(key) = data.keys.get(depot_id) else {
-                        // Unreachable given the up-front key check above, but record it as a hard
-                        // error rather than just breaking: a silent break would leave `completed`
-                        // short of `task_count` with no error and no cancel, and the progress loop
-                        // below would spin forever.
-                        *hard_error.lock().unwrap() = Some(DepotDownloadError::MissingKey(depot_id));
-                        break;
-                    };
-                    // At most 16 files per worker (512 at the maximum concurrency).
-                    if handles.len() >= 16 && !handles.contains_key(&file_index) {
-                        handles.clear();
-                    }
-                    let handle = match handles.entry(file_index) {
-                        std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-                        std::collections::hash_map::Entry::Vacant(entry) => match scope.open(path, false) {
-                            Ok(file) => entry.insert(file),
-                            Err(source) => {
-                                *hard_error.lock().unwrap() = Some(io_err(path, source));
-                                break;
-                            }
-                        },
-                    };
-                    // Resume/repair: a chunk whose on-disk bytes already verify is skipped. Only
-                    // worth checking for files that predate this call — see `FileSlot::may_resume`.
-                    if slot.may_resume
-                        && chunk_on_disk_ok(handle, chunk.offset, chunk.uncompressed_len, chunk.crc, path)
-                            .unwrap_or(false)
-                    {
-                        done.fetch_add(u64::from(chunk.uncompressed_len), Ordering::Relaxed);
-                        completed.fetch_add(1, Ordering::Relaxed);
-                        continue;
-                    }
-                    if let Ok(mut name) = current_file.lock() {
-                        slot.relative.clone_into(&mut name);
-                    }
-                    if let Some(limiter) = &limiter
-                        && !limiter.take(u64::from(chunk.compressed_len.max(1)), cancel)
-                    {
-                        break;
-                    }
-                    let raw =
-                        match download_chunk_rotating(cdn, &servers, &server_cursor, depot_id, chunk, key) {
-                            Ok(bytes) => bytes,
-                            Err(error) => {
-                                *hard_error.lock().unwrap() = Some(error);
-                                break;
-                            }
-                        };
-                    if let Err(source) = write_at(handle, chunk.offset, &raw, path) {
-                        *hard_error.lock().unwrap() = Some(source);
-                        break;
-                    }
-                    done.fetch_add(raw.len() as u64, Ordering::Relaxed);
-                    bytes_written.fetch_add(raw.len() as u64, Ordering::Relaxed);
-                    completed.fetch_add(1, Ordering::Relaxed);
-                }
-            });
+        for _ in 0..connections.clamp(1, 32) {
+            let sender = sender.clone();
+            threads.spawn(|| engine.fetch_chunks(sender));
+        }
+        // The decoders stop once every fetcher has dropped its sender.
+        drop(sender);
+        for _ in 0..decoders {
+            threads.spawn(|| engine.store_chunks(&receiver));
         }
 
         // Report aggregate progress ~5×/s until every chunk is accounted for (or cancel/error).
         loop {
-            let name = current_file.lock().map(|name| name.clone()).unwrap_or_default();
+            let name = lock(&engine.current_file).clone();
             progress(DownloadProgress {
                 app_id,
                 stage: DownloadStage::Downloading,
-                done_bytes: done.load(Ordering::Relaxed).min(total),
+                done_bytes: engine.done.load(Ordering::Relaxed).min(total),
                 total_bytes: total,
                 current_file: name,
             });
-            if completed.load(Ordering::Relaxed) >= task_count
-                || cancel.load(Ordering::Relaxed)
-                || hard_error.lock().unwrap().is_some()
-            {
+            if engine.finished() || engine.stopped() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(200));
         }
     });
 
-    if let Some(error) = hard_error.into_inner().unwrap() {
+    let bytes_written = engine.bytes_written.load(Ordering::Relaxed);
+    if let Some(error) = engine
+        .failure
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner)
+    {
         return Err(error);
     }
     if cancel.load(Ordering::Relaxed) {
@@ -428,11 +407,16 @@ pub fn download(
         app_id,
         install_root: install_root.to_owned(),
         files_written,
-        bytes_written: bytes_written.load(Ordering::Relaxed),
+        bytes_written,
     })
 }
 
-/// One target file in the flattened work list.
+/// How many threads decode chunks at most, however many cores there are.
+const MAXIMUM_DECODERS: usize = 16;
+/// How long a fetcher with nothing to do waits before looking for a chunk sent back for another try.
+const IDLE_WAIT: Duration = Duration::from_millis(20);
+
+/// One target file in the download.
 struct FileSlot {
     path: PathBuf,
     /// Manifest-relative path, shown as the "current file" in progress ticks.
@@ -441,6 +425,265 @@ struct FileSlot {
     /// anything worth verifying; a file `open_sized` just created is all zeroes, so checksumming it
     /// before downloading would read the whole install back for nothing.
     may_resume: bool,
+}
+
+/// One distinct chunk and every place in the install that holds a copy of it.
+struct ChunkTask<'a> {
+    depot_id: u32,
+    chunk: &'a super::manifest::ChunkEntry,
+    /// `(index into the file list, byte offset)` of each copy.
+    copies: Vec<(usize, u64)>,
+}
+
+/// A fetched chunk on its way to a decoder.
+struct Fetched {
+    task: usize,
+    /// How many earlier fetches of this chunk arrived unusable.
+    attempt: usize,
+    /// The server it came from, blamed if it does not check out.
+    server: usize,
+    /// The copies still to write; ones already intact on disk are left out.
+    copies: Vec<(usize, u64)>,
+    body: Vec<u8>,
+}
+
+/// A chunk to fetch again because what arrived did not check out.
+struct Retry {
+    task: usize,
+    attempt: usize,
+    copies: Vec<(usize, u64)>,
+}
+
+/// Everything the fetching and decoding threads of one download share.
+struct Engine<'a> {
+    data: &'a DepotData,
+    cdn: &'a CdnClient,
+    pool: ServerPool,
+    scope: crate::safe_path::WriteRoot,
+    files: Vec<FileSlot>,
+    chunks: Vec<ChunkTask<'a>>,
+    cancel: &'a AtomicBool,
+    limiter: Option<RateLimiter>,
+    /// The next chunk no fetcher has taken yet.
+    next: AtomicUsize,
+    retries: Mutex<Vec<Retry>>,
+    /// Chunks fully written (or found intact).
+    completed: AtomicUsize,
+    done: AtomicU64,
+    bytes_written: AtomicU64,
+    current_file: Mutex<String>,
+    /// The first error; it stops every thread.
+    failure: Mutex<Option<DepotDownloadError>>,
+}
+
+impl Engine<'_> {
+    fn stopped(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed) || lock(&self.failure).is_some()
+    }
+
+    fn finished(&self) -> bool {
+        self.completed.load(Ordering::Relaxed) >= self.chunks.len()
+    }
+
+    fn fail(&self, error: DepotDownloadError) {
+        lock(&self.failure).get_or_insert(error);
+    }
+
+    /// A fetching thread: takes chunks, fetches them and hands them to the decoders, until every
+    /// chunk is written or the download stops. It keeps waiting once all chunks are handed out,
+    /// because a decoder may still send one back for another try.
+    fn fetch_chunks(&self, sender: mpsc::SyncSender<Fetched>) {
+        let mut handles = FileHandles::default();
+        while !self.stopped() && !self.finished() {
+            let retry = lock(&self.retries).pop();
+            let (index, attempt, copies) = match retry {
+                Some(retry) => (retry.task, retry.attempt, retry.copies),
+                None => {
+                    let index = if self.next.load(Ordering::Relaxed) < self.chunks.len() {
+                        self.next.fetch_add(1, Ordering::Relaxed)
+                    } else {
+                        usize::MAX
+                    };
+                    if index >= self.chunks.len() {
+                        std::thread::sleep(IDLE_WAIT);
+                        continue;
+                    }
+                    match self.copies_to_write(index, &mut handles) {
+                        Ok(copies) => (index, 0, copies),
+                        Err(error) => {
+                            self.fail(error);
+                            break;
+                        }
+                    }
+                }
+            };
+            if copies.is_empty() {
+                self.completed.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            let task = &self.chunks[index];
+            *lock(&self.current_file) = self.files[copies[0].0].relative.clone();
+            if let Some(limiter) = &self.limiter
+                && !limiter.take(u64::from(task.chunk.compressed_len.max(1)), self.cancel)
+            {
+                break;
+            }
+            let (server, body) = match self.fetch(task) {
+                Ok(fetched) => fetched,
+                Err(error) => {
+                    self.fail(error);
+                    break;
+                }
+            };
+            let fetched = Fetched {
+                task: index,
+                attempt,
+                server,
+                copies,
+                body,
+            };
+            if sender.send(fetched).is_err() {
+                break;
+            }
+        }
+    }
+
+    /// The copies of chunk `index` that still need writing. In a file that existed before this
+    /// download, a copy whose bytes already check out is skipped (resume and repair) and counts as
+    /// done right away.
+    fn copies_to_write(
+        &self,
+        index: usize,
+        handles: &mut FileHandles,
+    ) -> Result<Vec<(usize, u64)>, DepotDownloadError> {
+        let task = &self.chunks[index];
+        let chunk = task.chunk;
+        let mut needed = Vec::with_capacity(task.copies.len());
+        for &(file, offset) in &task.copies {
+            let slot = &self.files[file];
+            if slot.may_resume {
+                let handle = handles.get(&self.scope, file, &slot.path)?;
+                if chunk_on_disk_ok(handle, offset, chunk.uncompressed_len, chunk.crc, &slot.path)
+                    .unwrap_or(false)
+                {
+                    self.done
+                        .fetch_add(u64::from(chunk.uncompressed_len), Ordering::Relaxed);
+                    continue;
+                }
+            }
+            needed.push((file, offset));
+        }
+        Ok(needed)
+    }
+
+    /// Fetches a chunk's encrypted bytes, moving on to another server whenever one fails.
+    fn fetch(&self, task: &ChunkTask) -> Result<(usize, Vec<u8>), DepotDownloadError> {
+        let mut avoid = None;
+        let mut last = None;
+        for _ in 0..CHUNK_ATTEMPTS.max(self.pool.len()) {
+            let server = self.pool.pick(avoid);
+            let started = Instant::now();
+            match self
+                .cdn
+                .fetch_chunk(self.pool.server(server), task.depot_id, task.chunk)
+            {
+                Ok(body) => {
+                    self.pool.record(server, body.len(), started.elapsed());
+                    return Ok((server, body));
+                }
+                Err(error) => {
+                    self.pool.record_failure(server);
+                    avoid = Some(server);
+                    last = Some(error);
+                }
+            }
+        }
+        Err(DepotDownloadError::Cdn(last.unwrap_or(CdnError::NoServers)))
+    }
+
+    /// A decoding thread: decrypts, decompresses and checks fetched chunks and writes every copy,
+    /// until the fetchers are gone. After a failure or cancel it only empties the queue, so no
+    /// fetcher is left waiting on a full one.
+    fn store_chunks(&self, receiver: &Mutex<mpsc::Receiver<Fetched>>) {
+        let mut handles = FileHandles::default();
+        loop {
+            let fetched = lock(receiver).recv();
+            let Ok(fetched) = fetched else {
+                break;
+            };
+            if self.stopped() {
+                continue;
+            }
+            let task = &self.chunks[fetched.task];
+            let Some(key) = self.data.keys.get(task.depot_id) else {
+                // Unreachable given the up-front key check, but a silent skip would leave the
+                // download short of finishing with nothing to show for it.
+                self.fail(DepotDownloadError::MissingKey(task.depot_id));
+                continue;
+            };
+            match process_chunk(&fetched.body, task.chunk, key) {
+                Ok(raw) => {
+                    for &(file, offset) in &fetched.copies {
+                        let slot = &self.files[file];
+                        let written = handles
+                            .get(&self.scope, file, &slot.path)
+                            .and_then(|handle| write_at(handle, offset, &raw, &slot.path));
+                        if let Err(error) = written {
+                            self.fail(error);
+                            break;
+                        }
+                        self.done.fetch_add(raw.len() as u64, Ordering::Relaxed);
+                        self.bytes_written.fetch_add(raw.len() as u64, Ordering::Relaxed);
+                    }
+                    self.completed.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    // A cut-off or corrupted response: another server gets to try.
+                    self.pool.record_failure(fetched.server);
+                    if fetched.attempt + 1 >= CHUNK_ATTEMPTS {
+                        self.fail(error.into());
+                    } else {
+                        lock(&self.retries).push(Retry {
+                            task: fetched.task,
+                            attempt: fetched.attempt + 1,
+                            copies: fetched.copies,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A thread's open handles to the files it touches, reused across its chunks.
+#[derive(Default)]
+struct FileHandles(HashMap<usize, File>);
+
+impl FileHandles {
+    /// At most this many stay open per thread (512 across all of them at the maximum).
+    const LIMIT: usize = 16;
+
+    fn get(
+        &mut self,
+        scope: &crate::safe_path::WriteRoot,
+        index: usize,
+        path: &Path,
+    ) -> Result<&mut File, DepotDownloadError> {
+        if self.0.len() >= Self::LIMIT && !self.0.contains_key(&index) {
+            self.0.clear();
+        }
+        match self.0.entry(index) {
+            Entry::Occupied(entry) => Ok(entry.into_mut()),
+            Entry::Vacant(entry) => {
+                let file = scope.open(path, false).map_err(|source| io_err(path, source))?;
+                Ok(entry.insert(file))
+            }
+        }
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// How many more bytes the download needs on disk: each file's size beyond what is already there, so
@@ -558,90 +801,6 @@ impl RateLimiter {
     }
 }
 
-/// Verifies an installed app against its manifests without downloading, counting chunks whose
-/// on-disk bytes are missing or fail their Adler-32.
-pub fn verify(
-    data: &DepotData,
-    install_root: &Path,
-    cancel: &AtomicBool,
-    mut progress: impl FnMut(DownloadProgress),
-) -> Result<VerifyOutcome, DepotDownloadError> {
-    let total = data.total_bytes();
-    let mut done: u64 = 0;
-    let mut total_chunks: u64 = 0;
-    let mut bad_chunks: u64 = 0;
-    let mut bad_files: u64 = 0;
-
-    for manifest in &data.manifests {
-        for file in &manifest.files {
-            if cancel.load(Ordering::Relaxed) {
-                return Err(DepotDownloadError::Cancelled);
-            }
-            if file.is_directory() {
-                continue;
-            }
-            let target = joined(install_root, &file.path);
-            let mut handle = std::fs::File::open(&target).ok();
-            if !handle
-                .as_ref()
-                .and_then(|file| file.metadata().ok())
-                .is_some_and(|meta| meta.is_file() && meta.len() == file.size)
-            {
-                bad_files += 1;
-            }
-            for chunk in &file.chunks {
-                total_chunks += 1;
-                let ok = match handle.as_mut() {
-                    Some(file) => {
-                        chunk_on_disk_ok(file, chunk.offset, chunk.uncompressed_len, chunk.crc, &target)
-                            .unwrap_or(false)
-                    }
-                    None => false,
-                };
-                if !ok {
-                    bad_chunks += 1;
-                }
-                done += u64::from(chunk.uncompressed_len);
-            }
-            progress(DownloadProgress {
-                app_id: data.app_id,
-                stage: DownloadStage::Verifying,
-                done_bytes: done.min(total),
-                total_bytes: total,
-                current_file: file.path.clone(),
-            });
-        }
-    }
-
-    Ok(VerifyOutcome {
-        app_id: data.app_id,
-        total_chunks,
-        bad_chunks,
-        bad_files,
-    })
-}
-
-/// Tries each CDN host in rotation until a chunk downloads and verifies, or attempts are exhausted.
-/// The server cursor is shared atomically so concurrent workers spread across the CDN hosts.
-fn download_chunk_rotating(
-    cdn: &CdnClient,
-    servers: &[ContentServer],
-    cursor: &AtomicUsize,
-    depot_id: u32,
-    chunk: &super::manifest::ChunkEntry,
-    key: &[u8; 32],
-) -> Result<Vec<u8>, DepotDownloadError> {
-    let mut last: Option<CdnError> = None;
-    for _ in 0..CHUNK_ATTEMPTS.max(servers.len()) {
-        let server = &servers[cursor.fetch_add(1, Ordering::Relaxed) % servers.len()];
-        match cdn.download_chunk(server, depot_id, chunk, key) {
-            Ok(bytes) => return Ok(bytes),
-            Err(error) => last = Some(error),
-        }
-    }
-    Err(DepotDownloadError::Cdn(last.unwrap_or(CdnError::NoServers)))
-}
-
 /// Reads `len` bytes at `offset` and returns whether their Adler-32 matches `expected_crc`.
 fn chunk_on_disk_ok(
     file: &mut std::fs::File,
@@ -696,7 +855,7 @@ fn is_shared_redistributable_depot(depot_id: u32) -> bool {
 /// Joins a manifest-relative (forward-slash) path onto the install root, dropping every segment
 /// that could escape it. See [`crate::is_safe_path_segment`] for why a bare `C:` matters as much as
 /// `..` on Windows.
-fn joined(root: &Path, relative: &str) -> PathBuf {
+pub(super) fn joined(root: &Path, relative: &str) -> PathBuf {
     let mut path = root.to_path_buf();
     for segment in relative.split(['/', '\\']) {
         if !crate::is_safe_path_segment(segment) {
@@ -921,6 +1080,238 @@ mod tests {
         }
     }
 
+    /// A stand-in content server: answers `GET …/chunk/<id>` over plain HTTP with keep-alive and
+    /// counts the requests per chunk. The first request for `garbled` gets bytes that do not decode.
+    struct ChunkServer {
+        host: String,
+        requests: std::sync::Arc<Mutex<HashMap<String, usize>>>,
+    }
+
+    impl ChunkServer {
+        fn start(bodies: HashMap<String, Vec<u8>>, garbled: Option<String>) -> Self {
+            use std::io::{BufRead, BufReader};
+            use std::sync::Arc;
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let host = listener.local_addr().unwrap().to_string();
+            let requests: Arc<Mutex<HashMap<String, usize>>> = Arc::default();
+            let bodies = Arc::new(bodies);
+            let counts = Arc::clone(&requests);
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let (bodies, counts, garbled) =
+                        (Arc::clone(&bodies), Arc::clone(&counts), garbled.clone());
+                    std::thread::spawn(move || {
+                        let mut reader = BufReader::new(stream.try_clone().unwrap());
+                        let mut writer = stream;
+                        loop {
+                            let mut request = String::new();
+                            if reader.read_line(&mut request).unwrap_or(0) == 0 {
+                                return;
+                            }
+                            loop {
+                                let mut header = String::new();
+                                if reader.read_line(&mut header).unwrap_or(0) == 0 {
+                                    return;
+                                }
+                                if header == "\r\n" {
+                                    break;
+                                }
+                            }
+                            let id = request
+                                .split_whitespace()
+                                .nth(1)
+                                .and_then(|path| path.rsplit('/').next())
+                                .unwrap_or_default()
+                                .to_owned();
+                            let seen = {
+                                let mut counts = counts.lock().unwrap();
+                                let count = counts.entry(id.clone()).or_insert(0);
+                                *count += 1;
+                                *count
+                            };
+                            let (status, body) = match bodies.get(&id) {
+                                Some(_) if garbled.as_deref() == Some(id.as_str()) && seen == 1 => {
+                                    ("200 OK", vec![0x5A; 64])
+                                }
+                                Some(body) => ("200 OK", body.clone()),
+                                None => ("404 Not Found", Vec::new()),
+                            };
+                            let head = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n", body.len());
+                            if writer.write_all(head.as_bytes()).is_err() || writer.write_all(&body).is_err()
+                            {
+                                return;
+                            }
+                        }
+                    });
+                }
+            });
+            Self { host, requests }
+        }
+
+        fn requests_for(&self, id: &str) -> usize {
+            self.requests.lock().unwrap().get(id).copied().unwrap_or(0)
+        }
+
+        fn total_requests(&self) -> usize {
+            self.requests.lock().unwrap().values().sum()
+        }
+    }
+
+    /// Encrypts `raw` into a zstd (VSZ) chunk the way the CDN stores it, and describes it.
+    fn cdn_chunk(id: u8, raw: &[u8], offset: u64, key: &[u8; 32]) -> (ChunkEntry, Vec<u8>) {
+        let frame = zstd::stream::encode_all(raw, 3).unwrap();
+        let mut container = b"VSZa".to_vec();
+        container.extend_from_slice(&0u32.to_le_bytes());
+        container.extend_from_slice(&frame);
+        container.extend_from_slice(&0u32.to_le_bytes());
+        container.extend_from_slice(&(raw.len() as u64).to_le_bytes());
+        container.extend_from_slice(b"zsv");
+        let body = crate::depot::crypto::symmetric_encrypt(&container, key, &[id; 16]);
+        let entry = ChunkEntry {
+            sha: [id; 20],
+            crc: steam_adler_hash(raw),
+            offset,
+            uncompressed_len: raw.len() as u32,
+            compressed_len: body.len() as u32,
+        };
+        (entry, body)
+    }
+
+    #[test]
+    fn each_distinct_chunk_is_fetched_once_and_a_garbled_one_again() {
+        let key = [9u8; 32];
+        let first = vec![1u8; 3000];
+        let second: Vec<u8> = (0..2000u32).map(|value| (value % 251) as u8).collect();
+        let third = b"a chunk the server garbles once".repeat(20);
+        let (a, a_body) = cdn_chunk(1, &first, 0, &key);
+        let (b, b_body) = cdn_chunk(2, &second, first.len() as u64, &key);
+        let (c, c_body) = cdn_chunk(3, &third, 0, &key);
+        let server = ChunkServer::start(
+            HashMap::from([(a.id_hex(), a_body), (b.id_hex(), b_body), (c.id_hex(), c_body)]),
+            Some(c.id_hex()),
+        );
+
+        let mut keys = DepotKeys::default();
+        keys.0.insert(1, key);
+        let file = |path: &str, size: usize, chunks: Vec<ChunkEntry>| FileEntry {
+            path: path.into(),
+            size: size as u64,
+            flags: 0,
+            chunks,
+        };
+        let data = DepotData {
+            app_id: 1,
+            keys,
+            manifests: vec![manifest_with(vec![
+                file(
+                    "game/data.bin",
+                    first.len() + second.len(),
+                    vec![a.clone(), b.clone()],
+                ),
+                // The same content again, in another file.
+                file("game/copy.bin", first.len(), vec![a.clone()]),
+                file("game/sub/other.bin", third.len(), vec![c.clone()]),
+            ])],
+            ..DepotData::default()
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let servers = vec![ContentServer {
+            host: server.host.clone(),
+            https: false,
+        }];
+        let cdn = CdnClient::new().unwrap();
+        let outcome = download_from(
+            &data,
+            root.path(),
+            &cdn,
+            servers.clone(),
+            &AtomicBool::new(false),
+            4,
+            None,
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(root.path().join("game/data.bin")).unwrap(),
+            [first.as_slice(), second.as_slice()].concat()
+        );
+        assert_eq!(std::fs::read(root.path().join("game/copy.bin")).unwrap(), first);
+        assert_eq!(
+            std::fs::read(root.path().join("game/sub/other.bin")).unwrap(),
+            third
+        );
+        assert_eq!(
+            server.requests_for(&a.id_hex()),
+            1,
+            "shared content is fetched once"
+        );
+        assert_eq!(server.requests_for(&b.id_hex()), 1);
+        assert_eq!(
+            server.requests_for(&c.id_hex()),
+            2,
+            "a garbled chunk is fetched again"
+        );
+        assert_eq!(outcome.files_written, 3);
+        assert_eq!(outcome.bytes_written, data.total_bytes());
+
+        // Everything is in place now, so running again fetches nothing and writes nothing.
+        let before = server.total_requests();
+        let again = download_from(
+            &data,
+            root.path(),
+            &cdn,
+            servers,
+            &AtomicBool::new(false),
+            4,
+            None,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(server.total_requests(), before);
+        assert_eq!(again.bytes_written, 0);
+    }
+
+    #[test]
+    fn a_chunk_no_server_has_fails_the_download_instead_of_hanging() {
+        let key = [4u8; 32];
+        let (missing, _) = cdn_chunk(7, b"nobody serves this", 0, &key);
+        let server = ChunkServer::start(HashMap::new(), None);
+        let mut keys = DepotKeys::default();
+        keys.0.insert(1, key);
+        let data = DepotData {
+            app_id: 1,
+            keys,
+            manifests: vec![manifest_with(vec![FileEntry {
+                path: "lost.bin".into(),
+                size: 18,
+                flags: 0,
+                chunks: vec![missing],
+            }])],
+            ..DepotData::default()
+        };
+        let root = tempfile::tempdir().unwrap();
+        let result = download_from(
+            &data,
+            root.path(),
+            &CdnClient::new().unwrap(),
+            vec![ContentServer {
+                host: server.host.clone(),
+                https: false,
+            }],
+            &AtomicBool::new(false),
+            2,
+            None,
+            |_| {},
+        );
+        assert!(matches!(
+            result,
+            Err(DepotDownloadError::Cdn(CdnError::Status(404)))
+        ));
+    }
+
     #[test]
     fn joined_rejects_traversal() {
         let root = Path::new("/games/app");
@@ -932,58 +1323,5 @@ mod tests {
             joined(root, "bin\\game.exe"),
             Path::new("/games/app/bin/game.exe")
         );
-    }
-
-    #[test]
-    fn verify_reports_missing_file_as_bad() {
-        let dir = tempfile::tempdir().unwrap();
-        let data = DepotData {
-            app_id: 730,
-            keys: DepotKeys::default(),
-            manifests: vec![manifest_with(vec![FileEntry {
-                path: "missing.bin".into(),
-                size: 16,
-                flags: 0,
-                chunks: vec![ChunkEntry {
-                    sha: [0; 20],
-                    crc: 123,
-                    offset: 0,
-                    uncompressed_len: 16,
-                    compressed_len: 16,
-                }],
-            }])],
-            ..DepotData::default()
-        };
-        let outcome = verify(&data, dir.path(), &AtomicBool::new(false), |_| {}).unwrap();
-        assert_eq!(outcome.total_chunks, 1);
-        assert_eq!(outcome.bad_chunks, 1);
-        assert!(!outcome.is_complete());
-    }
-
-    #[test]
-    fn verify_accepts_matching_on_disk_bytes() {
-        let dir = tempfile::tempdir().unwrap();
-        let payload = b"exactly-sixteen!"; // 16 bytes
-        std::fs::write(dir.path().join("ok.bin"), payload).unwrap();
-        let data = DepotData {
-            app_id: 730,
-            keys: DepotKeys::default(),
-            manifests: vec![manifest_with(vec![FileEntry {
-                path: "ok.bin".into(),
-                size: 16,
-                flags: 0,
-                chunks: vec![ChunkEntry {
-                    sha: [0; 20],
-                    crc: steam_adler_hash(payload),
-                    offset: 0,
-                    uncompressed_len: 16,
-                    compressed_len: 16,
-                }],
-            }])],
-            ..DepotData::default()
-        };
-        let outcome = verify(&data, dir.path(), &AtomicBool::new(false), |_| {}).unwrap();
-        assert_eq!(outcome.bad_chunks, 0);
-        assert!(outcome.is_complete());
     }
 }
