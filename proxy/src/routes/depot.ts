@@ -6,8 +6,9 @@
 //
 // The package can come from any of several upstreams — Ryu (`secure_download`), DepotBox
 // (`direct-download`), or SteamTools (`manifest`) — each returning a manifests+keys ZIP. The set and
-// order are configured in `DEPOT_PACKAGE_SOURCES` (see config.ts): the route tries the enabled
-// sources in order and streams the first that succeeds. The response carries `X-Depot-Source` naming
+// order are configured in `PROVIDER_SOURCES` (see config.ts): the route tries the enabled sources in
+// order and caches the first real ZIP archive one returns. A source that answers with anything else,
+// or that is rate limited, is skipped. The response carries `X-Depot-Source` naming
 // which upstream served it. Disabling a source is purely config — the code path stays wired so it can
 // be switched back on without a rebuild.
 
@@ -18,6 +19,8 @@ import { UpstreamError, type SteamToolsClient } from "../upstream.js";
 import type { DepotBoxClient, RawStream } from "../depotbox.js";
 import type { RyuClient } from "../ryu.js";
 import type { FileCache } from "../fileCache.js";
+import type { ProviderCooldown } from "../merged.js";
+import { requireZip } from "../packageCheck.js";
 
 const APPID_PATTERN = /^[0-9]{1,10}$/;
 
@@ -39,6 +42,7 @@ export function registerDepotRoutes(
   enabledSources: DepotPackageSourceName[],
   cache: FileCache,
   authHook: preHandlerHookHandler,
+  cooldown: ProviderCooldown,
 ): void {
   // Map each configured source name to its fetch function, preserving the configured order. Sources
   // that aren't enabled simply aren't in this list.
@@ -89,11 +93,17 @@ export function registerDepotRoutes(
       // Tries each configured upstream in order, returning the first stream that opens.
       const openUpstream = async (): Promise<Readable> => {
         for (const candidate of sources) {
+          if (cooldown.isCooling(candidate.name)) {
+            lastError ??= new UpstreamError(429, `${candidate.name} is rate limited`);
+            continue;
+          }
           try {
             const raw: RawStream = await candidate.fetch(appid);
+            const stream = await requireZip(raw, `${candidate.name} depot package for ${appid}`);
             source = candidate.name;
-            return raw.stream;
+            return stream;
           } catch (error) {
+            cooldown.noteFailure(candidate.name, error);
             lastError = error;
             req.log.info({ appid, source: candidate.name, err: error }, "Depot source failed; trying next.");
           }

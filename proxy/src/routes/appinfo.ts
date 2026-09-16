@@ -29,7 +29,11 @@ export function registerAppInfoRoute(
 
   app.get<{ Params: { appid: string } }>(
     "/v1/app-info/:appid",
-    { preHandler: authHook },
+    {
+      preHandler: authHook,
+      // Every miss spends the SteamTools quota, so it gets the same per-client limit as the Lua route.
+      config: { rateLimit: { max: config.luaRateMax, timeWindow: config.luaRateWindowSeconds * 1000 } },
+    },
     async (req, reply) => {
       const { appid } = req.params;
       if (!APPID_PATTERN.test(appid)) return reply.code(400).send({ error: "invalid_appid" });
@@ -42,6 +46,11 @@ export function registerAppInfoRoute(
 
       try {
         const result = await client.fetchAppInfo(appid);
+        // SteamTools reports some failures as `{ "success": false }`; those are neither cached nor served.
+        if (reportsFailure(result.body)) {
+          req.log.warn({ appid }, "App-info upstream reported a failure.");
+          return reply.code(404).send({ error: "not_found" });
+        }
         if (config.appInfoCacheTtlSeconds > 0) {
           cache.set(appid, { body: result.body, contentType: result.contentType, expiresAt: now + config.appInfoCacheTtlSeconds * 1000 });
         }
@@ -57,4 +66,13 @@ export function registerAppInfoRoute(
       }
     },
   );
+}
+
+function reportsFailure(body: string): boolean {
+  try {
+    const parsed = JSON.parse(body) as { success?: unknown } | null;
+    return parsed?.success === false;
+  } catch {
+    return true;
+  }
 }

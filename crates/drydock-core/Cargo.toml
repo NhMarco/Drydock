@@ -30,11 +30,15 @@ cbc = { version = "0.1", features = ["alloc"] }
 flate2.workspace = true
 lzma-rs = "0.3"
 zstd = "0.13"
-# Emu toolchain: gbe_fork ships its steamclient DLLs in a 7z archive.
-sevenz-rust = "0.6"
+# Emu toolchain: gbe_fork ships its steamclient DLLs in a 7z archive (LZMA2 with BCJ filters, which
+# need no optional feature). The defaults would add AES, BZip2 and PPMd decoders nothing here reads.
+sevenz-rust2 = { version = "0.22.2", default-features = false }
+tempfile = "3.23"
+cap-std = "4.0.3"
 
 [dev-dependencies]
-tempfile = "3.23"
+# The toolchain tests build their fixture archives.
+sevenz-rust2 = { version = "0.22.2", default-features = false, features = ["compress"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"

@@ -264,9 +264,7 @@ pub fn uninstall_service(steam_directory: &Path) -> Result<SteamServiceStatus, S
     );
     let names = dedup_ignore_case(&names);
 
-    let transaction = TempTransaction::new()?;
-    let backup = transaction.subdir("backup")?;
-    let mut removed: Vec<String> = Vec::new();
+    let mut changes = crate::file_transaction::FileTransaction::new(&plugin)?;
     let outcome = (|| -> Result<(), ServiceError> {
         for name in &names {
             let safe = file_name_of(name);
@@ -277,9 +275,7 @@ pub fn uninstall_service(steam_directory: &Path) -> Result<SteamServiceStatus, S
             if !destination.is_file() {
                 continue;
             }
-            fs::copy(&destination, backup.join(safe))?;
-            fs::remove_file(&destination)?;
-            removed.push(safe.to_owned());
+            changes.remove(&destination)?;
             if destination.exists() {
                 return Err(ServiceError::PostDeleteVerification(safe.to_owned()));
             }
@@ -288,9 +284,10 @@ pub fn uninstall_service(steam_directory: &Path) -> Result<SteamServiceStatus, S
     })();
 
     if outcome.is_err() {
-        roll_back(&plugin, &backup, removed.iter());
+        changes.rollback()?;
         outcome?;
     }
+    changes.commit();
 
     // The markers are best-effort: their absence already means "not installed".
     let _ = fs::remove_file(plugin.join(MARKER_NAME));
@@ -406,33 +403,28 @@ pub fn remove_app_files(steam_directory: &Path, lua_names: &[String]) -> Result<
         return Ok(0);
     }
 
-    let transaction = TempTransaction::new()?;
-    let backup = transaction.subdir("backup")?;
-    let mut removed: Vec<String> = Vec::new();
+    let mut changes = crate::file_transaction::FileTransaction::new(&target)?;
     let outcome = (|| -> Result<usize, ServiceError> {
+        let mut removed = 0;
         for name in &names {
             let destination = target.join(name);
             if !destination.is_file() {
                 continue;
             }
-            fs::copy(&destination, backup.join(name))?;
-            fs::remove_file(&destination)?;
-            removed.push(name.clone());
+            changes.remove(&destination)?;
+            removed += 1;
             if destination.exists() {
                 return Err(ServiceError::PostDeleteVerification(name.clone()));
             }
         }
-        Ok(removed.len())
+        Ok(removed)
     })();
 
+    // Restores anything already removed before a failure, and reports a restore that fails.
     if outcome.is_err() {
-        // Restore anything already removed before the failure.
-        for name in removed.iter().rev() {
-            let source = backup.join(name);
-            if source.is_file() {
-                let _ = fs::copy(&source, target.join(name));
-            }
-        }
+        changes.rollback()?;
+    } else {
+        changes.commit();
     }
     outcome
 }
@@ -472,8 +464,11 @@ pub fn installed_app_luas(steam_directory: &Path) -> BTreeSet<u32> {
         let Some(stem) = name
             .len()
             .checked_sub(4)
-            .filter(|_| name[name.len().saturating_sub(4)..].eq_ignore_ascii_case(".lua"))
-            .map(|cut| &name[..cut])
+            .filter(|&cut| {
+                name.get(cut..)
+                    .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".lua"))
+            })
+            .and_then(|cut| name.get(..cut))
         else {
             continue;
         };
@@ -565,9 +560,7 @@ where
 {
     let transaction = TempTransaction::new()?;
     let staged = transaction.subdir("staged")?;
-    let backup = transaction.subdir("backup")?;
-    let mut replaced: Vec<String> = Vec::new();
-    let mut removed: Vec<String> = Vec::new();
+    let mut changes = crate::file_transaction::FileTransaction::new(target_directory)?;
 
     let outcome = (|| -> Result<(), ServiceError> {
         for (name, content) in files {
@@ -580,11 +573,7 @@ where
 
         for (name, content) in files {
             let destination = target_directory.join(name);
-            if destination.exists() {
-                fs::copy(&destination, backup.join(name))?;
-            }
-            fs::copy(staged.join(name), &destination)?;
-            replaced.push(name.clone());
+            changes.replace(&staged.join(name), &destination)?;
             if !destination.is_file() || sha256(&fs::read(&destination)?) != sha256(content) {
                 return Err(ServiceError::PostCopyVerification(name.clone()));
             }
@@ -602,9 +591,7 @@ where
             if !destination.is_file() {
                 continue;
             }
-            fs::copy(&destination, backup.join(safe))?;
-            fs::remove_file(&destination)?;
-            removed.push(safe.to_owned());
+            changes.remove(&destination)?;
         }
 
         if let Some(commit) = commit {
@@ -614,25 +601,11 @@ where
     })();
 
     if outcome.is_err() {
-        roll_back(target_directory, &backup, replaced.iter().chain(removed.iter()));
+        changes.rollback()?;
+    } else {
+        changes.commit();
     }
     outcome
-}
-
-fn roll_back<'a, I>(target_directory: &Path, backup_directory: &Path, names: I)
-where
-    I: Iterator<Item = &'a String>,
-{
-    let names: Vec<&String> = names.collect();
-    for name in names.into_iter().rev() {
-        let destination = target_directory.join(name);
-        let original = backup_directory.join(name);
-        if original.is_file() {
-            let _ = fs::copy(&original, &destination);
-        } else if destination.exists() {
-            let _ = fs::remove_file(&destination);
-        }
-    }
 }
 
 fn read_installed_version(steam_directory: &Path) -> String {

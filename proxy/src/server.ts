@@ -9,9 +9,10 @@ import { SteamToolsClient } from "./upstream.js";
 import { DepotBoxClient } from "./depotbox.js";
 import { RyuClient } from "./ryu.js";
 import { GitHubClient } from "./github.js";
-import { MergedGamelistSource, MergedLuaSource } from "./merged.js";
+import { MergedGamelistSource, MergedLuaSource, ProviderCooldown } from "./merged.js";
 import { GamelistCache } from "./gamelistCache.js";
 import { ServiceCache } from "./serviceCache.js";
+import { EmuCache } from "./emuCache.js";
 import { DenuvoFixesCache } from "./denuvoFixesCache.js";
 import { RepacksCache } from "./repacksCache.js";
 import { createAuthHook } from "./auth.js";
@@ -20,6 +21,7 @@ import { registerHealthRoute } from "./routes/health.js";
 import { registerGamelistRoute } from "./routes/gamelist.js";
 import { registerLuaRoute } from "./routes/lua.js";
 import { registerServiceRoutes } from "./routes/service.js";
+import { registerEmuRoutes } from "./routes/emu.js";
 import { registerMagicfilesRoute } from "./routes/magicfiles.js";
 import { registerDenuvoFixesRoutes } from "./routes/denuvoFixes.js";
 import { registerRepacksRoute } from "./routes/repacks.js";
@@ -64,9 +66,12 @@ async function main(): Promise<void> {
   const activeProviders = config.providerSources.map((name) => ({ name, source: providerRegistry[name] }));
   app.log.info({ providers: config.providerSources }, "Active providers (gamelist / lua / depot).");
   const gamelistSource = new MergedGamelistSource(activeProviders, app.log);
-  const luaSource = new MergedLuaSource(activeProviders, app.log);
+  // Shared, so a provider that rate limits Lua requests is also left alone for depot packages.
+  const cooldown = new ProviderCooldown();
+  const luaSource = new MergedLuaSource(activeProviders, app.log, cooldown);
   const cache = new GamelistCache(config, gamelistSource, app.log);
   const serviceCache = new ServiceCache(config, github, app.log);
+  const emuCache = new EmuCache(config, github, app.log);
   const denuvoFixesCache = new DenuvoFixesCache(config, github, app.log);
   const repacksCache = new RepacksCache(config, github, app.log);
   // Disk cache (24h) for user-facing upstream files, so each is pulled from its provider at most
@@ -78,12 +83,14 @@ async function main(): Promise<void> {
   registerGamelistRoute(app, config, cache, authHook);
   registerLuaRoute(app, config, luaSource, authHook);
   registerServiceRoutes(app, github, serviceCache, authHook);
+  registerEmuRoutes(app, github, emuCache, authHook);
   registerMagicfilesRoute(app, config, github, fileCache, authHook);
   registerDenuvoFixesRoutes(app, github, denuvoFixesCache, authHook);
   registerRepacksRoute(app, repacksCache, authHook);
-  registerAppInfoRoute(app, config, client, authHook);
+  // App info comes from SteamTools alone and spends its quota, so it exists only while SteamTools is on.
+  if (config.providerSources.includes("steamtools")) registerAppInfoRoute(app, config, client, authHook);
   registerSchemaRoute(app, config, fileCache, authHook);
-  registerDepotRoutes(app, providerRegistry, config.providerSources, fileCache, authHook);
+  registerDepotRoutes(app, providerRegistry, config.providerSources, fileCache, authHook, cooldown);
 
   if (!config.requireAuth) {
     app.log.warn("REQUIRE_AUTH is disabled — HMAC verification is OFF. Use this only for local testing.");
@@ -93,8 +100,8 @@ async function main(): Promise<void> {
     // alternative is a self-hoster discovering it as four endpoints mysteriously returning 404.
     app.log.warn(
       { owner: config.githubOwner, repo: config.githubRepo },
-      "GITHUB_TOKEN is unset — /v1/service/*, /v1/denuvo-fixes*, /v1/repacks and /v1/magicfiles will " +
-        "fail if the payload repository is private. Everything else works.",
+      "GITHUB_TOKEN is unset — /v1/service/*, /v1/emu/*, /v1/denuvo-fixes*, /v1/repacks and " +
+        "/v1/magicfiles will fail if the payload repository is private. Everything else works.",
     );
   }
 

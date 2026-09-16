@@ -2,10 +2,11 @@
 //!
 //! The proxy replaces both the direct Ryuu API and the direct GitHub access:
 //!
-//! * The catalog comes from `GET /v1/gamelist` (steamtools, cached + compacted by the proxy).
-//! * Each app's unlock is a single `.lua` from `GET /v1/lua/{appid}` (steamtools, rate limited).
+//! * The catalog comes from `GET /v1/gamelist` (the active providers, cached + compacted by the proxy).
+//! * Each app's unlock is a single `.lua` from `GET /v1/lua/{appid}` (30 requests/min per client), or
+//!   the Lua inside its depot package from `GET /v1/depot/package/{appid}`.
 //! * The Steam Service (OST) payload comes from `GET /v1/service/manifest` + `/v1/service/file/{name}`.
-//! * The per-app fixes come from `GET /v1/fixes` + `/v1/fixes/file/{name}`.
+//! * The build-locked Denuvo fixes come from `GET /v1/denuvo-fixes` + `/v1/denuvo-fixes/file/{name}`.
 //!
 //! No steamtools key or GitHub token ships in the app anymore. Instead every request is signed
 //! with a shared HMAC secret embedded at build time (see [`build.rs`](../build.rs)); the proxy
@@ -338,10 +339,23 @@ fn random_nonce() -> String {
     hex
 }
 
-fn looks_like_lua(bytes: &[u8]) -> bool {
-    let prefix = &bytes[..bytes.len().min(256)];
-    let text = String::from_utf8_lossy(prefix);
-    text.contains("addappid") || text.contains("setManifestid")
+/// Whether `bytes` is an unlock Lua: a line that starts with an `addappid(` or `setManifestid(` call,
+/// commented out or not. The whole body is searched, since providers put a header of comments first,
+/// and an HTML or JSON error page never counts.
+pub(crate) fn looks_like_lua(bytes: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(bytes);
+    let start = text.trim_start();
+    if start.starts_with('<') || start.starts_with('{') {
+        return false;
+    }
+    text.lines().any(|line| {
+        let line = line.trim_start();
+        let line = line.strip_prefix("--").map_or(line, str::trim_start);
+        ["addappid", "setManifestid"].iter().any(|call| {
+            line.strip_prefix(call)
+                .is_some_and(|rest| rest.trim_start().starts_with('('))
+        })
+    })
 }
 
 /// Resolves the proxy base URL (origin only, e.g. `https://proxy.example`).
@@ -474,6 +488,12 @@ mod tests {
         assert!(looks_like_lua(b"addappid(440)\n"));
         assert!(looks_like_lua(b"-- setManifestid(440,\"1\")"));
         assert!(!looks_like_lua(b"<!DOCTYPE html><html>error</html>"));
+        assert!(!looks_like_lua(b"{\"error\":\"addappid(440)\"}"));
+        assert!(!looks_like_lua(b"print('addappid(440)')"));
+        // Providers start with a header of comments that can run past the first few hundred bytes.
+        let mut long = "-- Downloaded using DepotBox - https://depotbox.org/\n".repeat(10);
+        long.push_str("addappid(440, 1, \"00\")\n");
+        assert!(long.len() > 256 && looks_like_lua(long.as_bytes()));
     }
 
     #[test]

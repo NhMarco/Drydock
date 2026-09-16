@@ -1,16 +1,19 @@
-// Client for the DepotBox API (https://depotbox.org), the upstream for the gamelist, per-app
-// Lua, and game fixes. The private API key lives only here, server-side, and is never exposed to
-// proxy clients. Errors are surfaced as UpstreamError so the routes can map them uniformly.
+// Client for the DepotBox API (https://depotbox.org), an upstream for the gamelist, per-app Lua and
+// depot packages. The private API key lives only here, server-side, and is never exposed to proxy
+// clients. Errors are surfaced as UpstreamError so the routes can map them uniformly.
 //
-// Endpoints used:
-//   GET /api/gamelist/games          -> { success, total, games: [{ appid, name }] }  (no rate limit)
-//   GET /api/direct-lua?appid=<id>   -> text/plain lua
-//   GET /api/game-fixes              -> { success, count, games: [{ name, fixes: [{ id, ... }] }] }
-//   GET /api/game-fixes/download?id= -> the fix archive bytes (RAR), streamed
+// Endpoints used (checked against the live API):
+//   GET /api/gamelist/games             -> { success, total, games: [{ appid, name }] }  (no tags)
+//   GET /api/direct-lua?appid=<id>      -> text/x-lua, generated on demand (can take minutes)
+//   GET /api/direct-download?appid=<id> -> application/zip: <appid>.lua (keyed addappid lines) plus
+//                                          <depot>_<manifest>.manifest files
 
-import { Readable } from "node:stream";
+import type { Readable } from "node:stream";
 import type { Config } from "./config.js";
-import { UpstreamError, type LuaResult } from "./upstream.js";
+import { type Deadline, fetchWithDeadline, readBody, streamBody } from "./http.js";
+import { UpstreamError, upstreamError, type LuaResult } from "./upstream.js";
+
+const DEPOTBOX: Deadline = { label: "DepotBox", error: upstreamError };
 
 export interface RawStream {
   stream: Readable;
@@ -38,52 +41,31 @@ export class DepotBoxClient implements GamelistSource, LuaSource {
     };
   }
 
-  private async fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      return await fetch(url, { headers: this.headers(), signal: controller.signal });
-    } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
-        throw new UpstreamError(504, "DepotBox request timed out.");
-      }
-      throw new UpstreamError(502, "DepotBox request failed.");
-    } finally {
-      clearTimeout(timer);
-    }
+  private fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
+    return fetchWithDeadline(url, this.headers(), timeoutMs, DEPOTBOX);
   }
 
-  // The full catalog as text ({ games: [{ appid, name }] }). Called only by the background
-  // refresher; free upstream (does not count against the rate limit).
+  // The full catalog as text ({ games: [{ appid, name }] }). Called only by the background refresher.
   async fetchGamelist(): Promise<string> {
     const response = await this.fetchWithTimeout(
       `${this.config.depotboxBase}/api/gamelist/games`,
       this.config.gamelistTimeoutMs,
     );
     if (!response.ok) throw new UpstreamError(response.status, `Gamelist upstream returned ${response.status}.`);
-    return await response.text();
+    return await readBody(response.text(), DEPOTBOX);
   }
 
   async fetchLua(appid: string): Promise<LuaResult> {
     const response = await this.fetchWithTimeout(
       `${this.config.depotboxBase}/api/direct-lua?appid=${encodeURIComponent(appid)}`,
-      this.config.upstreamTimeoutMs,
+      // DepotBox generates the Lua on demand, which takes far longer than the other upstreams need.
+      this.config.depotboxLuaTimeoutMs,
     );
     if (!response.ok) {
       throw new UpstreamError(response.status, `Lua upstream returned ${response.status} for AppID ${appid}.`);
     }
     const contentType = response.headers.get("content-type") ?? "text/plain; charset=utf-8";
-    return { appid, body: await response.text(), contentType };
-  }
-
-  // The full fix catalog as text. Grouped by game, each with one or more fix variants.
-  async fetchGameFixes(): Promise<string> {
-    const response = await this.fetchWithTimeout(
-      `${this.config.depotboxBase}/api/game-fixes`,
-      this.config.gamelistTimeoutMs,
-    );
-    if (!response.ok) throw new UpstreamError(response.status, `Game-fixes upstream returned ${response.status}.`);
-    return await response.text();
+    return { appid, body: await readBody(response.text(), DEPOTBOX), contentType };
   }
 
   // Opens a streaming download of the per-app depot package (a ZIP containing the depot manifests
@@ -102,30 +84,9 @@ export class DepotBoxClient implements GamelistSource, LuaSource {
     }
     const lengthHeader = response.headers.get("content-length");
     return {
-      stream: Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]),
+      stream: streamBody(response.body, DEPOTBOX),
       contentLength: lengthHeader ? Number(lengthHeader) : null,
       contentType: response.headers.get("content-type") ?? "application/zip",
-    };
-  }
-
-  // Opens a streaming download of one fix archive by its opaque id. The caller pipes it straight
-  // to the client so a large archive is never buffered in the proxy.
-  async downloadFix(id: string): Promise<RawStream> {
-    const response = await this.fetchWithTimeout(
-      `${this.config.depotboxBase}/api/game-fixes/download?id=${encodeURIComponent(id)}`,
-      this.config.upstreamTimeoutMs,
-    );
-    if (!response.ok || !response.body) {
-      throw new UpstreamError(
-        response.ok ? 502 : response.status,
-        `Fix download upstream returned ${response.status} for id ${id}.`,
-      );
-    }
-    const lengthHeader = response.headers.get("content-length");
-    return {
-      stream: Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]),
-      contentLength: lengthHeader ? Number(lengthHeader) : null,
-      contentType: response.headers.get("content-type") ?? "application/octet-stream",
     };
   }
 }

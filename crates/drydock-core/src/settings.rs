@@ -39,6 +39,10 @@ pub struct Settings {
     pub games_directory: String,
     pub added_apps: BTreeMap<u32, AddedAppState>,
     pub auto_update_drydock: bool,
+    /// Keeps the Lua and depot manifests of apps added with the latest version up to date.
+    pub auto_update_unlocks: bool,
+    /// Verifies a game's files against its depot manifests before an activation request is made.
+    pub verify_before_activation: bool,
     /// Per-app Steam manifest update locks (App ID → updates enabled), for the Steam integration.
     pub steam_updates_enabled: BTreeMap<u32, bool>,
     /// Games downloaded by Drydock, keyed by App ID — the Library reads this.
@@ -97,6 +101,8 @@ impl Default for Settings {
             games_directory: String::new(),
             added_apps: BTreeMap::new(),
             auto_update_drydock: true,
+            auto_update_unlocks: true,
+            verify_before_activation: false,
             steam_updates_enabled: BTreeMap::new(),
             installed_games: BTreeMap::new(),
             launch_paths: BTreeMap::new(),

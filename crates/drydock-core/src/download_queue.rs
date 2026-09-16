@@ -11,6 +11,19 @@
 
 use crate::settings::QueuedDownload;
 
+/// Register the exact successful target and remove its queue entry in the same settings snapshot.
+/// Persist the snapshot before starting the next job; metadata enrichment is optional.
+pub fn register_completed(settings: &mut crate::Settings, app_id: u32, name: &str, root: &std::path::Path) {
+    settings.installed_games.insert(
+        app_id,
+        crate::InstalledGame {
+            name: name.to_owned(),
+            install_dir: root.display().to_string(),
+        },
+    );
+    remove_completed(&mut settings.download_queue, app_id);
+}
+
 /// What the caller must do to the running download after a queue change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueueEffect {

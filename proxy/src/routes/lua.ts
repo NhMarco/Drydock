@@ -1,6 +1,6 @@
 // Proxies a single generated .lua by AppID. This is the expensive upstream call, so it
-// carries the strict per-client rate limit (1/min by default) and a short server-side
-// cache so a popular title does not trigger one upstream generation per client.
+// carries a per-client rate limit (30/min by default) and a short server-side cache so a
+// popular title does not trigger one upstream generation per client.
 
 import type { FastifyInstance, preHandlerHookHandler } from "fastify";
 import type { Config } from "../config.js";

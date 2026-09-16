@@ -16,10 +16,50 @@
 //! <data dir>/apps/3751260/3751261_6667172545766883229.manifest
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
+
+/// A `.payload-*` staging directory untouched for this long belongs to a save that never finished.
+const STALE_STAGING_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// How often a directory rename is retried while Windows refuses it (see [`rename_directory`]).
+const RENAME_ATTEMPTS: u64 = 5;
+
+/// Serialises everything that touches one app's payload, so a reader never looks between the two
+/// renames of a swap. Different apps do not wait for each other: the UI thread reads one app's
+/// payload while a background add may be saving another's.
+fn lock_app(directory: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = LazyLock::new(Mutex::default);
+    LOCKS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(directory.to_owned())
+        .or_default()
+        .clone()
+}
+
+fn hold(lock: &Mutex<()>) -> MutexGuard<'_, ()> {
+    lock.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Renames a directory, retrying briefly while Windows refuses because a file inside is still open —
+/// typically an antivirus scanner looking at the files that were just written.
+fn rename_directory(from: &Path, to: &Path) -> io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        match fs::rename(from, to) {
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied && attempt < RENAME_ATTEMPTS => {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(50 * attempt));
+            }
+            result => return result,
+        }
+    }
+}
 
 /// What is stored for one app. Either half may be missing: an app can have a Lua and no packaged
 /// manifests at all.
@@ -57,6 +97,46 @@ impl AppPayloadStore {
         self.root.join(app_id.to_string())
     }
 
+    /// Where the previous generation sits while [`Self::save`] swaps in a new one.
+    fn backup_directory(&self, app_id: u32) -> PathBuf {
+        self.root.join(format!("{app_id}.bak"))
+    }
+
+    /// The directory to read: the app's own, or the previous generation when a save was interrupted
+    /// between its two renames and left only that.
+    fn readable_directory(&self, app_id: u32) -> PathBuf {
+        let directory = self.app_directory(app_id);
+        if directory.exists() {
+            directory
+        } else {
+            self.backup_directory(app_id)
+        }
+    }
+
+    /// Removes staging directories left by a save that never finished. Only ones untouched for
+    /// [`STALE_STAGING_AGE`] go, so a save still running in another Drydock process is left alone.
+    fn remove_stale_staging(&self) {
+        let Ok(entries) = fs::read_dir(&self.root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let stale = entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(".payload-"))
+                && entry.file_type().is_ok_and(|kind| kind.is_dir())
+                && entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age > STALE_STAGING_AGE);
+            if stale {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+
     /// Whether anything usable is stored for this app.
     #[must_use]
     pub fn has(&self, app_id: u32) -> bool {
@@ -73,21 +153,49 @@ impl AppPayloadStore {
         lua: Option<(&str, &[u8])>,
         manifests: &BTreeMap<String, Vec<u8>>,
     ) -> io::Result<()> {
-        let directory = self.app_directory(app_id);
-        if directory.exists() {
-            fs::remove_dir_all(&directory)?;
-        }
-        fs::create_dir_all(&directory)?;
-        if let Some((name, bytes)) = lua
-            && is_safe_name(name)
+        if lua.is_some_and(|(name, _)| !is_safe_name(name))
+            || manifests.keys().any(|name| !is_safe_name(name))
         {
-            fs::write(directory.join(name), bytes)?;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Unsafe payload file name",
+            ));
+        }
+        let directory = self.app_directory(app_id);
+        let lock = lock_app(&directory);
+        let _guard = hold(&lock);
+        fs::create_dir_all(&self.root)?;
+        self.remove_stale_staging();
+        crate::safe_path::ensure_no_links(&self.root, &directory)?;
+        let backup = self.backup_directory(app_id);
+        crate::safe_path::ensure_no_links(&self.root, &backup)?;
+        if !directory.exists() && backup.exists() {
+            rename_directory(&backup, &directory)?;
+        }
+        let staged = tempfile::Builder::new()
+            .prefix(".payload-")
+            .tempdir_in(&self.root)?;
+        if let Some((name, bytes)) = lua {
+            fs::write(staged.path().join(name), bytes)?;
         }
         for (name, bytes) in manifests {
-            if is_safe_name(name) {
-                fs::write(directory.join(name), bytes)?;
-            }
+            fs::write(staged.path().join(name), bytes)?;
         }
+        if backup.exists() {
+            fs::remove_dir_all(&backup)?;
+        }
+        if directory.exists() {
+            rename_directory(&directory, &backup)?;
+        }
+        if let Err(error) = rename_directory(staged.path(), &directory) {
+            if backup.exists() {
+                rename_directory(&backup, &directory)?;
+            }
+            return Err(error);
+        }
+        // The previous generation only mattered while the swap was underway: readers fall back to it
+        // just when the directory itself is missing.
+        let _ = fs::remove_dir_all(&backup);
         Ok(())
     }
 
@@ -97,8 +205,10 @@ impl AppPayloadStore {
     /// to fetching, which is always possible when there is a network.
     #[must_use]
     pub fn load(&self, app_id: u32) -> StoredPayload {
+        let lock = lock_app(&self.app_directory(app_id));
+        let _guard = hold(&lock);
         let mut payload = StoredPayload::default();
-        let Ok(entries) = fs::read_dir(self.app_directory(app_id)) else {
+        let Ok(entries) = fs::read_dir(self.readable_directory(app_id)) else {
             return payload;
         };
         for entry in entries.flatten() {
@@ -122,6 +232,32 @@ impl AppPayloadStore {
         payload
     }
 
+    /// Only the stored Lua, as `(file name, bytes)`, without reading any manifest.
+    #[must_use]
+    pub fn stored_lua(&self, app_id: u32) -> Option<(String, Vec<u8>)> {
+        let lock = lock_app(&self.app_directory(app_id));
+        let _guard = hold(&lock);
+        let entries = fs::read_dir(self.readable_directory(app_id)).ok()?;
+        entries.flatten().find_map(|entry| {
+            let name = entry.file_name().to_str()?.to_owned();
+            if !is_safe_name(&name) || !name.to_ascii_lowercase().ends_with(".lua") {
+                return None;
+            }
+            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                return None;
+            }
+            Some((name, fs::read(entry.path()).ok()?))
+        })
+    }
+
+    /// Whether `lua` and `manifests` differ from what is stored for the app. Manifests are compared by
+    /// name only: a name carries the depot and manifest ID, so a new build always has a new name.
+    #[must_use]
+    pub fn differs_from(&self, app_id: u32, lua: &[u8], manifests: &BTreeMap<String, Vec<u8>>) -> bool {
+        self.stored_lua(app_id).is_none_or(|(_, stored)| stored != lua)
+            || !self.manifest_index(app_id).keys().eq(manifests.keys())
+    }
+
     /// The stored manifests' file names and byte sizes, without reading a single manifest.
     ///
     /// This is the cheap half of keeping Steam's `depotcache` intact: comparing names and sizes only
@@ -129,8 +265,10 @@ impl AppPayloadStore {
     /// megabytes into memory — is reserved for the rare case where something actually went missing.
     #[must_use]
     pub fn manifest_index(&self, app_id: u32) -> BTreeMap<String, u64> {
+        let lock = lock_app(&self.app_directory(app_id));
+        let _guard = hold(&lock);
         let mut index = BTreeMap::new();
-        let Ok(entries) = fs::read_dir(self.app_directory(app_id)) else {
+        let Ok(entries) = fs::read_dir(self.readable_directory(app_id)) else {
             return index;
         };
         for entry in entries.flatten() {
@@ -153,7 +291,14 @@ impl AppPayloadStore {
 
     /// Deletes the stored payload for one app. Already absent counts as success.
     pub fn remove(&self, app_id: u32) -> io::Result<()> {
-        match fs::remove_dir_all(self.app_directory(app_id)) {
+        let directory = self.app_directory(app_id);
+        let lock = lock_app(&directory);
+        let _guard = hold(&lock);
+        let backup = self.backup_directory(app_id);
+        if backup.exists() {
+            fs::remove_dir_all(backup)?;
+        }
+        match fs::remove_dir_all(directory) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             other => other,
         }
@@ -194,6 +339,25 @@ mod tests {
             .iter()
             .map(|(name, bytes)| ((*name).to_owned(), (*bytes).to_vec()))
             .collect()
+    }
+
+    #[test]
+    fn a_new_lua_or_manifest_set_counts_as_a_difference() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let store = AppPayloadStore::new(directory.path());
+        let current = manifests(&[("1_2.manifest", b"abc")]);
+        assert!(store.differs_from(480, b"lua", &current), "nothing stored yet");
+        store
+            .save(480, Some(("480.lua", b"lua")), &current)
+            .expect("save");
+        assert_eq!(
+            store.stored_lua(480),
+            Some(("480.lua".to_owned(), b"lua".to_vec()))
+        );
+        assert!(!store.differs_from(480, b"lua", &current));
+        assert!(store.differs_from(480, b"newer lua", &current));
+        assert!(store.differs_from(480, b"lua", &manifests(&[("1_3.manifest", b"abc")])));
+        assert!(store.differs_from(480, b"lua", &BTreeMap::new()));
     }
 
     #[test]
@@ -317,7 +481,7 @@ mod tests {
                 Some(("../escape.lua", b"x")),
                 &manifests(&[("sub/evil.manifest", b"y"), ("C:1_1.manifest", b"z")]),
             )
-            .expect("save");
+            .expect_err("unsafe input must fail before changing the store");
 
         assert!(store.load(7).is_empty(), "nothing unsafe may be written");
         assert!(!directory.path().join("escape.lua").exists());

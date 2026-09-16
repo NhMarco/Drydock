@@ -264,7 +264,11 @@ impl ActivationRequestService {
             .map_err(|_| ActivationError::InvalidSignature)?;
 
         let content_key = private
-            .decrypt(Oaep::new::<Sha256>(), &STANDARD.decode(&metadata.wrapped_key)?)
+            .decrypt_blinded(
+                &mut OsRng,
+                Oaep::new::<Sha256>(),
+                &STANDARD.decode(&metadata.wrapped_key)?,
+            )
             .map_err(|_| ActivationError::WrongDevice)?;
         let cipher = Aes256Gcm::new_from_slice(&content_key)
             .map_err(|error| ActivationError::Crypto(error.to_string()))?;

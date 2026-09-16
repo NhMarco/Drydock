@@ -1,7 +1,7 @@
 //! Fetch + parse orchestration and the download/verify engine.
 
-use std::collections::{BTreeMap, HashMap};
-use std::fs::{File, OpenOptions};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -204,6 +204,7 @@ pub struct DownloadProgress {
 #[derive(Clone, Debug)]
 pub struct DownloadOutcome {
     pub app_id: u32,
+    pub install_root: PathBuf,
     pub files_written: u64,
     pub bytes_written: u64,
 }
@@ -215,12 +216,13 @@ pub struct VerifyOutcome {
     pub total_chunks: u64,
     /// Chunks whose on-disk bytes are missing or fail their Adler-32 (i.e. need re-downloading).
     pub bad_chunks: u64,
+    pub bad_files: u64,
 }
 
 impl VerifyOutcome {
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.bad_chunks == 0
+        self.bad_chunks == 0 && self.bad_files == 0
     }
 }
 
@@ -246,13 +248,19 @@ pub fn download(
     // Refuse before writing anything if the volume plainly cannot hold the download. Sizing every
     // file up front means a full disk would otherwise fail somewhere in the middle, leaving a
     // half-written install behind and an I/O error the user has to interpret.
-    check_free_space(install_root, total)?;
+    let additional = additional_space(data, install_root);
+    check_free_space(install_root, additional)?;
+    let scope =
+        crate::safe_path::WriteRoot::new(install_root).map_err(|error| io_err(install_root, error))?;
 
     // Create every directory + size every file up front, then flatten all chunks into one work list
     // the workers pull from. `files_meta[i]` = (target path, manifest-relative path for display,
     // whether the file was newly created by this call).
     let mut files_meta: Vec<FileSlot> = Vec::new();
     let mut tasks: Vec<(usize, u32, &super::manifest::ChunkEntry)> = Vec::new();
+    // Folders already created by this call. Thousands of files share a handful of folders, and each
+    // creation also checks the path for links, so it is done once per folder.
+    let mut created: HashSet<PathBuf> = HashSet::new();
     for manifest in &data.manifests {
         let depot_id = manifest.depot_id;
         if data.keys.get(depot_id).is_none() {
@@ -261,17 +269,27 @@ pub fn download(
         for file in &manifest.files {
             let target = joined(install_root, &file.path);
             if file.is_directory() {
-                create_dir(&target)?;
+                if !created.contains(&target) {
+                    scope
+                        .create_dir_all(&target)
+                        .map_err(|error| io_err(&target, error))?;
+                    created.insert(target);
+                }
                 continue;
             }
-            if let Some(parent) = target.parent() {
-                create_dir(parent)?;
+            if let Some(parent) = target.parent()
+                && !created.contains(parent)
+            {
+                scope
+                    .create_dir_all(parent)
+                    .map_err(|error| io_err(parent, error))?;
+                created.insert(parent.to_owned());
             }
             // A file we just created holds nothing but zeroes, so checksumming its chunks before
             // downloading them is pure waste — on a fresh install that meant reading back (and
             // Adler-32-ing) the entire game before fetching a single byte of it.
             let existed = target.exists();
-            open_sized(&target, file.size)?; // create + set the final length
+            open_sized(&scope, &target, file.size)?;
             let index = files_meta.len();
             files_meta.push(FileSlot {
                 path: target,
@@ -299,9 +317,9 @@ pub fn download(
     // N worker threads download chunks concurrently (each with its own file handles, writing to its
     // chunk's byte offset), while the coordinating thread reports aggregate progress. `thread::scope`
     // lets the workers borrow the shared state without `Arc`.
-    std::thread::scope(|scope| {
+    std::thread::scope(|threads| {
         for _ in 0..workers {
-            scope.spawn(|| {
+            threads.spawn(|| {
                 let mut handles: HashMap<usize, File> = HashMap::new();
                 loop {
                     if cancel.load(Ordering::Relaxed) || hard_error.lock().unwrap().is_some() {
@@ -322,17 +340,19 @@ pub fn download(
                         *hard_error.lock().unwrap() = Some(DepotDownloadError::MissingKey(depot_id));
                         break;
                     };
+                    // At most 16 files per worker (512 at the maximum concurrency).
+                    if handles.len() >= 16 && !handles.contains_key(&file_index) {
+                        handles.clear();
+                    }
                     let handle = match handles.entry(file_index) {
                         std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-                        std::collections::hash_map::Entry::Vacant(entry) => {
-                            match OpenOptions::new().read(true).write(true).open(path) {
-                                Ok(file) => entry.insert(file),
-                                Err(source) => {
-                                    *hard_error.lock().unwrap() = Some(io_err(path, source));
-                                    break;
-                                }
+                        std::collections::hash_map::Entry::Vacant(entry) => match scope.open(path, false) {
+                            Ok(file) => entry.insert(file),
+                            Err(source) => {
+                                *hard_error.lock().unwrap() = Some(io_err(path, source));
+                                break;
                             }
-                        }
+                        },
                     };
                     // Resume/repair: a chunk whose on-disk bytes already verify is skipped. Only
                     // worth checking for files that predate this call — see `FileSlot::may_resume`.
@@ -347,8 +367,10 @@ pub fn download(
                     if let Ok(mut name) = current_file.lock() {
                         slot.relative.clone_into(&mut name);
                     }
-                    if let Some(limiter) = &limiter {
-                        limiter.take(u64::from(chunk.compressed_len.max(1)));
+                    if let Some(limiter) = &limiter
+                        && !limiter.take(u64::from(chunk.compressed_len.max(1)), cancel)
+                    {
+                        break;
                     }
                     let raw =
                         match download_chunk_rotating(cdn, &servers, &server_cursor, depot_id, chunk, key) {
@@ -404,6 +426,7 @@ pub fn download(
     });
     Ok(DownloadOutcome {
         app_id,
+        install_root: install_root.to_owned(),
         files_written,
         bytes_written: bytes_written.load(Ordering::Relaxed),
     })
@@ -418,6 +441,21 @@ struct FileSlot {
     /// anything worth verifying; a file `open_sized` just created is all zeroes, so checksumming it
     /// before downloading would read the whole install back for nothing.
     may_resume: bool,
+}
+
+/// How many more bytes the download needs on disk: each file's size beyond what is already there, so
+/// resuming or repairing an install does not ask for room for the whole game again.
+pub(crate) fn additional_space(data: &DepotData, install_root: &Path) -> u64 {
+    data.manifests
+        .iter()
+        .flat_map(|manifest| &manifest.files)
+        .filter(|file| !file.is_directory())
+        .map(|file| {
+            file.size.saturating_sub(
+                std::fs::metadata(joined(install_root, &file.path)).map_or(0, |meta| meta.len()),
+            )
+        })
+        .fold(0_u64, u64::saturating_add)
 }
 
 /// Fails early when the target volume clearly cannot hold `needed` bytes.
@@ -497,24 +535,26 @@ impl RateLimiter {
         }
     }
 
-    fn take(&self, bytes: u64) {
-        let bytes = bytes as f64;
-        loop {
+    fn take(&self, bytes: u64, cancel: &AtomicBool) -> bool {
+        let mut remaining = bytes as f64;
+        while remaining > 0.0 {
+            if cancel.load(Ordering::Relaxed) {
+                return false;
+            }
             let wait = {
                 let mut state = self.state.lock().unwrap();
                 let now = Instant::now();
                 let elapsed = now.duration_since(state.0).as_secs_f64();
                 let tokens = (state.1 + elapsed * self.max_bps).min(self.max_bps);
                 state.0 = now;
-                if tokens >= bytes {
-                    state.1 = tokens - bytes;
-                    return;
-                }
-                state.1 = tokens;
-                (bytes - tokens) / self.max_bps
+                let consumed = tokens.min(remaining);
+                remaining -= consumed;
+                state.1 = tokens - consumed;
+                remaining / self.max_bps
             };
             std::thread::sleep(Duration::from_secs_f64(wait.min(0.5)));
         }
+        true
     }
 }
 
@@ -530,6 +570,7 @@ pub fn verify(
     let mut done: u64 = 0;
     let mut total_chunks: u64 = 0;
     let mut bad_chunks: u64 = 0;
+    let mut bad_files: u64 = 0;
 
     for manifest in &data.manifests {
         for file in &manifest.files {
@@ -541,6 +582,13 @@ pub fn verify(
             }
             let target = joined(install_root, &file.path);
             let mut handle = std::fs::File::open(&target).ok();
+            if !handle
+                .as_ref()
+                .and_then(|file| file.metadata().ok())
+                .is_some_and(|meta| meta.is_file() && meta.len() == file.size)
+            {
+                bad_files += 1;
+            }
             for chunk in &file.chunks {
                 total_chunks += 1;
                 let ok = match handle.as_mut() {
@@ -569,6 +617,7 @@ pub fn verify(
         app_id: data.app_id,
         total_chunks,
         bad_chunks,
+        bad_files,
     })
 }
 
@@ -625,21 +674,16 @@ fn write_at(
     file.write_all(bytes).map_err(|source| io_err(path, source))
 }
 
-/// Opens (creating if needed) `path` and ensures it is exactly `size` bytes long.
-fn open_sized(path: &Path, size: u64) -> Result<std::fs::File, DepotDownloadError> {
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(|source| io_err(path, source))?;
+/// Opens (creating if needed) `path`, whose folder must exist, and ensures it is exactly `size` bytes
+/// long.
+fn open_sized(
+    scope: &crate::safe_path::WriteRoot,
+    path: &Path,
+    size: u64,
+) -> Result<std::fs::File, DepotDownloadError> {
+    let file = scope.open(path, true).map_err(|source| io_err(path, source))?;
     file.set_len(size).map_err(|source| io_err(path, source))?;
     Ok(file)
-}
-
-fn create_dir(path: &Path) -> Result<(), DepotDownloadError> {
-    std::fs::create_dir_all(path).map_err(|source| io_err(path, source))
 }
 
 /// Whether a depot is one of Steam's shared "Common Redistributables" (app 228980: Visual C++,
@@ -674,6 +718,38 @@ fn io_err(path: &Path, source: std::io::Error) -> DepotDownloadError {
 mod tests {
     use super::*;
     use crate::depot::manifest::{ChunkEntry, DepotManifest, FileEntry};
+
+    /// Runs `take` on its own thread. Tests wait for the result with a deadline, so a limiter that
+    /// blocks forever fails the test instead of hanging the whole run.
+    fn spawn_take(
+        max_bps: u64,
+        bytes: u64,
+        cancel: &std::sync::Arc<AtomicBool>,
+    ) -> std::sync::mpsc::Receiver<bool> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let cancel = std::sync::Arc::clone(cancel);
+        std::thread::spawn(move || {
+            let _ = sender.send(RateLimiter::new(max_bps).take(bytes, &cancel));
+        });
+        receiver
+    }
+
+    const LIMITER_DEADLINE: Duration = Duration::from_secs(10);
+
+    #[test]
+    fn a_request_larger_than_the_limiter_capacity_completes() {
+        let taken = spawn_take(1000, 1001, &std::sync::Arc::default());
+        assert_eq!(taken.recv_timeout(LIMITER_DEADLINE).ok(), Some(true));
+    }
+
+    #[test]
+    fn cancelling_interrupts_a_long_limiter_wait() {
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let taken = spawn_take(1, 1_000_000, &cancel);
+        std::thread::sleep(Duration::from_millis(20));
+        cancel.store(true, Ordering::Relaxed);
+        assert_eq!(taken.recv_timeout(LIMITER_DEADLINE).ok(), Some(false));
+    }
 
     fn manifest_with(files: Vec<FileEntry>) -> DepotManifest {
         DepotManifest {
@@ -815,7 +891,14 @@ mod tests {
         // handles produce exactly the expected bytes.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("data.bin");
-        drop(open_sized(&path, 4096).unwrap());
+        drop(
+            open_sized(
+                &crate::safe_path::WriteRoot::new(path.parent().unwrap()).unwrap(),
+                &path,
+                4096,
+            )
+            .unwrap(),
+        );
         std::thread::scope(|scope| {
             for region in 0..4u64 {
                 let path = &path;

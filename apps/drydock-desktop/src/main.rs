@@ -3,8 +3,10 @@
     windows_subsystem = "windows"
 )]
 
+mod downloads;
 mod image_cache;
 mod ui;
+mod unlocks;
 
 #[cfg(feature = "screenshot")]
 mod screenshot;

@@ -1,19 +1,26 @@
 // Thin client for the real steamtools.app API. The private x-api-key lives only here,
 // server-side, and is never exposed to proxy clients.
 
-import { Readable } from "node:stream";
 import type { Config } from "./config.js";
 import type { RawStream } from "./depotbox.js";
+import { type Deadline, fetchWithDeadline, readBody, streamBody } from "./http.js";
 
 export class UpstreamError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    // For a 429: how long the provider asked to be left alone.
+    readonly retryAfterSeconds?: number,
   ) {
     super(message);
     this.name = "UpstreamError";
   }
 }
+
+export const upstreamError = (status: number, message: string, retryAfterSeconds?: number): UpstreamError =>
+  new UpstreamError(status, message, retryAfterSeconds);
+
+const UPSTREAM: Deadline = { label: "Upstream", error: upstreamError };
 
 export interface LuaResult {
   appid: string;
@@ -32,19 +39,8 @@ export class SteamToolsClient {
     };
   }
 
-  private async fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      return await fetch(url, { headers: this.headers(), signal: controller.signal });
-    } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
-        throw new UpstreamError(504, "Upstream request timed out.");
-      }
-      throw new UpstreamError(502, "Upstream request failed.");
-    } finally {
-      clearTimeout(timer);
-    }
+  private fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
+    return fetchWithDeadline(url, this.headers(), timeoutMs, UPSTREAM);
   }
 
   // Downloads the full gamelist as text (~35 MB). Called only by the background refresher.
@@ -54,7 +50,7 @@ export class SteamToolsClient {
       this.config.gamelistTimeoutMs,
     );
     if (!response.ok) throw new UpstreamError(response.status, `Gamelist upstream returned ${response.status}.`);
-    return await response.text();
+    return await readBody(response.text(), UPSTREAM);
   }
 
   async fetchLua(appid: string): Promise<LuaResult> {
@@ -66,7 +62,7 @@ export class SteamToolsClient {
       throw new UpstreamError(response.status, `Lua upstream returned ${response.status} for AppID ${appid}.`);
     }
     const contentType = response.headers.get("content-type") ?? "text/plain; charset=utf-8";
-    return { appid, body: await response.text(), contentType };
+    return { appid, body: await readBody(response.text(), UPSTREAM), contentType };
   }
 
   // Opens a streaming download of the per-app manifest package (a ZIP of all `.manifest` files plus
@@ -85,7 +81,7 @@ export class SteamToolsClient {
     }
     const lengthHeader = response.headers.get("content-length");
     return {
-      stream: Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]),
+      stream: streamBody(response.body, UPSTREAM),
       contentLength: lengthHeader ? Number(lengthHeader) : null,
       contentType: response.headers.get("content-type") ?? "application/zip",
     };
@@ -102,6 +98,6 @@ export class SteamToolsClient {
       throw new UpstreamError(response.status, `App-info upstream returned ${response.status} for AppID ${appid}.`);
     }
     const contentType = response.headers.get("content-type") ?? "application/json; charset=utf-8";
-    return { body: await response.text(), contentType };
+    return { body: await readBody(response.text(), UPSTREAM), contentType };
   }
 }

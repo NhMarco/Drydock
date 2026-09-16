@@ -10,6 +10,7 @@ pub mod depot;
 pub mod download_queue;
 pub mod emu_template;
 pub mod emu_toolchain;
+pub(crate) mod file_transaction;
 pub mod fixes;
 pub mod game_folder;
 pub mod harden;
@@ -18,9 +19,12 @@ pub mod manifest_protection;
 pub mod mfb;
 pub mod models;
 pub mod open_steam_tool;
+pub mod own_unlock;
 pub mod paths;
 pub mod proxy;
 pub mod repacks;
+#[cfg(test)]
+mod review_regressions;
 pub mod safe_path;
 pub mod self_test;
 pub mod settings;
@@ -73,8 +77,9 @@ pub use mfb::{
     DenuvoFix, FixEntry, RepositoryFile, SteamServiceManifest, SteamServicePackage, compute_git_blob_sha,
     matches_git_blob_sha,
 };
-pub use models::{AddedAppState, AppInfo, SteamManifest};
+pub use models::{AddedAppState, AppInfo, SteamManifest, UnlockSource};
 pub use open_steam_tool::{OpenSteamTool, OstError};
+pub use own_unlock::{OwnUnlock, OwnUnlockError, read_own_unlock};
 pub use paths::PortablePaths;
 pub use proxy::{ProxyClient, ProxyError, hmac_secret, proxy_base_url};
 pub use repacks::{LinkError, RepackApp, RepackSource, is_http_url, open_link};

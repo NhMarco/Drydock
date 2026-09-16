@@ -6,9 +6,9 @@
 //! the plug-in folder.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, Read, Seek};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -55,40 +55,77 @@ pub fn apply_denuvo_fix(
     if !install_dir.is_dir() {
         return Err(FixError::GameNotInstalled);
     }
-    // 1. Replace the plug-in Lua with the build-locked fix Lua (transactional). add_app_files
-    //    overwrites the app's `{appid}.lua`, so no other Lua for the app is left behind.
+    // Validate the entire archive before changing either installation. It is staged, and the originals
+    // it replaces are backed up, inside the game folder: on the drive that holds the game rather than
+    // the system drive, and under the antivirus exclusion users are told to add for that folder.
+    let staged = tempfile::Builder::new()
+        .prefix(".drydock-fix-")
+        .tempdir_in(install_dir)?;
+    let extracted = extract_zip(File::open(zip_path)?, staged.path())?;
+    if extracted.files.is_empty() {
+        return Err(io::Error::other("Fix archive contains no files").into());
+    }
+    let mut changes = crate::file_transaction::FileTransaction::backed_up_in_root(install_dir)?;
     let mut payload = BTreeMap::new();
     payload.insert(denuvo.lua.file_name().to_owned(), fix_lua.to_vec());
-    add_app_files(steam_directory, &payload)?;
-
-    // 2. Extract the game-folder files over the install directory (streamed from disk).
-    extract_zip(File::open(zip_path)?, install_dir)
+    let result = (|| -> Result<(), FixError> {
+        for relative in &extracted.folders {
+            changes.create_dir_all(&install_dir.join(relative))?;
+        }
+        // Replaced from what was extracted, not from what is still staged: a staged file that has
+        // disappeared since (quarantined, say) fails the copy and rolls the fix back.
+        for relative in &extracted.files {
+            changes.replace(&staged.path().join(relative), &install_dir.join(relative))?;
+        }
+        // The Lua is the completion indicator and is committed last.
+        add_app_files(steam_directory, &payload)?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        changes.rollback()?;
+        return Err(error);
+    }
+    changes.commit();
+    Ok(extracted.files.len())
 }
 
-/// Extracts a zip into `target_dir`, overwriting existing files. Entry paths that would escape
-/// the target directory (zip-slip: `..`, absolute paths, drive prefixes) are rejected via
-/// [`enclosed_name`], so a malicious archive can never write outside the game folder.
-fn extract_zip<R: Read + Seek>(reader: R, target_dir: &Path) -> Result<usize, FixError> {
+/// What [`extract_zip`] wrote, as paths relative to its target folder.
+struct Extracted {
+    files: Vec<PathBuf>,
+    /// Folder entries of the archive, which may be empty and so appear in no file's path.
+    folders: Vec<PathBuf>,
+}
+
+/// Extracts a zip into `target_dir`, overwriting existing files. Entry paths that would escape the
+/// target directory (zip-slip: `..`, absolute paths, drive prefixes) are rejected via
+/// [`enclosed_name`], and every write goes through a [`WriteRoot`](crate::safe_path::WriteRoot), so
+/// a malicious archive or a link planted in the folder can never direct a write outside it.
+fn extract_zip<R: Read + Seek>(reader: R, target_dir: &Path) -> Result<Extracted, FixError> {
+    let scope = crate::safe_path::WriteRoot::new(target_dir)?;
     let mut archive = zip::ZipArchive::new(reader)?;
-    let mut written = 0;
+    let mut extracted = Extracted {
+        files: Vec::new(),
+        folders: Vec::new(),
+    };
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index)?;
         let Some(relative) = entry.enclosed_name() else {
             return Err(FixError::UnsafeZipEntry(entry.name().to_owned()));
         };
-        let destination = target_dir.join(relative);
+        let destination = target_dir.join(&relative);
         if entry.is_dir() {
-            fs::create_dir_all(&destination)?;
+            scope.create_dir_all(&destination)?;
+            extracted.folders.push(relative);
             continue;
         }
         if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
+            scope.create_dir_all(parent)?;
         }
-        let mut file = File::create(&destination)?;
+        let mut file = scope.create(&destination)?;
         io::copy(&mut entry, &mut file)?;
-        written += 1;
+        extracted.files.push(relative);
     }
-    Ok(written)
+    Ok(extracted)
 }
 
 #[derive(Debug, Error)]
@@ -108,6 +145,7 @@ pub enum FixError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::io::Write as _;
 
     fn zip_with(entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -136,7 +174,7 @@ mod tests {
         ]);
 
         let written = extract_zip(io::Cursor::new(&zip), target.path()).expect("extract");
-        assert_eq!(written, 3);
+        assert_eq!(written.files.len(), 3);
         assert_eq!(fs::read(target.path().join("OnlineFix64.dll")).unwrap(), b"fix");
         assert_eq!(
             fs::read(target.path().join("Data/Managed/Assembly-CSharp.dll")).unwrap(),

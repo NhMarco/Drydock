@@ -24,20 +24,51 @@ function toAppId(value: unknown): number | null {
 }
 
 function parseGames(raw: string): RawGame[] {
-  try {
-    const parsed = JSON.parse(raw) as { games?: unknown };
-    return Array.isArray(parsed.games) ? (parsed.games as RawGame[]) : [];
-  } catch {
-    return [];
+  const parsed = JSON.parse(raw) as { games?: unknown; success?: unknown } | null;
+  if (!parsed || parsed.success === false || !Array.isArray(parsed.games)) {
+    throw new UpstreamError(502, "Invalid gamelist schema.");
   }
+  return parsed.games as RawGame[];
+}
+
+function hasTags(game: RawGame): boolean {
+  return Array.isArray(game.tags) && game.tags.length > 0;
 }
 
 // The proxy client verifies Lua on its own, but the proxy only knows a payload is a real unlock by
 // its content — so mirror the client's check (crates/drydock-core/src/proxy.rs `looks_like_lua`) to
-// decide whether the primary actually had the game before falling back.
-function looksLikeLua(body: string): boolean {
-  const head = body.slice(0, 256);
-  return head.includes("addappid") || head.includes("setManifestid");
+// decide whether a provider actually had the game before falling back. A line has to start with the
+// call, commented out or not. The whole body is searched: providers put a header of comments first,
+// and an HTML or JSON error page is never a Lua.
+const UNLOCK_LINE = /^\s*(?:--\s*)?(addappid|setManifestid)\s*\(/m;
+export function looksLikeLua(body: string): boolean {
+  const start = body.trimStart();
+  return !start.startsWith("<") && !start.startsWith("{") && UNLOCK_LINE.test(body);
+}
+
+// Providers that answered 429, skipped until their limit resets so one busy provider does not turn
+// every request into a slow failure. Shared by the Lua and depot routes.
+export class ProviderCooldown {
+  private readonly until = new Map<string, number>();
+
+  isCooling(name: string): boolean {
+    const until = this.until.get(name);
+    if (until === undefined) return false;
+    if (until > Date.now()) return true;
+    this.until.delete(name);
+    return false;
+  }
+
+  noteFailure(name: string, error: unknown): void {
+    if (error instanceof UpstreamError && error.status === 429) {
+      this.until.set(name, Date.now() + (error.retryAfterSeconds ?? 60) * 1000);
+    }
+  }
+}
+
+// Keeps the more telling of two failures: a real upstream error outranks a plain "not found".
+function moreTelling(current: unknown, next: unknown): unknown {
+  return current instanceof UpstreamError && current.status !== 404 ? current : next;
 }
 
 // A named provider source in priority order — index 0 wins on shared AppIDs (gamelist) and is tried
@@ -86,7 +117,10 @@ export class MergedGamelistSource implements GamelistSource {
           for (const game of parseGames(raw)) {
             const appid = toAppId(game.appid);
             if (!appid) continue;
-            byId.set(appid, game);
+            // A provider without tags (DepotBox) keeps the tags a lower-priority one had, so the
+            // NSFW filter still sees them.
+            const previous = byId.get(appid);
+            byId.set(appid, previous && hasTags(previous) && !hasTags(game) ? { ...game, tags: previous.tags } : game);
             count += 1;
           }
         }
@@ -105,6 +139,7 @@ export class MergedGamelistSource implements GamelistSource {
         : new UpstreamError(502, "All gamelist upstreams failed.");
     }
 
+    if (byId.size === 0) throw new UpstreamError(502, "No usable games returned by active providers.");
     this.log.info({ sources: counts, total: byId.size }, "Merged gamelist from active providers.");
     return [...byId.values()];
   }
@@ -124,6 +159,7 @@ export class MergedLuaSource implements LuaSource {
   constructor(
     private readonly sources: NamedLuaSource[],
     private readonly log: FastifyBaseLogger,
+    private readonly cooldown: ProviderCooldown = new ProviderCooldown(),
   ) {}
 
   async fetchLua(appid: string): Promise<LuaResult> {
@@ -132,6 +168,10 @@ export class MergedLuaSource implements LuaSource {
     }
     let lastError: unknown = null;
     for (const [index, { name, source }] of this.sources.entries()) {
+      if (this.cooldown.isCooling(name)) {
+        lastError = moreTelling(lastError, new UpstreamError(429, `${name} is rate limited.`));
+        continue;
+      }
       try {
         const result = await source.fetchLua(appid);
         if (looksLikeLua(result.body)) {
@@ -139,11 +179,13 @@ export class MergedLuaSource implements LuaSource {
           return result;
         }
         // Answered, but not a real unlock (this provider does not have the game): try the next.
-        lastError = new UpstreamError(404, `${name} has no Lua for AppID ${appid}.`);
+        lastError = moreTelling(lastError, new UpstreamError(404, `${name} has no Lua for AppID ${appid}.`));
       } catch (error) {
-        // Prefer a non-404 upstream error over a plain "not found" from an earlier source.
-        const haveReal = lastError instanceof UpstreamError && lastError.status !== 404;
-        if (!haveReal) lastError = error;
+        this.cooldown.noteFailure(name, error);
+        // An expired key or an exhausted quota would otherwise only show up as a missing Lua.
+        const status = error instanceof UpstreamError ? error.status : undefined;
+        if (status !== 404) this.log.warn({ appid, source: name, upstreamStatus: status, err: error }, `${name} Lua failed.`);
+        lastError = moreTelling(lastError, error);
       }
     }
     if (lastError instanceof UpstreamError) throw lastError;

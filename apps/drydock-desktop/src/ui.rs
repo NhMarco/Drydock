@@ -1,3 +1,5 @@
+use crate::downloads::{DownloadJob, DownloadKind, DownloadUpdate, human_bytes, run_depot_job};
+use crate::unlocks::{UnlockUpdateSweep, UnlockWrites};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,22 +11,22 @@ use std::time::{Duration, Instant, SystemTime};
 
 use drydock_core::{
     APP_VERSION, ActivationRequestService, AddedAppState, AppCatalog, AppPayloadStore, AppUpdater,
-    CRACK_ARTIFACT_NAMES, CatalogApp, CdnClient, CloudProvider, CloudRedirect, CloudSettings, ConfigSource,
+    CRACK_ARTIFACT_NAMES, CatalogApp, CloudProvider, CloudRedirect, CloudSettings, ConfigSource,
     ConflictingSoftwareStatus, DenuvoWatchClient, DepotData, DownloadProgress, DownloadedDll,
     EmuTemplateInput, FixEntry, FixStatus, GameLanguageOptions, LoadOutcome, OpenSteamTool, PeArch,
     PortablePaths, PreparedUpdate, ProxyClient, QueueEffect, QueuedDownload, RepackApp, S3Credentials,
     Settings, SteamDiscovery, SteamManifest, SteamServiceState, SteamServiceStatus, SteamStoreClient,
-    SteamStoreDetails, SteamUriAction, StoreCapsule, StoreFeatured, VerifiedEntitlement,
+    SteamStoreDetails, SteamUriAction, StoreCapsule, StoreFeatured, UnlockSource, VerifiedEntitlement,
     achievement_image_urls, add_app_files, apply_denuvo_fix, apply_language, back_up_before_overwrite,
-    clear_previous_token_files, cloud, depot, detect_conflicting_software, detect_pe_arch, discover_steam,
-    download_queue, ensure_toolchain, fetch_achievement_images, fetch_install_dir, fetch_reframework_dll,
-    fetch_windows_arch, fetch_windows_executables, fix_status, install_depot_manifests, install_magicfiles,
-    install_service, installed_app_luas, is_steam_running, is_valid_steam_directory,
-    load_cached_denuvo_appids, load_catalog_apps, load_dll_files, load_manifests, missing_depot_manifests,
-    open_link, open_steam_uri, overlay_sound_bytes, read_denuvo_appids, read_language_options,
-    remove_app_files, remove_paths, resolve_game_root, restart_steam, run_and_capture_token_request,
-    save_catalog_apps, save_denuvo_appids, scan_crack_files, service_status, set_manifest_updates_enabled,
-    start_steam, stop_steam, toolchain_dlls, uninstall_service, updates_enabled,
+    clear_previous_token_files, cloud, detect_conflicting_software, detect_pe_arch, discover_steam,
+    download_queue, ensure_toolchain, fetch_achievement_images, fetch_reframework_dll, fetch_windows_arch,
+    fetch_windows_executables, fix_status, install_depot_manifests, install_magicfiles, install_service,
+    installed_app_luas, is_steam_running, is_valid_steam_directory, load_cached_denuvo_appids,
+    load_catalog_apps, load_dll_files, load_manifests, missing_depot_manifests, open_link, open_steam_uri,
+    overlay_sound_bytes, read_denuvo_appids, read_language_options, read_own_unlock, remove_app_files,
+    remove_paths, resolve_game_root, restart_steam, run_and_capture_token_request, save_catalog_apps,
+    save_denuvo_appids, scan_crack_files, service_status, set_manifest_updates_enabled, start_steam,
+    stop_steam, toolchain_dlls, uninstall_service, updates_enabled,
 };
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke, Vec2};
 
@@ -128,6 +130,19 @@ const MANIFEST_RECHECK_COOLDOWN: Duration = Duration::from_secs(600);
 /// spent its single depot fetch on (so the session does not retry that one again).
 type ManifestGuardSweep = (usize, Vec<u32>, Option<u32>);
 
+/// Hover text of the library button that adds the user's own unlock files.
+const OWN_UNLOCK_HOVER: &str = "Pick a Lua and/or depot manifests from your disk and add them to Steam. The game is      taken from the Lua (its file name or first addappid line). Automatic updates leave these files alone.";
+
+/// How often the unlocks of apps added with the latest version are compared with the provider's.
+/// The proxy caches a depot package for a day, so checking much more often finds nothing new.
+const UNLOCK_UPDATE_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
+
+/// How often the UI looks at whether an unlock update sweep is due.
+const UNLOCK_UPDATE_POLL: Duration = Duration::from_secs(5 * 60);
+
+/// The pause between two apps in a sweep: each fetch may make the provider build a package.
+const UNLOCK_UPDATE_SPACING: Duration = Duration::from_secs(2);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Page {
     Home,
@@ -219,6 +234,7 @@ impl FixFilter {
 }
 
 pub struct DrydockApp {
+    image_textures: Arc<crate::image_cache::VisibleTextureLoader>,
     page: Page,
     /// The page shown on the previous frame, used to run a state refresh on every page switch.
     last_page: Page,
@@ -287,6 +303,12 @@ pub struct DrydockApp {
     /// Session-only: a restart is a fair moment to try again, since the upstream may have finished
     /// packaging in the meantime.
     manifest_fetch_attempted: HashSet<u32>,
+    /// Serialises unlock writes between the user's actions and the automatic updater.
+    unlock_writes: Arc<UnlockWrites>,
+    /// The running automatic unlock update sweep, if any.
+    unlock_update_receiver: Option<Receiver<UnlockUpdateSweep>>,
+    /// When the UI last looked at whether a sweep is due.
+    last_unlock_update_check: Option<Instant>,
     last_manifest_check: Option<Instant>,
     /// Whether Steam was running at the previous guard tick — a flip means an account switch or a
     /// client restart may just have emptied `depotcache`, which is the moment worth re-checking.
@@ -301,8 +323,8 @@ pub struct DrydockApp {
     add_game_search: String,
     /// Background folder/exe detection for the "Add game to Drydock" flow.
     add_game_receiver: Option<Receiver<Result<AddGameOutcome, String>>>,
-    /// Background detection that registers a just-finished depot download in the Drydock library.
-    download_install_receiver: Option<Receiver<Result<AddGameOutcome, String>>>,
+    /// Background launch-exe detection for depot downloads already registered in the library.
+    download_install_receiver: Vec<Receiver<Result<AddGameOutcome, String>>>,
     language_options: Option<GameLanguageOptions>,
     language_directory: Option<PathBuf>,
     language_selection: String,
@@ -347,6 +369,8 @@ pub struct DrydockApp {
     activation_check_app: Option<u32>,
     activation_check_receiver: Option<Receiver<Result<ActivationCheck, String>>>,
     activation_remove_receiver: Option<Receiver<Result<(u32, PathBuf), String>>>,
+    /// The game (and folder) whose files are being verified before its activation request is made.
+    activation_verify: Option<(u32, PathBuf)>,
     pending_crack: Option<PendingCrack>,
     // Which store's activation is on screen, and the Ubisoft flow's state: the background
     // magicfiles+launch+capture step, the resulting activation code, and where token.ini installs.
@@ -391,34 +415,6 @@ pub struct DrydockApp {
     /// (activate a queued download, or send the active one back into the queue) — not a pause.
     download_switch_pending: bool,
     started: Instant,
-}
-
-/// A running (or just-finished) depot download or verify, driven by a background thread.
-struct DownloadJob {
-    app_id: u32,
-    name: String,
-    kind: DownloadKind,
-    cancel: Arc<AtomicBool>,
-    receiver: Receiver<DownloadUpdate>,
-    progress: Option<DownloadProgress>,
-    /// Smoothed download speed in bytes/sec, its running peak, plus the last (time, done_bytes)
-    /// sample the estimate came from.
-    speed_bps: f64,
-    peak_bps: f64,
-    sample: Option<(Instant, u64)>,
-    /// `Some` once the job ended: `Ok(summary)` or `Err(message)`.
-    finished: Option<Result<String, String>>,
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum DownloadKind {
-    Download,
-    Verify,
-}
-
-enum DownloadUpdate {
-    Progress(DownloadProgress),
-    Finished(Result<String, String>),
 }
 
 /// Outcome of the pre-activation folder check: the verified install root, and whether crack/HV
@@ -507,11 +503,13 @@ enum ServiceOutcome {
         status: SteamServiceStatus,
         note: String,
     },
-    /// An app's Lua unlock files were installed; persist them in settings.
+    /// An app's unlock files were installed; persist them in settings. `files` is empty when only
+    /// manifests were added, which keeps the Lua already recorded.
     Added {
         app_id: u32,
         files: Vec<String>,
         note: String,
+        source: UnlockSource,
     },
     /// An app's Lua unlock files were removed; drop it from settings.
     Removed { app_id: u32, note: String },
@@ -542,15 +540,21 @@ impl DrydockApp {
                 SteamStoreClient::sweep_stale_cache(&cache_dir.join("store-details"));
             });
         }
-        // A persistent disk cache for the storefront/library CDN images, registered before egui's
-        // default HTTP loader so it takes priority (loaders run in registration order). Cached art is
-        // then served instantly from disk on later frames and launches instead of re-downloading.
+        egui_extras::install_image_loaders(&context.egui_ctx);
+        // A persistent disk cache for the storefront/library CDN images, registered after egui's
+        // default HTTP loader so it takes priority (egui tries the most recently added bytes loader
+        // first). Cached art is then served from disk on later frames and launches instead of being
+        // downloaded again.
         context
             .egui_ctx
             .add_bytes_loader(std::sync::Arc::new(crate::image_cache::DiskImageCache::new(
                 &paths.cache_dir(),
             )));
-        egui_extras::install_image_loaders(&context.egui_ctx);
+        context
+            .egui_ctx
+            .options_mut(|options| options.reduce_texture_memory = true);
+        let image_textures = Arc::new(crate::image_cache::VisibleTextureLoader::default());
+        context.egui_ctx.add_texture_loader(image_textures.clone());
         // Recovering load: a corrupt/half-written settings file falls back to the `.bak` copy, and a
         // file that cannot be salvaged is moved aside rather than silently replaced by defaults —
         // otherwise the next save would wipe `added_apps` / `installed_games` / `launch_paths`.
@@ -634,6 +638,7 @@ impl DrydockApp {
         let header_resolver =
             HeaderResolver::new(paths.cache_dir().join("store-details"), context.egui_ctx.clone());
         let mut app = Self {
+            image_textures,
             page: Page::Home,
             last_page: Page::Home,
             last_service_check: None,
@@ -665,10 +670,10 @@ impl DrydockApp {
             repackers_by_app: std::collections::HashMap::new(),
             fix_flags_by_app: std::collections::HashSet::new(),
             pending_fix_block: None,
-            // At most one full game-list refresh per 5 minutes, and one unlock download per
-            // minute, so a single user cannot hammer the Ryuu API.
+            // At most one full game-list refresh per 5 minutes, and 30 unlock downloads (Lua and
+            // manifests) per minute, so a single user cannot hammer the providers.
             catalog_limiter: RateLimiter::new(1, Duration::from_secs(5 * 60)),
-            download_limiter: RateLimiter::new(1, Duration::from_secs(60)),
+            download_limiter: RateLimiter::new(30, Duration::from_secs(60)),
             search: String::new(),
             steam_directory_draft,
             games_directory_draft,
@@ -676,6 +681,9 @@ impl DrydockApp {
             launch_warned: HashSet::new(),
             manifest_guard_receiver: None,
             manifest_fetch_attempted: HashSet::new(),
+            unlock_writes: Arc::default(),
+            unlock_update_receiver: None,
+            last_unlock_update_check: None,
             last_manifest_check: None,
             steam_was_running: is_steam_running(),
             selected_app: None,
@@ -683,7 +691,7 @@ impl DrydockApp {
             add_game_folder: None,
             add_game_search: String::new(),
             add_game_receiver: None,
-            download_install_receiver: None,
+            download_install_receiver: Vec::new(),
             language_options: None,
             language_directory: None,
             language_selection: String::new(),
@@ -714,6 +722,7 @@ impl DrydockApp {
             activation_check_app: None,
             activation_check_receiver: None,
             activation_remove_receiver: None,
+            activation_verify: None,
             pending_crack: None,
             activation_provider: ActivationProvider::default(),
             ubisoft_prepare_receiver: None,
@@ -1165,13 +1174,13 @@ impl DrydockApp {
                 self.busy_label = None;
                 let app_id = self.activation_check_app.take();
                 match result {
-                    Ok(ActivationCheck::Ready { root }) => {
-                        self.activation_path = root.display().to_string();
-                        self.activation_root = Some(root);
-                        if let Some(app_id) = app_id {
-                            self.generate_activation_request(app_id);
+                    Ok(ActivationCheck::Ready { root }) => match app_id {
+                        Some(app_id) => self.continue_activation(app_id, root),
+                        None => {
+                            self.activation_path = root.display().to_string();
+                            self.activation_root = Some(root);
                         }
-                    }
+                    },
                     Ok(ActivationCheck::NeedsRemoval { root, files }) => {
                         self.activation_path = root.display().to_string();
                         if let Some(app_id) = app_id {
@@ -1220,11 +1229,9 @@ impl DrydockApp {
                 self.busy_label = None;
                 match result {
                     Ok((app_id, root)) => {
-                        self.activation_path = root.display().to_string();
-                        self.activation_root = Some(root);
                         self.status = "Crack files removed.".into();
                         self.status_error = false;
-                        self.generate_activation_request(app_id);
+                        self.continue_activation(app_id, root);
                     }
                     Err(error) => {
                         self.status = error;
@@ -1235,6 +1242,63 @@ impl DrydockApp {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => self.activation_remove_receiver = None,
         }
+    }
+
+    /// With a clean game folder, verifies the game's files first when the user asked for that, and
+    /// otherwise makes the request code straight away. The verify runs before anything is activated:
+    /// an activation installs its own files, which a verify afterwards would report as damaged.
+    fn continue_activation(&mut self, app_id: u32, root: PathBuf) {
+        self.activation_path = root.display().to_string();
+        self.activation_root = Some(root.clone());
+        if !self.settings.verify_before_activation {
+            self.generate_activation_request(app_id);
+            return;
+        }
+        if self.download_running() {
+            self.status = "A download is running, so the game can't be verified now. Wait for it to finish, \
+                           or turn off the verification."
+                .into();
+            self.status_error = true;
+            return;
+        }
+        let name = self.app_display_name(app_id);
+        self.spawn_job(app_id, name, DownloadKind::Verify, Some(root.clone()));
+        self.activation_verify = Some((app_id, root));
+        self.status = "Verifying the game files before activation…".into();
+        self.status_error = false;
+    }
+
+    /// Continues an activation that waited for its verify: the request code is made only when every
+    /// file checked out. Returns whether the finished verify belonged to one.
+    fn finish_activation_verify(
+        &mut self,
+        app_id: u32,
+        verified: Option<bool>,
+        result: &Result<String, String>,
+    ) -> bool {
+        if self
+            .activation_verify
+            .as_ref()
+            .is_none_or(|(pending, _)| *pending != app_id)
+        {
+            return false;
+        }
+        self.activation_verify = None;
+        match (result, verified) {
+            (Ok(_), Some(true)) => self.generate_activation_request(app_id),
+            (Ok(summary), _) => {
+                self.status =
+                    format!("{summary}. Repair the game before activating it, or turn off the verification.");
+                self.status_error = true;
+            }
+            (Err(error), _) => {
+                self.status = format!(
+                    "The game could not be verified: {error}. Try again, or turn off the verification."
+                );
+                self.status_error = true;
+            }
+        }
+        true
     }
 
     fn generate_activation_request(&mut self, app_id: u32) {
@@ -1294,7 +1358,7 @@ impl DrydockApp {
                 match result {
                     Ok(entitlement) => {
                         match self.protect_activated_manifest(entitlement.app_id) {
-                            Ok(()) => {
+                            Ok(unsaved) => {
                                 self.entitlement_success_app = Some(
                                     self.catalog
                                         .iter()
@@ -1305,7 +1369,7 @@ impl DrydockApp {
                                         ),
                                 );
                                 self.status = format!(
-                                    "Activation applied for App {} — game files installed and Steam updates blocked.",
+                                    "Activation applied for App {} — game files installed and Steam updates blocked.{unsaved}",
                                     entitlement.app_id
                                 );
                                 self.status_error = false;
@@ -1335,7 +1399,10 @@ impl DrydockApp {
         }
     }
 
-    fn protect_activated_manifest(&mut self, app_id: u32) -> Result<(), String> {
+    /// Blocks Steam updates for an activated or fixed game. The block lives in Steam's manifest, so it
+    /// holds even when Drydock cannot save its own record of it: that failure comes back as a note to
+    /// append to the status line (empty on success) rather than as an error.
+    fn protect_activated_manifest(&mut self, app_id: u32) -> Result<String, String> {
         let manifest = self
             .manifests
             .iter()
@@ -1343,9 +1410,10 @@ impl DrydockApp {
             .ok_or_else(|| "the Steam manifest is no longer available".to_owned())?;
         set_manifest_updates_enabled(&manifest.manifest_path, false).map_err(|error| error.to_string())?;
         self.settings.steam_updates_enabled.insert(app_id, false);
-        self.settings
-            .save(&self.paths.settings_file())
-            .map_err(|error| error.to_string())
+        Ok(match self.write_settings() {
+            Ok(()) => String::new(),
+            Err(error) => format!(" Drydock could not save this setting: {error}"),
+        })
     }
 
     fn start_update_check(&mut self, automatic: bool) {
@@ -1480,14 +1548,12 @@ impl DrydockApp {
     }
 
     /// Spawns the background thread for one depot job and makes it the active `download_job`. Callers
-    /// (queue start / verify) guarantee nothing else is running.
-    fn spawn_job(&mut self, app_id: u32, name: String, kind: DownloadKind) {
+    /// (queue start / verify) guarantee nothing else is running. `root` names the folder to use when it
+    /// is already known; otherwise the game's known install is used, or a new folder is chosen.
+    fn spawn_job(&mut self, app_id: u32, name: String, kind: DownloadKind, root: Option<PathBuf>) {
         let steam_root = self.steam.root.clone();
-        let installed_dir = self
-            .manifests
-            .iter()
-            .find(|manifest| manifest.app_id == app_id)
-            .map(SteamManifest::install_dir);
+        let installed_dir =
+            root.or_else(|| crate::downloads::installed_directory(&self.settings, &self.manifests, app_id));
         let games_directory = self.games_directory();
         // Parallel connections (0 = fall back to the default 8) and an optional MB/s cap, from Settings.
         let connections = match self.settings.max_download_connections {
@@ -1518,6 +1584,8 @@ impl DrydockApp {
             let _ = sender.send(DownloadUpdate::Finished(result));
         });
         self.download_job = Some(DownloadJob {
+            install_root: None,
+            verified: None,
             app_id,
             name,
             kind,
@@ -1592,7 +1660,7 @@ impl DrydockApp {
         };
         self.download_paused = false;
         self.download_error = None;
-        self.spawn_job(front.app_id, front.name.clone(), DownloadKind::Download);
+        self.spawn_job(front.app_id, front.name.clone(), DownloadKind::Download, None);
         self.status = format!("Downloading {}…", front.name);
         self.status_error = false;
     }
@@ -1604,7 +1672,7 @@ impl DrydockApp {
             self.status_error = true;
             return;
         }
-        self.spawn_job(app_id, name, DownloadKind::Verify);
+        self.spawn_job(app_id, name, DownloadKind::Verify, None);
         self.status = "Verifying files…".into();
         self.status_error = false;
     }
@@ -1684,6 +1752,8 @@ impl DrydockApp {
             loop {
                 match job.receiver.try_recv() {
                     Ok(DownloadUpdate::Progress(progress)) => job.progress = Some(progress),
+                    Ok(DownloadUpdate::Installed(root)) => job.install_root = Some(root),
+                    Ok(DownloadUpdate::Verified(complete)) => job.verified = Some(complete),
                     Ok(DownloadUpdate::Finished(result)) => {
                         finished = Some(result);
                         break;
@@ -1741,21 +1811,39 @@ impl DrydockApp {
                 let finished_game = self
                     .download_job
                     .as_ref()
-                    .map(|job| (job.app_id, job.name.clone()));
+                    .map(|job| (job.app_id, job.name.clone(), job.install_root.clone()));
                 self.download_job = None; // the download thread has ended
                 match result {
                     Ok(_) => {
-                        // Completed: drop it from the queue by App ID (robust to reordering), persist,
-                        // register it in the Drydock library, and resume the next one.
-                        if let Some((id, name)) = finished_game {
-                            download_queue::remove_completed(&mut self.settings.download_queue, id);
-                            let _ = self.persist_settings();
-                            self.start_download_install_detect(id, name);
+                        // Completed: drop it from the queue by App ID (robust to reordering) and register
+                        // it in the Drydock library in one saved change, then resume the next one.
+                        let mut unsaved = None;
+                        if let Some((id, name, Some(root))) = finished_game {
+                            drydock_core::download_queue::register_completed(
+                                &mut self.settings,
+                                id,
+                                &name,
+                                &root,
+                            );
+                            if let Err(error) = self.write_settings() {
+                                // The registration stays in memory: reverting it would queue the finished
+                                // game again, forever while saving is disabled for an unreadable settings
+                                // file. A real write failure still pauses the queue so it gets noticed.
+                                self.status =
+                                    format!("Download finished but registration could not be saved: {error}");
+                                self.status_error = true;
+                                if !self.settings_read_only {
+                                    unsaved = Some(error);
+                                }
+                            }
+                            self.start_download_install_detect(id, name, root);
                         }
-                        self.download_paused = false;
-                        self.download_error = None;
+                        self.download_paused = unsaved.is_some();
+                        self.download_error = unsaved;
                         self.refresh_dynamic_state();
-                        self.start_front_download();
+                        if !self.download_paused {
+                            self.start_front_download();
+                        }
                     }
                     Err(message) => {
                         if switching {
@@ -1773,8 +1861,16 @@ impl DrydockApp {
                     }
                 }
             } else {
-                // A one-off verify leaves its result in `download_job` (the banner shows DISMISS).
-                self.refresh_dynamic_state();
+                // A one-off verify leaves its result in `download_job` (the banner shows DISMISS). One an
+                // activation waited for carries on with it instead; refreshing would reset the selected
+                // game when it is not a Steam install.
+                let verified = self.download_job.as_ref().map(|job| (job.app_id, job.verified));
+                let for_activation = verified.is_some_and(|(app_id, verified)| {
+                    self.finish_activation_verify(app_id, verified, &result)
+                });
+                if !for_activation {
+                    self.refresh_dynamic_state();
+                }
             }
         }
     }
@@ -1900,7 +1996,9 @@ impl DrydockApp {
                         // fix is not overwritten by a game update.
                         if let Some(app_id) = fix_block {
                             self.status = match self.protect_activated_manifest(app_id) {
-                                Ok(()) => format!("{} Steam updates disabled for this game.", self.status),
+                                Ok(unsaved) => {
+                                    format!("{} Steam updates disabled for this game.{unsaved}", self.status)
+                                }
                                 Err(error) => {
                                     format!("{} (Updates could not be disabled: {error})", self.status)
                                 }
@@ -2043,6 +2141,8 @@ impl DrydockApp {
         // builds it on demand), so without this the button looks stuck on a large title.
         self.busy_label = Some(format!("Adding {name} to Steam and caching its manifests…"));
         let store = self.payload_store.clone();
+        let writes = Arc::clone(&self.unlock_writes);
+        writes.touch(app_id);
         std::thread::spawn(move || {
             let result = (|| {
                 let client = ProxyClient::new().map_err(|error| error.to_string())?;
@@ -2078,14 +2178,17 @@ impl DrydockApp {
                 let installed_names = vec![file_name.clone()];
                 let mut payload = std::collections::BTreeMap::new();
                 payload.insert(file_name.clone(), bytes.clone());
+                let _write = writes.write();
                 add_app_files(&root, &payload).map_err(|error| error.to_string())?;
 
+                let mut backup_note = String::new();
                 let installed = match manifests {
                     Ok(raw) => {
                         let count = install_depot_manifests(&root, raw).map_err(|e| e.to_string());
                         // Our own copy of both, so a later reinstall needs no network. Failing to
-                        // keep it does not undo an otherwise successful add.
-                        let _ = store.save(app_id, Some((&file_name, &bytes)), raw);
+                        // keep it does not undo an otherwise successful add, so it is reported beside
+                        // the result rather than as it.
+                        backup_note = payload_backup_note(&store, app_id, Some((&file_name, &bytes)), raw);
                         count
                     }
                     Err(error) => Err(error),
@@ -2093,7 +2196,8 @@ impl DrydockApp {
                 Ok(ServiceOutcome::Added {
                     app_id,
                     files: installed_names,
-                    note: added_note(&name, &installed),
+                    note: added_note(&name, &installed) + &backup_note,
+                    source: UnlockSource::Latest,
                 })
             })();
             let _ = sender.send(result);
@@ -2131,6 +2235,8 @@ impl DrydockApp {
             "Adding the cracked version of {name} to Steam and caching its manifests…"
         ));
         let store = self.payload_store.clone();
+        let writes = Arc::clone(&self.unlock_writes);
+        writes.touch(app_id);
         std::thread::spawn(move || {
             let result = (|| {
                 let client = ProxyClient::new().map_err(|error| error.to_string())?;
@@ -2150,6 +2256,7 @@ impl DrydockApp {
                 let installed_names = vec![file_name.clone()];
                 let mut payload = std::collections::BTreeMap::new();
                 payload.insert(file_name.clone(), bytes.clone());
+                let _write = writes.write();
                 add_app_files(&root, &payload).map_err(|error| error.to_string())?;
                 // Same as the normal add. A manifest file is named after the exact depot and
                 // manifest it belongs to, so caching the provider's current build alongside a
@@ -2161,12 +2268,16 @@ impl DrydockApp {
                     app_id,
                     files: installed_names,
                     note: format!(
-                        "Cracked version of \"{name}\" added to Steam{}. Apply the Denuvo fix, then restart Steam.",
+                        "Cracked version of \"{name}\" added to Steam{}. Apply the Denuvo fix, then restart Steam.{}",
                         match &manifests {
-                            Ok(0) | Err(_) => String::new(),
-                            Ok(count) => format!(" with {count} depot manifest(s)"),
-                        }
+                            Ok((0, _)) | Err(_) => String::new(),
+                            Ok((count, _)) => format!(" with {count} depot manifest(s)"),
+                        },
+                        manifests
+                            .as_ref()
+                            .map_or("", |(_, backup_note)| backup_note.as_str()),
                     ),
+                    source: UnlockSource::Cracked,
                 })
             })();
             let _ = sender.send(result);
@@ -2190,6 +2301,7 @@ impl DrydockApp {
             .unwrap_or_else(|| format!("APP {app_id}"));
         self.selected_app = Some(app_id);
         self.activation_search = name;
+        self.activation_verify = None;
         self.activation_request_code.clear();
         self.activation_root = None;
         self.verified_entitlement = None;
@@ -2264,18 +2376,203 @@ impl DrydockApp {
         let (sender, receiver) = mpsc::channel();
         self.service_receiver = Some(receiver);
         self.busy_label = Some(format!("Removing {name} from Steam…"));
+        let writes = Arc::clone(&self.unlock_writes);
+        writes.touch(app_id);
         std::thread::spawn(move || {
             let result = (|| {
                 // Fall back to the deterministic Ryuu file name when nothing was recorded.
                 if names.is_empty() {
                     names = vec![format!("{app_id}.lua")];
                 }
+                let _write = writes.write();
                 remove_app_files(&root, &names).map_err(|error| error.to_string())?;
                 let note = format!("\"{name}\" removed from Steam.");
                 Ok(ServiceOutcome::Removed { app_id, note })
             })();
             let _ = sender.send(result);
         });
+    }
+
+    /// Adds a Lua and/or depot manifests the user picks from disk. `app_id` is the game whose page this
+    /// was started from; from the library, the game is taken from the Lua.
+    fn add_own_unlock(&mut self, app_id: Option<u32>) {
+        let Some(root) = self.steam_root_or_error("Steam was not found. Select its folder in Settings.")
+        else {
+            return;
+        };
+        if self.service_receiver.is_some() {
+            return;
+        }
+        let Some(files) = crate::unlocks::pick_unlock_files() else {
+            return;
+        };
+        let unlock = match read_own_unlock(&files, app_id) {
+            Ok(unlock) => unlock,
+            Err(error) => {
+                self.status = error.to_string();
+                self.status_error = true;
+                return;
+            }
+        };
+        let app_id = unlock.app_id;
+        let name = self.app_display_name(app_id);
+        let (sender, receiver) = mpsc::channel();
+        self.service_receiver = Some(receiver);
+        self.busy_label = Some(format!("Adding your files for {name} to Steam…"));
+        let store = self.payload_store.clone();
+        let writes = Arc::clone(&self.unlock_writes);
+        writes.touch(app_id);
+        std::thread::spawn(move || {
+            let result = (|| {
+                let manifest = OpenSteamTool::new()
+                    .and_then(|ost| ost.manifest())
+                    .map_err(|error| error.to_string())?;
+                if service_status(&root, &manifest).state != SteamServiceState::Current {
+                    return Err("Install or update the Steam Service before adding an app.".to_owned());
+                }
+                let note = crate::unlocks::install_own_unlock(&root, &store, &unlock, &writes, &name)?;
+                Ok(ServiceOutcome::Added {
+                    app_id,
+                    files: unlock.lua.iter().map(|_| unlock.lua_file_name()).collect(),
+                    note,
+                    source: UnlockSource::Own,
+                })
+            })();
+            let _ = sender.send(result);
+        });
+    }
+
+    /// Apps whose unlock follows the provider's latest version: added with the latest version and not
+    /// held back by a Steam update block. Apps added before sources were recorded count too, once the
+    /// fix list shows their installed Lua is not a build-locked Denuvo fix.
+    fn apps_following_latest(&self) -> Vec<u32> {
+        let root = self.steam.root.as_deref();
+        self.settings
+            .added_apps
+            .iter()
+            .filter(|(app_id, _)| self.settings.steam_updates_enabled.get(app_id) != Some(&false))
+            .filter(|(app_id, state)| match state.source {
+                Some(UnlockSource::Latest) => true,
+                Some(UnlockSource::Cracked | UnlockSource::Own) => false,
+                None => {
+                    self.fixes_loaded
+                        && !self
+                            .fix_for(**app_id)
+                            .and_then(|fix| fix.denuvo.as_ref())
+                            .zip(root)
+                            .is_some_and(|(denuvo, root)| fix_status(root, denuvo) == FixStatus::Applied)
+                }
+            })
+            .map(|(app_id, _)| *app_id)
+            .collect()
+    }
+
+    /// Starts an automatic unlock update when one is due, bringing the apps that follow the latest
+    /// version to the provider's current Lua and manifests. Looked at every few minutes; a sweep runs
+    /// at most every [`UNLOCK_UPDATE_INTERVAL`], across restarts, and only with a current Steam Service.
+    fn maybe_update_unlocks(&mut self) {
+        if !self.settings.auto_update_unlocks || self.unlock_update_receiver.is_some() {
+            return;
+        }
+        if self
+            .last_unlock_update_check
+            .is_some_and(|at| at.elapsed() < UNLOCK_UPDATE_POLL)
+        {
+            return;
+        }
+        self.last_unlock_update_check = Some(Instant::now());
+        let Some(root) = self.steam.root.clone() else {
+            return;
+        };
+        if self
+            .service_status
+            .as_ref()
+            .is_none_or(|status| status.state != SteamServiceState::Current)
+        {
+            return;
+        }
+        let apps = self.apps_following_latest();
+        let marker = self.paths.cache_dir().join("unlock-update.marker");
+        if apps.is_empty() || refresh_marker_is_current(&marker, "v1", UNLOCK_UPDATE_INTERVAL) {
+            return;
+        }
+        if let Some(parent) = marker.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(&marker, "v1");
+        let store = self.payload_store.clone();
+        let writes = Arc::clone(&self.unlock_writes);
+        let (sender, receiver) = mpsc::channel();
+        self.unlock_update_receiver = Some(receiver);
+        std::thread::spawn(move || {
+            let sweep = match ProxyClient::new() {
+                Ok(client) => crate::unlocks::update_unlocks(
+                    &root,
+                    &store,
+                    &apps,
+                    &writes,
+                    UNLOCK_UPDATE_SPACING,
+                    |app_id| match DepotData::fetch(&client, app_id) {
+                        // Only the package's own Lua is pinned to its manifests; without one the app
+                        // keeps what it has.
+                        Ok(data) => Ok(data.lua.map(|(_, lua)| (lua, data.raw_manifests))),
+                        Err(error) => Err(error.to_string()),
+                    },
+                ),
+                Err(_) => UnlockUpdateSweep {
+                    updated: Vec::new(),
+                    failed: apps.len(),
+                },
+            };
+            let _ = sender.send(sweep);
+        });
+    }
+
+    fn poll_unlock_updates(&mut self) {
+        let Some(receiver) = self.unlock_update_receiver.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(sweep) => {
+                self.unlock_update_receiver = None;
+                if sweep.updated.is_empty() {
+                    return;
+                }
+                // An app recorded before sources were has now been updated as a latest-version one.
+                let mut recorded = false;
+                for app_id in &sweep.updated {
+                    if let Some(state) = self.settings.added_apps.get_mut(app_id)
+                        && state.source.is_none()
+                    {
+                        state.source = Some(UnlockSource::Latest);
+                        recorded = true;
+                    }
+                }
+                if recorded {
+                    let _ = self.persist_settings();
+                }
+                self.refresh_plugin_luas();
+                let names: Vec<String> = sweep
+                    .updated
+                    .iter()
+                    .take(3)
+                    .map(|app_id| self.app_display_name(*app_id))
+                    .collect();
+                let more = sweep.updated.len().saturating_sub(names.len());
+                self.status = format!(
+                    "Updated the Lua and manifests of {}{} to the latest version.",
+                    names.join(", "),
+                    if more > 0 {
+                        format!(" and {more} more")
+                    } else {
+                        String::new()
+                    }
+                );
+                self.status_error = false;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => self.unlock_update_receiver = None,
+        }
     }
 
     fn app_display_name(&self, app_id: u32) -> String {
@@ -2312,8 +2609,21 @@ impl DrydockApp {
                         }
                         self.service_status = Some(status);
                     }
-                    Ok(ServiceOutcome::Added { app_id, files, note }) => {
-                        let mut state = AddedAppState::default();
+                    Ok(ServiceOutcome::Added {
+                        app_id,
+                        files,
+                        note,
+                        source,
+                    }) => {
+                        let mut state = AddedAppState {
+                            source: Some(source),
+                            ..AddedAppState::default()
+                        };
+                        if files.is_empty()
+                            && let Some(previous) = self.settings.added_apps.get(&app_id)
+                        {
+                            state.files.clone_from(&previous.files);
+                        }
                         for file in files {
                             state.files.insert(file, String::new());
                         }
@@ -2500,7 +2810,7 @@ impl DrydockApp {
     }
 
     /// The configured games folder, if one is set — where a fresh Drydock download installs. `None`
-    /// falls back to Steam's `steamapps\common`, see [`depot_install_root`].
+    /// falls back to Steam's `steamapps\common`, see [`crate::downloads::depot_install_root`].
     fn games_directory(&self) -> Option<PathBuf> {
         path_if_present(&self.settings.games_directory).map(Path::to_path_buf)
     }
@@ -3558,9 +3868,10 @@ impl DrydockApp {
         }
         entries.sort_by_key(|entry| entry.name.to_lowercase());
 
-        // Set by the "Add game to Drydock" button; the folder picker runs after the borrow of `entries`
-        // and the UI closures ends (a native dialog can't open mid-layout).
+        // Set by the "Add game to Drydock" and "Add your own Lua" buttons; the pickers run after the
+        // borrow of `entries` and the UI closures end (a native dialog can't open mid-layout).
         let mut add_game_requested = false;
+        let mut add_own_requested = false;
 
         ui.add_space(20.0);
         page_heading(ui, "Library");
@@ -3597,10 +3908,20 @@ impl DrydockApp {
                     if ui.add(ghost_button("＋  ADD GAME TO DRYDOCK")).clicked() {
                         add_game_requested = true;
                     }
+                    if ui
+                        .add(ghost_button("＋  ADD YOUR OWN LUA / MANIFESTS"))
+                        .on_hover_text(OWN_UNLOCK_HOVER)
+                        .clicked()
+                    {
+                        add_own_requested = true;
+                    }
                 });
             });
             if add_game_requested {
                 self.begin_add_game();
+            }
+            if add_own_requested {
+                self.add_own_unlock(None);
             }
             return;
         }
@@ -3644,6 +3965,17 @@ impl DrydockApp {
                                 .clicked()
                             {
                                 add_game_requested = true;
+                            }
+                            ui.add_space(4.0);
+                            if ui
+                                .add(
+                                    ghost_button("＋  ADD YOUR OWN LUA / MANIFESTS")
+                                        .min_size(Vec2::new(add_w, 34.0)),
+                                )
+                                .on_hover_text(OWN_UNLOCK_HOVER)
+                                .clicked()
+                            {
+                                add_own_requested = true;
                             }
                             ui.add_space(6.0);
                             egui::ScrollArea::vertical()
@@ -3713,6 +4045,9 @@ impl DrydockApp {
         if add_game_requested {
             self.begin_add_game();
         }
+        if add_own_requested {
+            self.add_own_unlock(None);
+        }
     }
 
     /// Launches a library game: a stored `.exe` (for games activated outside Steam) wins; otherwise
@@ -3779,7 +4114,14 @@ impl DrydockApp {
             return;
         }
         self.last_manifest_check = Some(Instant::now());
-        let apps: Vec<u32> = self.settings.added_apps.keys().copied().collect();
+        // Each app with whether its manifests may come from the provider: files the user supplied
+        // themselves are never mixed with the provider's.
+        let apps: Vec<(u32, bool)> = self
+            .settings
+            .added_apps
+            .iter()
+            .map(|(app_id, state)| (*app_id, state.source != Some(UnlockSource::Own)))
+            .collect();
         if apps.is_empty() {
             return;
         }
@@ -3797,10 +4139,12 @@ impl DrydockApp {
             // below can never repair it. Those need a fetch, which is expensive, so they are only
             // collected here and one is retried at the end.
             let mut never_stored = Vec::new();
-            for app_id in apps {
+            for (app_id, from_provider) in apps {
                 let index = store.manifest_index(app_id);
                 if index.is_empty() {
-                    never_stored.push(app_id);
+                    if from_provider {
+                        never_stored.push(app_id);
+                    }
                     continue;
                 }
                 let missing = missing_depot_manifests(&steam_root, &index);
@@ -3831,7 +4175,9 @@ impl DrydockApp {
                 && let Ok(proxy) = ProxyClient::new()
             {
                 attempted = Some(app_id);
-                if let Ok(count) = copy_depot_manifests_to_cache(&proxy, &steam_root, &store, app_id, None) {
+                if let Ok((count, _)) =
+                    copy_depot_manifests_to_cache(&proxy, &steam_root, &store, app_id, None)
+                {
                     restored += count;
                     repaired.push(app_id);
                 }
@@ -4207,74 +4553,77 @@ impl DrydockApp {
         }
     }
 
-    /// After a depot download finishes, detects the game's install folder and launch `.exe` in the
-    /// background (the same install root the depot engine wrote to, plus Steam's executable list) so
-    /// the game registers itself under "Installed in Drydock" with a working Play button.
-    fn start_download_install_detect(&mut self, app_id: u32, name: String) {
-        if self.download_install_receiver.is_some() {
-            return;
-        }
-        let steam_root = self.steam.root.clone();
-        let installed_dir = self
-            .manifests
-            .iter()
-            .find(|manifest| manifest.app_id == app_id)
-            .map(SteamManifest::install_dir);
-        let games_directory = self.games_directory();
+    /// After a finished depot download has been registered at `root`, looks up its launch `.exe` in
+    /// the background (Steam's executable list, checked against the files on disk) so the Play button
+    /// under "Installed in Drydock" works.
+    fn start_download_install_detect(&mut self, app_id: u32, name: String, root: PathBuf) {
         let (sender, receiver) = mpsc::channel();
-        self.download_install_receiver = Some(receiver);
+        self.download_install_receiver.push(receiver);
         std::thread::spawn(move || {
-            let result = (|| -> Result<AddGameOutcome, String> {
-                // The very same folder the depot engine wrote to.
-                let install_root = depot_install_root(app_id, installed_dir, games_directory, steam_root)?;
-                let executables = fetch_windows_executables(app_id).map_err(|error| error.to_string())?;
-                // The depot writes straight into the install root; resolve a nested root only if the
-                // launch exe lives in a subfolder.
-                let root = resolve_game_root(&install_root, &executables).unwrap_or(install_root);
-                let exe = executables
-                    .iter()
-                    .map(|relative| root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR)))
-                    .find(|path| path.is_file())
-                    .unwrap_or_default();
-                Ok(AddGameOutcome {
-                    app_id,
-                    name,
-                    root,
-                    exe,
+            let result = fetch_windows_executables(app_id)
+                .map(|executables| {
+                    let exe = executables
+                        .iter()
+                        .map(|path| root.join(path))
+                        .find(|path| path.is_file())
+                        .unwrap_or_default();
+                    AddGameOutcome {
+                        app_id,
+                        name,
+                        root,
+                        exe,
+                    }
                 })
-            })();
+                .map_err(|error| format!("Game {app_id} installed; launch detection failed: {error}"));
             let _ = sender.send(result);
         });
     }
 
-    /// Registers a finished depot download in the Drydock library (quietly — the download's own success
-    /// message stays on screen). A detection failure is ignored: the files are still on disk and the
-    /// game can be added manually.
+    /// Stores the launch exes found by [`Self::start_download_install_detect`]. This only enriches an
+    /// install already registered when the download finished, so a detection failure is just reported.
     fn poll_download_install(&mut self) {
-        let Some(receiver) = self.download_install_receiver.as_ref() else {
-            return;
-        };
-        match receiver.try_recv() {
-            Ok(result) => {
-                self.download_install_receiver = None;
-                if let Ok(outcome) = result {
-                    self.settings.installed_games.insert(
-                        outcome.app_id,
-                        drydock_core::InstalledGame {
-                            name: outcome.name.clone(),
-                            install_dir: outcome.root.display().to_string(),
-                        },
-                    );
-                    if !outcome.exe.as_os_str().is_empty() {
+        let mut completed = Vec::new();
+        self.download_install_receiver
+            .retain(|receiver| match receiver.try_recv() {
+                Ok(result) => {
+                    completed.push(result);
+                    false
+                }
+                Err(TryRecvError::Empty) => true,
+                Err(TryRecvError::Disconnected) => false,
+            });
+        for result in completed {
+            match result {
+                Ok(outcome) => {
+                    // An exe relinked inside this install is kept. One left from an earlier install
+                    // elsewhere is replaced: it is gone, or it starts a different copy of the game.
+                    let keep_stored = self
+                        .settings
+                        .launch_paths
+                        .get(&outcome.app_id)
+                        .is_some_and(|stored| {
+                            let stored = Path::new(stored);
+                            stored.starts_with(&outcome.root) && stored.is_file()
+                        });
+                    if self
+                        .settings
+                        .installed_games
+                        .get(&outcome.app_id)
+                        .is_some_and(|game| Path::new(&game.install_dir) == outcome.root)
+                        && !outcome.exe.as_os_str().is_empty()
+                        && !keep_stored
+                    {
                         self.settings
                             .launch_paths
                             .insert(outcome.app_id, outcome.exe.display().to_string());
+                        let _ = self.persist_settings();
                     }
-                    let _ = self.persist_settings();
+                }
+                Err(error) => {
+                    self.status = error;
+                    self.status_error = true;
                 }
             }
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => self.download_install_receiver = None,
         }
     }
 
@@ -4457,6 +4806,7 @@ impl DrydockApp {
             DetailsAction::None => {}
             DetailsAction::AddToSteam => self.add_app_to_steam(app_id),
             DetailsAction::AddCracked => self.add_cracked_to_steam(app_id),
+            DetailsAction::AddOwn => self.add_own_unlock(Some(app_id)),
             DetailsAction::RemoveFromSteam => self.remove_app_from_steam(app_id),
             DetailsAction::InstallService => self.install_steam_service(),
             DetailsAction::ApplyDenuvoFix => self.apply_denuvo_fix_for(app_id),
@@ -4677,10 +5027,51 @@ impl DrydockApp {
                     }
                 });
 
+                ui.add_space(14.0);
+                let previous_verify = self.settings.verify_before_activation;
+                let mut verify_changed = false;
+                ui.horizontal(|ui| {
+                    if toggle_switch(ui, &mut self.settings.verify_before_activation, ACCENT_SOFT).changed() {
+                        verify_changed = true;
+                    }
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("Verify the game files first")
+                            .size(12.0)
+                            .color(TEXT),
+                    )
+                    .on_hover_text(
+                        "Checks every file against the game's depot manifests before the code is made, so \
+                             only an intact game is activated. Needs the game's depot package.",
+                    );
+                });
+                if verify_changed && let Err(error) = self.persist_settings() {
+                    self.settings.verify_before_activation = previous_verify;
+                    self.status = format!("The verification setting could not be saved: {error}");
+                    self.status_error = true;
+                }
+                if self.activation_verify.is_some() {
+                    let progress = self
+                        .download_job
+                        .as_ref()
+                        .and_then(|job| job.progress.as_ref())
+                        .filter(|progress| progress.total_bytes > 0)
+                        .map_or(0, |progress| {
+                            progress.done_bytes.saturating_mul(100) / progress.total_bytes
+                        });
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(format!("Verifying the game files… {progress}%"))
+                            .size(10.5)
+                            .color(ACCENT),
+                    );
+                }
+
                 ui.add_space(20.0);
                 let busy = self.activation_check_receiver.is_some()
                     || self.activation_remove_receiver.is_some()
-                    || self.activation_receiver.is_some();
+                    || self.activation_receiver.is_some()
+                    || self.activation_verify.is_some();
                 ui.horizontal(|ui| {
                     let can_generate = !self.activation_path.trim().is_empty() && !busy;
                     if ui
@@ -5364,6 +5755,50 @@ impl DrydockApp {
                     }
                     Err(error) => {
                         self.settings.auto_update_drydock = previous_auto_update;
+                        self.status = format!("Auto-update setting could not be saved: {error}");
+                        self.status_error = true;
+                    }
+                }
+            }
+            ui.add_space(12.0);
+            let previous_unlock_updates = self.settings.auto_update_unlocks;
+            let mut unlock_updates_changed = false;
+            panel(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        section_label(ui, "LUA & MANIFEST AUTO UPDATE");
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(
+                                "Games added with the latest version get new Lua and manifests twice a day. \
+                                 Cracked versions, your own files and games with blocked Steam updates are \
+                                 left alone.",
+                            )
+                            .size(9.5)
+                            .color(ACCENT),
+                        );
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if toggle_switch(ui, &mut self.settings.auto_update_unlocks, ACCENT_SOFT).changed() {
+                            unlock_updates_changed = true;
+                        }
+                    });
+                });
+            });
+            if unlock_updates_changed {
+                match self.persist_settings() {
+                    Ok(()) => {
+                        // Turning it on checks at the next opportunity instead of in a few minutes.
+                        self.last_unlock_update_check = None;
+                        self.status = if self.settings.auto_update_unlocks {
+                            "Lua and manifest auto update enabled".into()
+                        } else {
+                            "Lua and manifest auto update disabled".into()
+                        };
+                        self.status_error = false;
+                    }
+                    Err(error) => {
+                        self.settings.auto_update_unlocks = previous_unlock_updates;
                         self.status = format!("Auto-update setting could not be saved: {error}");
                         self.status_error = true;
                     }
@@ -6511,6 +6946,8 @@ impl DrydockApp {
                 let (sender, receiver) = mpsc::channel::<DownloadUpdate>();
                 std::mem::forget(sender);
                 self.download_job = Some(DownloadJob {
+                    install_root: None,
+                    verified: None,
                     app_id: 3_751_260,
                     name: "The Blood of Dawnwalker".into(),
                     kind: DownloadKind::Download,
@@ -6537,6 +6974,7 @@ impl DrydockApp {
 
 impl eframe::App for DrydockApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.image_textures.forget_retired(ui.ctx());
         self.poll_background_action();
         self.poll_catalog_refresh();
         self.poll_denuvo_refresh();
@@ -6556,6 +6994,8 @@ impl eframe::App for DrydockApp {
         self.poll_add_game();
         self.poll_download_install();
         self.poll_manifest_guard();
+        self.poll_unlock_updates();
+        self.maybe_update_unlocks();
         self.poll_cloud_download();
         self.poll_cloud_oauth();
         // Entering a new page re-checks installed games and the Service status, so the
@@ -6590,7 +7030,7 @@ impl eframe::App for DrydockApp {
             || self.repacks_receiver.is_some()
             || self.emu_receiver.is_some()
             || self.add_game_receiver.is_some()
-            || self.download_install_receiver.is_some()
+            || !self.download_install_receiver.is_empty()
             || self.cloud_download_receiver.is_some()
             || self.cloud_oauth_receiver.is_some()
             || self
@@ -8607,101 +9047,6 @@ fn build_emu_crack(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-/// Where a depot download for `app_id` writes.
-///
-/// An install Steam already tracks always wins, so an update or repair lands on the files Steam
-/// knows about rather than starting a second copy elsewhere. Only a fresh install is free to choose,
-/// and then Drydock's configured games folder takes precedence over Steam's `steamapps\common`.
-///
-/// Both the download itself and the library registration that follows it resolve the folder through
-/// here, so they can't disagree about where the game ended up.
-fn depot_install_root(
-    app_id: u32,
-    installed_dir: Option<PathBuf>,
-    games_directory: Option<PathBuf>,
-    steam_root: Option<PathBuf>,
-) -> Result<PathBuf, String> {
-    if let Some(dir) = installed_dir {
-        return Ok(dir);
-    }
-    let installdir = fetch_install_dir(app_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "Steam did not report an install folder for this game.".to_owned())?;
-    match games_directory {
-        Some(games) => Ok(games.join(installdir)),
-        None => {
-            let root = steam_root.ok_or_else(|| {
-                "No games folder is set and Steam was not found. Set either one in Settings.".to_owned()
-            })?;
-            Ok(root.join("steamapps").join("common").join(installdir))
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_depot_job(
-    app_id: u32,
-    name: &str,
-    kind: DownloadKind,
-    steam_root: Option<PathBuf>,
-    installed_dir: Option<PathBuf>,
-    games_directory: Option<PathBuf>,
-    connections: usize,
-    max_bps: Option<u64>,
-    cancel: &AtomicBool,
-    sender: &mpsc::Sender<DownloadUpdate>,
-) -> Result<String, String> {
-    let proxy = ProxyClient::new().map_err(|error| error.to_string())?;
-    let data = DepotData::fetch(&proxy, app_id).map_err(|error| error.to_string())?;
-
-    // Refuse to "succeed" on a package that has no game content. Some upstream builds ship only the
-    // shared redistributables (Visual C++, DirectX, …) with keys for the real content depots but no
-    // manifest for them — downloading that would leave the game unplayable while claiming it
-    // finished. Tell the user to retry once the source has packaged the content.
-    if matches!(kind, DownloadKind::Download) && data.has_no_content() {
-        return Err(format!(
-            "{name} isn't fully available from the source yet: only the shared redistributables were \
-             packaged (no game content depots). The upstream is likely still building the package — \
-             try Download again in a few minutes."
-        ));
-    }
-
-    let install_root = depot_install_root(app_id, installed_dir, games_directory, steam_root)?;
-
-    let forward = |progress: DownloadProgress| {
-        let _ = sender.send(DownloadUpdate::Progress(progress));
-    };
-    match kind {
-        DownloadKind::Download => {
-            let cdn = CdnClient::new().map_err(|error| error.to_string())?;
-            let outcome =
-                depot::download::download(&data, &install_root, &cdn, cancel, connections, max_bps, forward)
-                    .map_err(|error| error.to_string())?;
-            Ok(format!(
-                "Downloaded {name} — {} files, {}",
-                outcome.files_written,
-                human_bytes(outcome.bytes_written)
-            ))
-        }
-        DownloadKind::Verify => {
-            let outcome = depot::download::verify(&data, &install_root, cancel, forward)
-                .map_err(|error| error.to_string())?;
-            if outcome.is_complete() {
-                Ok(format!(
-                    "{name} verified — all {} chunks OK",
-                    outcome.total_chunks
-                ))
-            } else {
-                Ok(format!(
-                    "{name}: {} of {} chunks need repair — press Download to fix",
-                    outcome.bad_chunks, outcome.total_chunks
-                ))
-            }
-        }
-    }
-}
-
 /// Formats a byte-per-second rate as a compact human string (e.g. `9.9 MB/s`).
 fn human_bps(bytes_per_sec: f64) -> String {
     if bytes_per_sec < 1.0 {
@@ -9564,6 +9909,8 @@ enum DetailsAction {
     AddToSteam,
     /// Add the GitHub build-locked "Denuvo fix" Lua so the game is pinned to the cracked build.
     AddCracked,
+    /// Add a Lua and/or depot manifests the user picks from disk.
+    AddOwn,
     RemoveFromSteam,
     /// Install the Steam Service (shown in place of Add to Steam when it is not installed).
     InstallService,
@@ -9634,8 +9981,8 @@ fn add_to_steam_main(is_added: bool) -> (&'static str, &'static str) {
 }
 
 /// The dropdown entries beside that main action. The cracked variant is offered only when a
-/// build-locked Denuvo fix exists for the app, and removing only once something is actually added —
-/// so the arrow appears exactly when there is a real choice to make.
+/// build-locked Denuvo fix exists for the app, and removing only once something is actually added.
+/// Adding your own files is always there.
 fn add_to_steam_extras(is_added: bool, has_denuvo: bool) -> Vec<(&'static str, &'static str, DetailsAction)> {
     let mut extras = Vec::new();
     if has_denuvo {
@@ -9645,6 +9992,11 @@ fn add_to_steam_extras(is_added: bool, has_denuvo: bool) -> Vec<(&'static str, &
             DetailsAction::AddCracked,
         ));
     }
+    extras.push((
+        "ADD YOUR OWN LUA / MANIFESTS",
+        "Pick a Lua and/or depot manifests from your disk. Automatic updates leave them alone",
+        DetailsAction::AddOwn,
+    ));
     if is_added {
         extras.push((
             "REMOVE VERSION FROM STEAM",
@@ -10122,21 +10474,6 @@ fn fetch_denuvo_appids(cache_path: &Path, force: bool) -> Result<Vec<u32>, Strin
     }
 }
 
-fn human_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
-    let mut size = bytes as f64;
-    let mut unit = 0;
-    while size >= 1024.0 && unit < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{size:.1} {}", UNITS[unit])
-    }
-}
-
 /// Whether a crack has been deployed into `folder`.
 ///
 /// Only that one folder is looked at, never the tree below it: this runs on a Play click, and
@@ -10182,21 +10519,49 @@ fn github_access_mode() -> &'static str {
 /// takes seconds for a small title and minutes for a large one.
 /// Also writes the payload to Drydock's own store, so a later install can restore it without the
 /// network — see [`drydock_core::app_payloads`]. Steam deletes an app's manifests when it is
-/// uninstalled, so this local copy is the only one that survives.
+/// uninstalled, so this local copy is the only one that survives. Returns the number of manifests
+/// installed and the [`payload_backup_note`] for the status line.
 fn copy_depot_manifests_to_cache(
     proxy: &ProxyClient,
     steam_root: &Path,
     store: &AppPayloadStore,
     app_id: u32,
     lua: Option<(&str, &[u8])>,
-) -> Result<usize, String> {
+) -> Result<(usize, String), String> {
     let data = DepotData::fetch(proxy, app_id).map_err(|error| error.to_string())?;
     let installed =
         install_depot_manifests(steam_root, &data.raw_manifests).map_err(|error| error.to_string())?;
+    // Without a Lua of its own the stored one is kept: saving replaces the app's whole stored copy.
+    let stored_lua = if lua.is_none() {
+        store.stored_lua(app_id)
+    } else {
+        None
+    };
+    let lua = lua.or(stored_lua
+        .as_ref()
+        .map(|(name, bytes)| (name.as_str(), bytes.as_slice())));
     // Keeping our own copy is the point of the exercise, but failing to would not undo a successful
     // add — the next install just falls back to fetching.
-    let _ = store.save(app_id, lua, &data.raw_manifests);
-    Ok(installed)
+    Ok((
+        installed,
+        payload_backup_note(store, app_id, lua, &data.raw_manifests),
+    ))
+}
+
+/// Keeps Drydock's own copy of an app's payload. Steam already has the files, so a failure is not an
+/// error of the add: it comes back as a sentence to append to the status note (empty on success).
+fn payload_backup_note(
+    store: &AppPayloadStore,
+    app_id: u32,
+    lua: Option<(&str, &[u8])>,
+    manifests: &std::collections::BTreeMap<String, Vec<u8>>,
+) -> String {
+    match store.save(app_id, lua, manifests) {
+        Ok(()) => String::new(),
+        Err(error) => format!(
+            " Drydock could not keep its own copy ({error}), so reinstalling it will need the network."
+        ),
+    }
 }
 
 /// Puts a stored payload back where Steam expects it, before asking Steam to install.
@@ -10273,13 +10638,22 @@ mod ui_tests {
                 .map(|(label, _, _)| label)
                 .collect::<Vec<_>>()
         };
-        // Nothing extra to choose: the button stays a plain pill with no arrow.
-        assert!(labels(false, false).is_empty());
-        assert_eq!(labels(false, true), ["ADD CRACKED VERSION TO STEAM"]);
-        assert_eq!(labels(true, false), ["REMOVE VERSION FROM STEAM"]);
+        assert_eq!(labels(false, false), ["ADD YOUR OWN LUA / MANIFESTS"]);
+        assert_eq!(
+            labels(false, true),
+            ["ADD CRACKED VERSION TO STEAM", "ADD YOUR OWN LUA / MANIFESTS"]
+        );
+        assert_eq!(
+            labels(true, false),
+            ["ADD YOUR OWN LUA / MANIFESTS", "REMOVE VERSION FROM STEAM"]
+        );
         assert_eq!(
             labels(true, true),
-            ["ADD CRACKED VERSION TO STEAM", "REMOVE VERSION FROM STEAM"]
+            [
+                "ADD CRACKED VERSION TO STEAM",
+                "ADD YOUR OWN LUA / MANIFESTS",
+                "REMOVE VERSION FROM STEAM"
+            ]
         );
     }
 
@@ -10289,14 +10663,15 @@ mod ui_tests {
         // offset the caller applies has to line up with this list.
         let extras = add_to_steam_extras(true, true);
         assert_eq!(extras[0].2, DetailsAction::AddCracked);
-        assert_eq!(extras[1].2, DetailsAction::RemoveFromSteam);
+        assert_eq!(extras[1].2, DetailsAction::AddOwn);
+        assert_eq!(extras[2].2, DetailsAction::RemoveFromSteam);
     }
 
     #[test]
     fn an_existing_steam_install_outranks_the_configured_games_folder() {
         // Otherwise an update would start a second copy of the game somewhere else.
         let existing = PathBuf::from("D:/Steam/steamapps/common/Game");
-        let root = depot_install_root(
+        let root = crate::downloads::depot_install_root(
             480,
             Some(existing.clone()),
             Some(PathBuf::from("E:/Drydock Games")),

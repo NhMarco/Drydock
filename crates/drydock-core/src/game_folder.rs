@@ -139,18 +139,7 @@ pub fn remove_paths(paths: &[PathBuf]) -> io::Result<()> {
 /// `PathBuf` with only normal components — any `.`/`..`/root/prefix component makes it empty so it
 /// can never escape the chosen folder.
 fn normalize_relative(executable: &str) -> PathBuf {
-    let unified = executable.replace('\\', "/");
-    let mut relative = PathBuf::new();
-    for segment in unified.split('/') {
-        if segment.is_empty() || segment == "." {
-            continue;
-        }
-        if segment == ".." {
-            return PathBuf::new();
-        }
-        relative.push(segment);
-    }
-    relative
+    crate::safe_path::relative_path(executable).unwrap_or_default()
 }
 
 /// If `path` ends with the components of `relative`, returns the prefix directory before them.

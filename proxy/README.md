@@ -11,12 +11,17 @@ is tried first; the others fill what it is missing, so one being down does not t
 | Provider | Credential | Notes |
 | --- | --- | --- |
 | `ryu` | `RYU_AUTH_CODE` | **The default.** `generator.ryuu.lol`; `secure_download` returns the manifests+lua ZIP |
-| `depotbox` | `DEPOTBOX_API_KEY` | `depotbox.org`; also the source for the per-variant game fixes |
-| `steamtools` | `STEAMTOOLS_API_KEY` | `api.steamtools.app`; also backs the on-demand `/v1/app-info` enrichment |
+| `depotbox` | `DEPOTBOX_API_KEY` | `depotbox.org`; builds Lua on demand (`DEPOTBOX_LUA_TIMEOUT_MS`, default 90 s) and lists no tags |
+| `steamtools` | `STEAMTOOLS_API_KEY` | `api.steamtools.app`; also backs `/v1/app-info`. The key allows 85 requests/min plus a daily quota |
 
 `PROVIDER_SOURCES` defaults to `ryu` alone. A provider that is not listed is fully off and is never
 contacted — and **its credential is not required to boot**, so running Ryu-only needs no SteamTools
 or DepotBox key. Enable more by listing them, e.g. `PROVIDER_SOURCES=ryu,depotbox,steamtools`.
+
+A provider that answers `429` is skipped for Lua and depot requests until its limit resets, a
+depot package is only cached once it is a real ZIP archive (an HTML or JSON answer moves on to the
+next provider), and provider credentials are never forwarded when an upstream redirects to another
+host. When a provider without tags (DepotBox) wins an App ID, the tags another provider had are kept.
 
 A second group of payloads — the Steam Service (OST) files, the Denuvo fixes, the repacks list and
 the Ubisoft magicfiles — is served from a GitHub repository (`GITHUB_OWNER`/`GITHUB_REPO`) rather
@@ -54,21 +59,22 @@ All responses are JSON unless noted. Protected endpoints require the HMAC header
 |--------|------------------|------|-------|
 | GET    | `/v1/health`            | no   | Liveness + whether the gamelist is loaded. |
 | GET    | `/v1/gamelist`          | yes  | gzip body of `{ "games": [{ "appid", "name", "tags" }] }`. Send `If-None-Match` with the last `ETag` to get `304`. |
-| GET    | `/v1/app-info/:appid`   | yes  | steamtools per-app metadata (type, technologies incl. Denuvo, tags, reviews). Cached. |
+| GET    | `/v1/app-info/:appid`   | yes  | steamtools per-app metadata (type, technologies incl. Denuvo, tags, reviews). Cached. Only registered while `steamtools` is enabled; limited like `/v1/lua`. |
 | GET    | `/v1/app-schema/:appid` | yes  | The app's achievement schema as a gbe_fork `achievements.json` array (icons as full CDN URLs), for the emulator-template generator. Needs `STEAM_WEB_API_KEY`; returns `[]` when unset or the app has none. |
-| GET    | `/v1/fixes`             | yes  | `{ "fixes": [{ "appid", "name", "variants": [{ "id", "filename", "tags", "badges" }] }] }` — DepotBox "online" fixes. |
-| GET    | `/v1/fixes/file/:id`    | yes  | One online-fix variant as a ZIP, converted server-side from the upstream DepotBox RAR. |
 | GET    | `/v1/denuvo-fixes`      | yes  | `{ "fixes": [{ "appid", "lua": {name,sha,size}, "zip_parts": [{name,sha,size}] }] }` — GitHub build-locked "Denuvo" fixes. |
 | GET    | `/v1/denuvo-fixes/file/:name` | yes | Raw bytes of one Denuvo fix file (`{appid}.lua`, `{appid}.zip`, `{appid}.zip.NNN`), streamed from GitHub. |
+| GET    | `/v1/lua/:appid`        | yes  | The app's unlock Lua from the first provider that has one. 30 requests/min per client (`LUA_RATE_MAX`). |
+| GET    | `/v1/service/manifest`, `/v1/service/file/:name` | yes | Steam Service (OST) payload from GitHub. |
+| GET    | `/v1/emu/manifest`, `/v1/emu/file/:name` | yes | Emulator DLLs from GitHub (`EMU_DIRECTORY`, default `Files/dlls`). |
 | GET    | `/v1/repacks`           | yes  | `{ "repacks": [{ "appid", "sources": [{ "repacker", "link" }] }] }`. External http(s) download links; no file bytes. |
-| GET    | `/v1/depot/package/:appid` | yes | `application/zip` of the app's depot `.manifest` files plus the depot key (an `<appid>.lua` from Ryu/SteamTools, or a `.key` file from DepotBox). Streamed. `X-Depot-Source` names the upstream that served it. |
+| GET    | `/v1/depot/package/:appid` | yes | `application/zip` of the app's depot `.manifest` files plus the depot keys (an `<appid>.lua` with keyed `addappid` lines, from every provider). Streamed. `X-Depot-Source` names the upstream that served it. |
 
 `/v1/depot/package/:appid` relays the per-app depot package Drydock uses to download real game files
 itself (manifest + depot key → Steam CDN). It draws from one or more upstreams — **Ryu**
 (`secure_download`), **DepotBox** (`direct-download`), **SteamTools** (`manifest`) — each returning a
-manifests+keys ZIP. The enabled set and try order come from **`DEPOT_PACKAGE_SOURCES`** (comma-
-separated, first match wins; unknown names ignored). It defaults to `ryu`; set it to
-`ryu,depotbox,steamtools` to use all three again. Depot keys are read from the bundled `.lua`
+manifests+keys ZIP. The enabled set and try order come from **`PROVIDER_SOURCES`** (comma-separated,
+first valid ZIP wins; unknown names ignored; `DEPOT_PACKAGE_SOURCES` is the legacy fallback). It
+defaults to `ryu`; set it to `ryu,depotbox,steamtools` to use all three. Depot keys are read from the bundled `.lua`
 (`addappid(<depotid>, 0|1, "<hexkey>")`) or `.key` file. Ryu needs `RYU_AUTH_CODE` (its reseller auth
 code, sent as a query parameter); DepotBox/SteamTools use their existing `DEPOTBOX_API_KEY` /
 `STEAMTOOLS_API_KEY`.
