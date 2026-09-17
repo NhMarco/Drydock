@@ -2136,4 +2136,38 @@ mod ui_tests {
             CATALOG_REFRESH_COOLDOWN
         ));
     }
+
+    #[test]
+    fn an_existing_steam_install_outranks_the_configured_games_folder() {
+        // Otherwise an update would start a second copy of the game somewhere else.
+        let existing = PathBuf::from("D:/Steam/steamapps/common/Game");
+        let root = crate::downloads::depot_install_root(
+            480,
+            Some(existing.clone()),
+            Some(PathBuf::from("E:/Drydock Games")),
+            Some(PathBuf::from("D:/Steam")),
+        );
+        assert_eq!(root.expect("an installed game resolves offline"), existing);
+    }
+
+    #[test]
+    fn a_folder_counts_as_cracked_by_its_artifacts_alone() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let folder = directory.path();
+        assert!(!crack_deployed_in(folder));
+
+        fs::write(folder.join("readme.txt"), b"nothing to see").expect("write");
+        assert!(!crack_deployed_in(folder), "an unrelated file is not a crack");
+
+        fs::write(folder.join("coldloader.dll"), b"stub").expect("write");
+        assert!(crack_deployed_in(folder));
+    }
+
+    #[test]
+    fn steam_settings_alone_marks_a_folder_as_cracked() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let folder = directory.path();
+        fs::create_dir(folder.join("steam_settings")).expect("mkdir");
+        assert!(crack_deployed_in(folder));
+    }
 }
