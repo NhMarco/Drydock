@@ -14,7 +14,6 @@ use std::path::Path;
 const DEFAULT_UPDATE_REPOSITORY: &str = "NhMarco/Drydock";
 
 fn main() {
-    heal_git_index();
     // The app now talks only to the self-hosted proxy: no steamtools key or GitHub token ships
     // in the binary, just the proxy address and the shared HMAC signing secret.
     embed_secret("DRYDOCK_PROXY_BASE_URL", "proxy-base-url.secret");
@@ -26,29 +25,6 @@ fn main() {
     // workflow sets it from the git tag; locally it is how you build a binary that outranks every
     // published release (`DRYDOCK_RELEASE_VERSION=9.9.9`) so the self-updater leaves it alone.
     println!("cargo:rerun-if-env-changed=DRYDOCK_RELEASE_VERSION");
-}
-
-fn heal_git_index() {
-    let mut dir = std::env::current_dir().ok();
-    while let Some(current) = dir {
-        let git_index = current.join(".git").join("index");
-        if git_index.exists() {
-            if std::fs::metadata(&git_index).is_ok_and(|meta| meta.len() == 0) {
-                let _ = std::fs::remove_file(&git_index);
-                let _ = std::process::Command::new("git")
-                    .args(["reset"])
-                    .current_dir(&current)
-                    .status();
-                println!("cargo:warning=Auto-healed corrupted 0-byte .git/index file");
-            }
-            break;
-        }
-        let git_lock = current.join(".git").join("index.lock");
-        if std::fs::metadata(&git_lock).is_ok_and(|meta| meta.len() == 0) {
-            let _ = std::fs::remove_file(&git_lock);
-        }
-        dir = current.parent().map(|p| p.to_path_buf());
-    }
 }
 
 fn embed_update_repository() {

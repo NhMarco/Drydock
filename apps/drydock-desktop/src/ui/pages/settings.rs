@@ -1,3 +1,4 @@
+use drydock_core::depot::MAXIMUM_VERIFY_THREADS;
 use drydock_core::*;
 use eframe::egui::{self, Color32, FontId, RichText, Stroke, Vec2};
 use std::path::Path;
@@ -530,14 +531,14 @@ impl DrydockApp {
                         ui.label(RichText::new("PARALLEL CONNECTIONS").size(12.0).strong().color(ACCENT));
                         ui.add_space(4.0);
                         ui.label(
-                            RichText::new("Maximum concurrent chunk streams per download (default 8).")
+                            RichText::new("Maximum concurrent chunk streams per download (default 16).")
                                 .size(12.0)
                                 .color(MUTED),
                         );
                         ui.add_space(6.0);
 
                         let mut connections = match self.settings.max_download_connections {
-                            0 => 8,
+                            0 => Settings::DEFAULT_DOWNLOAD_CONNECTIONS,
                             n => n.clamp(1, 32),
                         };
                         ui.horizontal(|ui| {
@@ -575,6 +576,37 @@ impl DrydockApp {
                         });
                         if mbps != self.settings.max_download_mbps {
                             self.settings.max_download_mbps = mbps;
+                            self.status_error = self.persist_settings().is_err();
+                        }
+
+                        ui.add_space(16.0);
+                        let mut verify_threads = self.settings.verify_threads.min(MAXIMUM_VERIFY_THREADS);
+                        ui.label(RichText::new("VERIFY THREADS").size(12.0).strong().color(ACCENT))
+                            .on_hover_text(VERIFY_THREADS_HOVER);
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new("How many files a verify reads at once (Auto uses 1 on HDD, several on SSD).")
+                                .size(12.0)
+                                .color(MUTED),
+                        )
+                        .on_hover_text(VERIFY_THREADS_HOVER);
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::Slider::new(&mut verify_threads, 0..=MAXIMUM_VERIFY_THREADS)
+                                    .text("threads")
+                                    .custom_formatter(|value, _| {
+                                        if value < 0.5 {
+                                            "Auto".to_owned()
+                                        } else {
+                                            format!("{value:.0}")
+                                        }
+                                    }),
+                            )
+                            .on_hover_text(VERIFY_THREADS_HOVER);
+                        });
+                        if verify_threads != self.settings.verify_threads {
+                            self.settings.verify_threads = verify_threads;
                             self.status_error = self.persist_settings().is_err();
                         }
                     });

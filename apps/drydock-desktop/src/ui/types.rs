@@ -9,6 +9,16 @@ use drydock_core::*;
 
 pub use crate::ui::components::header_resolver::HeaderResolver;
 
+pub type ManifestGuardSweep = (usize, Vec<u32>, Option<u32>);
+pub const MANIFEST_RECHECK_COOLDOWN: Duration = Duration::from_secs(600);
+
+pub const OWN_UNLOCK_HOVER: &str = "Pick a Lua and/or depot manifests from your disk and add them to Steam. The game is \
+                                taken from the Lua (its file name or first addappid line). Automatic updates leave \
+                                these files alone.";
+
+pub const VERIFY_THREADS_HOVER: &str = "How many files a verify reads at once. Auto uses one on a hard disk, where parallel \
+                                    reads only slow it down, and several on an SSD.";
+
 /// Cached result of validating the Steam directory draft text field.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SteamDirValidation {
@@ -221,6 +231,12 @@ pub struct DrydockApp {
     pub steam_directory_draft: String,
     pub games_directory_draft: String,
     pub last_unlock_update_check: Option<Instant>,
+    pub launch_warned: std::collections::HashSet<u32>,
+    pub manifest_guard_receiver: Option<Receiver<ManifestGuardSweep>>,
+    pub manifest_fetch_attempted: std::collections::HashSet<u32>,
+    pub last_manifest_check: Option<Instant>,
+    pub steam_was_running: bool,
+    pub activation_verify: Option<(u32, PathBuf)>,
     pub image_textures: Arc<crate::image_cache::VisibleTextureLoader>,
     pub unlock_writes: Arc<crate::unlocks::UnlockWrites>,
     pub unlock_update_receiver: Option<Receiver<crate::unlocks::UnlockUpdateSweep>>,
@@ -243,7 +259,7 @@ pub struct DrydockApp {
     /// Background folder/exe detection for the "Add game to Drydock" flow.
     pub add_game_receiver: Option<Receiver<Result<AddGameOutcome, String>>>,
     /// Background detection that registers a just-finished depot download in the Drydock library.
-    pub download_install_receiver: Option<Receiver<Result<AddGameOutcome, String>>>,
+    pub download_install_receiver: Vec<Receiver<Result<AddGameOutcome, String>>>,
     pub language_options: Option<GameLanguageOptions>,
     pub language_directory: Option<PathBuf>,
     pub language_selection: String,

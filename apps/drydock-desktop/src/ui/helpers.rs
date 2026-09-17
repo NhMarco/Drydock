@@ -285,14 +285,41 @@ pub fn copy_depot_manifests_to_cache(
     store: &AppPayloadStore,
     app_id: u32,
     lua: Option<(&str, &[u8])>,
-) -> Result<usize, String> {
+) -> Result<(usize, String), String> {
     let data = DepotData::fetch(proxy, app_id).map_err(|error| error.to_string())?;
     let installed =
         install_depot_manifests(steam_root, &data.raw_manifests).map_err(|error| error.to_string())?;
+    // Without a Lua of its own the stored one is kept: saving replaces the app's whole stored copy.
+    let stored_lua = if lua.is_none() {
+        store.stored_lua(app_id)
+    } else {
+        None
+    };
+    let lua = lua.or(stored_lua
+        .as_ref()
+        .map(|(name, bytes)| (name.as_str(), bytes.as_slice())));
     // Keeping our own copy is the point of the exercise, but failing to would not undo a successful
     // add — the next install just falls back to fetching.
-    let _ = store.save(app_id, lua, &data.raw_manifests);
-    Ok(installed)
+    Ok((
+        installed,
+        payload_backup_note(store, app_id, lua, &data.raw_manifests),
+    ))
+}
+
+/// Keeps Drydock's own copy of an app's payload. Steam already has the files, so a failure is not an
+/// error of the add: it comes back as a sentence to append to the status note (empty on success).
+pub fn payload_backup_note(
+    store: &AppPayloadStore,
+    app_id: u32,
+    lua: Option<(&str, &[u8])>,
+    manifests: &std::collections::BTreeMap<String, Vec<u8>>,
+) -> String {
+    match store.save(app_id, lua, manifests) {
+        Ok(()) => String::new(),
+        Err(error) => format!(
+            " Drydock could not keep its own copy ({error}), so reinstalling it will need the network."
+        ),
+    }
 }
 
 /// Puts a stored payload back where Steam expects it, before asking Steam to install.
@@ -324,8 +351,24 @@ pub fn restore_payload_into_steam(
 /// Renders the note shown after an add/update, folding in how the depot-manifest copy went.
 pub fn added_note(name: &str, manifests: &Result<usize, String>) -> String {
     match manifests {
-        Ok(0) => format!("\"{name}\" added to Steam. No depot manifests were packaged for it."),
-        Ok(count) => format!("\"{name}\" added to Steam, with {count} depot manifest(s) cached."),
-        Err(_) => format!("\"{name}\" added to Steam. Depot manifests could not be cached."),
+        Ok(0) => format!("\"{name}\" added to Steam."),
+        Ok(count) => format!("\"{name}\" added to Steam with {count} depot manifest(s)."),
+        Err(error) => {
+            format!(
+                "\"{name}\" added to Steam. Manifests could not be installed ({error}) — Steam may not see \
+                 game files."
+            )
+        }
     }
+}
+
+/// Walks an install folder to decide whether it has a crack deployed. Kept shallow (at most one
+/// directory level deep): emu files sit right next to the game exe or in a known subfolder, and
+/// walking a multi-gigabyte install would stall the UI. The cracker deploys next to the exe, so the
+/// shallow check is the accurate one anyway.
+pub fn crack_deployed_in(folder: &Path) -> bool {
+    folder.join("steam_settings").is_dir()
+        || CRACK_ARTIFACT_NAMES
+            .iter()
+            .any(|artifact| folder.join(artifact).exists())
 }

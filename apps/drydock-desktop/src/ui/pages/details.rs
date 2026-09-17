@@ -506,6 +506,17 @@ pub fn steam_button_row(
         }
     }
 
+    if (state.is_added || state.service_current)
+        && ui
+            .add_enabled(!state.busy, ghost_button("ADD YOUR OWN LUA / MANIFESTS"))
+            .on_hover_text(
+                "Pick a Lua and/or depot manifests from your disk. Automatic updates leave them alone",
+            )
+            .clicked()
+    {
+        action = DetailsAction::AddOwn;
+    }
+
     if let Some(fix) = panels.fix {
         // Denuvo fix (GitHub build-locked Lua + zip), labelled with its installed status.
         if let Some(status) = fix.denuvo {

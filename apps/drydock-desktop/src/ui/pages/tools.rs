@@ -153,6 +153,7 @@ pub fn build_emu_crack(
 
     match output {
         EmuOutput::Deploy(folder) => {
+            let mut backed_up = 0usize;
             for (relative, contents) in &files {
                 // Skeleton-ZIP entries reach us as author-controlled relative paths, so every
                 // segment goes through the shared safety filter — `..` and a bare `C:` alike would
@@ -165,6 +166,13 @@ pub fn build_emu_crack(
                     std::fs::create_dir_all(parent)
                         .map_err(|error| format!("{}: {error}", parent.display()))?;
                 }
+                // Never destroy a game file: whatever the crack would overwrite is moved to
+                // `<name>.bak` first, so the install can be put back by hand.
+                if drydock_core::back_up_before_overwrite(&target)
+                    .map_err(|error| format!("{}: {error}", target.display()))?
+                {
+                    backed_up += 1;
+                }
                 std::fs::write(&target, contents)
                     .map_err(|error| format!("{}: {error}", target.display()))?;
             }
@@ -172,9 +180,14 @@ pub fn build_emu_crack(
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| folder.display().to_string());
+            let backup_note = if backed_up == 0 {
+                String::new()
+            } else {
+                format!(" {backed_up} original file(s) kept as .bak.")
+            };
             Ok(format!(
                 "Cracked App {app_id} ({}) into {folder_name} — {config_count} configs + \
-                 {dll_count} DLLs{extras_note}, {achievements_count} achievement(s).",
+                 {dll_count} DLLs{extras_note}, {achievements_count} achievement(s).{backup_note}",
                 arch.folder(),
             ))
         }

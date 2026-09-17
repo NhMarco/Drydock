@@ -14,7 +14,6 @@ pub enum HeaderSlot {
 
 /// How many resolver threads run in parallel. Each pulls App IDs off the shared queue and calls
 /// `appdetails`; the store's token-bucket limiter still caps the aggregate request rate, so this only
-
 /// parallelises latency, not store throughput.
 pub const HEADER_RESOLVER_WORKERS: usize = 4;
 

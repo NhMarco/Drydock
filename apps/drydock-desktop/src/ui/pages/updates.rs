@@ -2,7 +2,7 @@ use std::fs;
 use std::sync::mpsc::{self, TryRecvError};
 
 use drydock_core::*;
-use eframe::egui::{self, Color32, RichText, Stroke};
+use eframe::egui::{self, RichText, Stroke};
 
 use crate::ui::helpers::*;
 use crate::ui::theme::*;
@@ -86,13 +86,7 @@ impl DrydockApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let active_count = (self.settings.auto_update_drydock as usize)
                     + (self.settings.auto_update_unlocks as usize);
-                if !self.settings.legacy_update_blocks.is_empty() {
-                    status_pill(
-                        ui,
-                        &format!("⚠ {} Legacy Blocks", self.settings.legacy_update_blocks.len()),
-                        AMBER,
-                    );
-                } else if active_count == 2 {
+                if active_count == 2 {
                     status_pill(ui, "● All Auto-Updates Active", VERDIGRIS);
                 } else if active_count == 1 {
                     status_pill(ui, "◐ Partial Auto-Updates", ACCENT_SOFT);
@@ -247,71 +241,6 @@ impl DrydockApp {
                     self.status_error = true;
                 }
             }
-        }
-
-        ui.add_space(16.0);
-
-        // Card 3: Steam Update Architecture / Legacy Blocks Cleanup
-        if !self.settings.legacy_update_blocks.is_empty() {
-            let legacy_count = self.settings.legacy_update_blocks.len();
-            egui::Frame::new()
-                .fill(Color32::from_rgb(26, 20, 10))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(180, 110, 20)))
-                .corner_radius(16)
-                .inner_margin(24)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(icons::SHIELD).size(18.0).color(AMBER));
-                        ui.add_space(4.0);
-                        ui.label(RichText::new("LEGACY STEAM UPDATE BLOCKS").size(14.0).strong().color(AMBER));
-                        ui.add_space(8.0);
-                        status_pill(ui, &format!("{legacy_count} Locked Manifests"), AMBER);
-                    });
-                    ui.add_space(6.0);
-                    ui.label(
-                        RichText::new(
-                            "Previous versions of Drydock locked Steam .acf manifests to prevent updates. \
-                             This fragile practice caused Steam write errors and is no longer needed: \
-                             Drydock now uses dedicated install directories and on-demand depot verification. \
-                             Click below to lift all legacy read-only locks and restore standard permissions.",
-                        )
-                        .size(13.0)
-                        .color(MUTED),
-                    );
-                    ui.add_space(16.0);
-                    if ui
-                        .add(primary_button(&format!("{}  LIFT ALL BLOCKS NOW", icons::CHECK)).compact())
-                        .on_hover_text("Remove read-only attributes from all previously locked Steam manifests")
-                        .clicked()
-                    {
-                        self.release_old_update_blocks();
-                    }
-                });
-        } else {
-            egui::Frame::new()
-                .fill(SURFACE)
-                .stroke(Stroke::new(1.0, BORDER))
-                .corner_radius(16)
-                .inner_margin(24)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(icons::CHECK).size(18.0).color(VERDIGRIS));
-                        ui.add_space(4.0);
-                        ui.label(RichText::new("STEAM MANIFEST ARCHITECTURE").size(14.0).strong().color(TEXT));
-                        ui.add_space(8.0);
-                        status_pill(ui, "● Clean & Unlocked", VERDIGRIS);
-                    });
-                    ui.add_space(6.0);
-                    ui.label(
-                        RichText::new(
-                            "All Steam manifests are fully unlocked. Drydock protects your games non-intrusively \
-                             via isolated directories and custom depot verification, guaranteeing zero Steam client \
-                             lock-file conflicts.",
-                        )
-                        .size(13.0)
-                        .color(MUTED),
-                    );
-                });
         }
     }
 }

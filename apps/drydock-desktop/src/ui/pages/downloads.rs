@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, TryRecvError};
@@ -28,10 +29,11 @@ impl DrydockApp {
     }
 
     /// Spawns the background thread for one depot job and makes it the active `download_job`. Callers
-    /// (queue start / verify) guarantee nothing else is running.
-    pub fn spawn_job(&mut self, app_id: u32, name: String, kind: DownloadKind) {
+    /// (queue start / verify) guarantee nothing else is running. `root` names the folder to use when it
+    /// is already known; otherwise the game's known install is used, or a new folder is chosen.
+    pub fn spawn_job(&mut self, app_id: u32, name: String, kind: DownloadKind, root: Option<PathBuf>) {
         let steam_root = self.steam.root.clone();
-        let installed_dir = installed_directory(&self.settings, &self.manifests, app_id);
+        let installed_dir = root.or_else(|| installed_directory(&self.settings, &self.manifests, app_id));
         let games_directory = self.games_directory();
         let limits = JobLimits {
             connections: match self.settings.max_download_connections {
@@ -139,7 +141,7 @@ impl DrydockApp {
         };
         self.download_paused = false;
         self.download_error = None;
-        self.spawn_job(front.app_id, front.name.clone(), DownloadKind::Download);
+        self.spawn_job(front.app_id, front.name.clone(), DownloadKind::Download, None);
         self.status = format!("Downloading {}…", front.name);
         self.status_error = false;
     }
@@ -151,7 +153,7 @@ impl DrydockApp {
             self.status_error = true;
             return;
         }
-        self.spawn_job(app_id, name, DownloadKind::Verify);
+        self.spawn_job(app_id, name, DownloadKind::Verify, None);
         self.status = "Verifying files…".into();
         self.status_error = false;
     }
@@ -296,24 +298,33 @@ impl DrydockApp {
                     Ok(_) => {
                         // Completed: drop it from the queue by App ID (robust to reordering), persist,
                         // register it in the Drydock library, and resume the next one.
-                        if let Some((id, name, root)) = finished_game {
-                            if let Some(install_root) = root {
-                                drydock_core::download_queue::register_completed(
-                                    &mut self.settings,
-                                    id,
-                                    &name,
-                                    &install_root,
-                                );
-                            } else {
-                                download_queue::remove_completed(&mut self.settings.download_queue, id);
+                        let mut unsaved = None;
+                        if let Some((id, name, Some(root))) = finished_game {
+                            drydock_core::download_queue::register_completed(
+                                &mut self.settings,
+                                id,
+                                &name,
+                                &root,
+                            );
+                            if let Err(error) = self.write_settings() {
+                                // The registration stays in memory: reverting it would queue the finished
+                                // game again, forever while saving is disabled for an unreadable settings
+                                // file. A real write failure still pauses the queue so it gets noticed.
+                                self.status =
+                                    format!("Download finished but registration could not be saved: {error}");
+                                self.status_error = true;
+                                if !self.settings_read_only {
+                                    unsaved = Some(error);
+                                }
                             }
-                            let _ = self.persist_settings();
-                            self.start_download_install_detect(id, name);
+                            self.start_download_install_detect(id, name, root);
                         }
-                        self.download_paused = false;
-                        self.download_error = None;
+                        self.download_paused = unsaved.is_some();
+                        self.download_error = unsaved;
                         self.refresh_dynamic_state();
-                        self.start_front_download();
+                        if !self.download_paused {
+                            self.start_front_download();
+                        }
                     }
                     Err(message) => {
                         if switching {
@@ -331,8 +342,16 @@ impl DrydockApp {
                     }
                 }
             } else {
-                // A one-off verify leaves its result in `download_job` (the banner shows DISMISS).
-                self.refresh_dynamic_state();
+                // A one-off verify leaves its result in `download_job` (the banner shows DISMISS). One an
+                // activation waited for carries on with it instead; refreshing would reset the selected
+                // game when it is not a Steam install.
+                let verified = self.download_job.as_ref().map(|job| (job.app_id, job.verified));
+                let for_activation = verified.is_some_and(|(app_id, verified)| {
+                    self.finish_activation_verify(app_id, verified, &result)
+                });
+                if !for_activation {
+                    self.refresh_dynamic_state();
+                }
             }
         }
     }

@@ -355,10 +355,51 @@ impl DrydockApp {
                         }
                     });
 
+                    ui.add_space(14.0);
+                    let previous_verify = self.settings.verify_before_activation;
+                    let mut verify_changed = false;
+                    ui.horizontal(|ui| {
+                        if toggle_switch(ui, &mut self.settings.verify_before_activation, ACCENT_SOFT).changed() {
+                            verify_changed = true;
+                        }
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new("Verify the game files first")
+                                .size(13.0)
+                                .color(TEXT),
+                        )
+                        .on_hover_text(
+                            "Checks every file against the game's depot manifests before the code is made, so \
+                             only an intact game is activated. Needs the game's depot package.",
+                        );
+                    });
+                    if verify_changed && let Err(error) = self.persist_settings() {
+                        self.settings.verify_before_activation = previous_verify;
+                        self.status = format!("The verification setting could not be saved: {error}");
+                        self.status_error = true;
+                    }
+                    if self.activation_verify.is_some() {
+                        let progress = self
+                            .download_job
+                            .as_ref()
+                            .and_then(|job| job.progress.as_ref())
+                            .filter(|progress| progress.total_bytes > 0)
+                            .map_or(0, |progress| {
+                                progress.done_bytes.saturating_mul(100) / progress.total_bytes
+                            });
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new(format!("Verifying the game files… {progress}%"))
+                                .size(11.5)
+                                .color(MUTED),
+                        );
+                    }
+
                     ui.add_space(16.0);
                     let busy = self.activation_check_receiver.is_some()
                         || self.activation_remove_receiver.is_some()
-                        || self.activation_receiver.is_some();
+                        || self.activation_receiver.is_some()
+                        || self.activation_verify.is_some();
                     let can_generate = !self.activation_path.trim().is_empty() && !busy;
 
                     ui.horizontal(|ui| {

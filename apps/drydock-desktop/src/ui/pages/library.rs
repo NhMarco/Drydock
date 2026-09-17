@@ -687,6 +687,7 @@ impl DrydockApp {
         // Set by the "Add game to Drydock" button; the folder picker runs after the borrow of `entries`
         // and the UI closures ends (a native dialog can't open mid-layout).
         let mut add_game_requested = false;
+        let mut add_own_requested = false;
 
         ui.add_space(10.0);
         ui.horizontal(|ui| {
@@ -786,7 +787,7 @@ impl DrydockApp {
                     }
                 }
 
-                // 3. Add Game Button (right-aligned, exact 36px height, matching 8px radius)
+                // 3. Add Game Buttons (right-aligned, exact 36px height, matching 8px radius)
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let btn = egui::Button::new(
                         RichText::new(format!("{}  ADD LOCAL GAME", icons::FOLDER))
@@ -801,6 +802,23 @@ impl DrydockApp {
 
                     if ui.add(btn).clicked() {
                         add_game_requested = true;
+                    }
+
+                    ui.add_space(8.0);
+
+                    let own_btn = egui::Button::new(
+                        RichText::new("＋  ADD YOUR OWN LUA / MANIFESTS")
+                            .size(13.5)
+                            .strong()
+                            .color(MUTED),
+                    )
+                    .fill(SURFACE_RAISED)
+                    .stroke(Stroke::new(1.0, BORDER))
+                    .corner_radius(8)
+                    .min_size(Vec2::new(0.0, toolbar_h));
+
+                    if ui.add(own_btn).on_hover_text(OWN_UNLOCK_HOVER).clicked() {
+                        add_own_requested = true;
                     }
                 });
             },
@@ -854,12 +872,25 @@ impl DrydockApp {
                             {
                                 add_game_requested = true;
                             }
+                            if ui
+                                .add(
+                                    ghost_button("＋  ADD YOUR OWN LUA / MANIFESTS")
+                                        .min_size(Vec2::new(220.0, 42.0)),
+                                )
+                                .on_hover_text(OWN_UNLOCK_HOVER)
+                                .clicked()
+                            {
+                                add_own_requested = true;
+                            }
                         });
                         ui.add_space(16.0);
                     });
                 });
             if add_game_requested {
                 self.begin_add_game();
+            }
+            if add_own_requested {
+                self.add_own_unlock(None);
             }
             return;
         }
@@ -1017,11 +1048,17 @@ impl DrydockApp {
         if add_game_requested {
             self.begin_add_game();
         }
+        if add_own_requested {
+            self.add_own_unlock(None);
+        }
     }
 
     /// Launches a library game: a stored `.exe` (for games activated outside Steam) wins; otherwise
     /// Steam is asked to run the App ID.
     pub fn launch_library_game(&mut self, app_id: u32) {
+        if !self.confirm_uncracked_launch(app_id) {
+            return;
+        }
         if let Some(path) = self.settings.launch_paths.get(&app_id).cloned() {
             let exe = PathBuf::from(&path);
             let mut command = Command::new(&exe);
@@ -1293,84 +1330,77 @@ impl DrydockApp {
         }
     }
 
-    /// After a depot download finishes, detects the game's install folder and launch `.exe` in the
-    /// background (the same install root the depot engine wrote to, plus Steam's executable list) so
-    /// the game registers itself under "Installed in Drydock" with a working Play button.
-    pub fn start_download_install_detect(&mut self, app_id: u32, name: String) {
-        if self.download_install_receiver.is_some() {
-            return;
-        }
-        let steam_root = self.steam.root.clone();
-        let installed_dir = self
-            .manifests
-            .iter()
-            .find(|manifest| manifest.app_id == app_id)
-            .map(SteamManifest::install_dir);
+    /// After a finished depot download has been registered at `root`, looks up its launch `.exe` in
+    /// the background (Steam's executable list, checked against the files on disk) so the Play button
+    /// under "Installed in Drydock" works.
+    pub fn start_download_install_detect(&mut self, app_id: u32, name: String, root: PathBuf) {
         let (sender, receiver) = mpsc::channel();
-        self.download_install_receiver = Some(receiver);
+        self.download_install_receiver.push(receiver);
         std::thread::spawn(move || {
-            let result = (|| -> Result<AddGameOutcome, String> {
-                // The same install root the depot engine wrote to (mirrors run_depot_job).
-                let install_root = match installed_dir {
-                    Some(dir) => dir,
-                    None => {
-                        let root = steam_root.ok_or_else(|| "Steam folder not found.".to_owned())?;
-                        let installdir = fetch_install_dir(app_id)
-                            .map_err(|error| error.to_string())?
-                            .ok_or_else(|| {
-                                "Steam did not report an install folder for this game.".to_owned()
-                            })?;
-                        root.join("steamapps").join("common").join(installdir)
+            let result = fetch_windows_executables(app_id)
+                .map(|executables| {
+                    let exe = executables
+                        .iter()
+                        .map(|path| root.join(path))
+                        .find(|path| path.is_file())
+                        .unwrap_or_default();
+                    AddGameOutcome {
+                        app_id,
+                        name,
+                        root,
+                        exe,
                     }
-                };
-                let executables = fetch_windows_executables(app_id).map_err(|error| error.to_string())?;
-                // The depot writes straight into the install root; resolve a nested root only if the
-                // launch exe lives in a subfolder.
-                let root = resolve_game_root(&install_root, &executables).unwrap_or(install_root);
-                let exe = executables
-                    .iter()
-                    .map(|relative| root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR)))
-                    .find(|path| path.is_file())
-                    .unwrap_or_default();
-                Ok(AddGameOutcome {
-                    app_id,
-                    name,
-                    root,
-                    exe,
                 })
-            })();
+                .map_err(|error| format!("Game {app_id} installed; launch detection failed: {error}"));
             let _ = sender.send(result);
         });
     }
 
-    /// Registers a finished depot download in the Drydock library (quietly — the download's own success
-    /// message stays on screen). A detection failure is ignored: the files are still on disk and the
-    /// game can be added manually.
+    /// Stores the launch exes found by [`Self::start_download_install_detect`]. This only enriches an
+    /// install already registered when the download finished, so a detection failure is just reported.
     pub fn poll_download_install(&mut self) {
-        let Some(receiver) = self.download_install_receiver.as_ref() else {
-            return;
-        };
-        match receiver.try_recv() {
-            Ok(result) => {
-                self.download_install_receiver = None;
-                if let Ok(outcome) = result {
-                    self.settings.installed_games.insert(
-                        outcome.app_id,
-                        drydock_core::InstalledGame {
-                            name: outcome.name.clone(),
-                            install_dir: outcome.root.display().to_string(),
-                        },
-                    );
-                    if !outcome.exe.as_os_str().is_empty() {
+        let mut completed = Vec::new();
+        self.download_install_receiver
+            .retain(|receiver| match receiver.try_recv() {
+                Ok(result) => {
+                    completed.push(result);
+                    false
+                }
+                Err(TryRecvError::Empty) => true,
+                Err(TryRecvError::Disconnected) => false,
+            });
+        for result in completed {
+            match result {
+                Ok(outcome) => {
+                    // An exe relinked inside this install is kept. One left from an earlier install
+                    // elsewhere is replaced: it is gone, or it starts a different copy of the game.
+                    let keep_stored = self
+                        .settings
+                        .launch_paths
+                        .get(&outcome.app_id)
+                        .is_some_and(|stored| {
+                            let stored = Path::new(stored);
+                            stored.starts_with(&outcome.root) && stored.is_file()
+                        });
+                    if self
+                        .settings
+                        .installed_games
+                        .get(&outcome.app_id)
+                        .is_some_and(|game| Path::new(&game.install_dir) == outcome.root)
+                        && !outcome.exe.as_os_str().is_empty()
+                        && !keep_stored
+                    {
                         self.settings
                             .launch_paths
                             .insert(outcome.app_id, outcome.exe.display().to_string());
+                        let _ = self.persist_settings();
                     }
-                    let _ = self.persist_settings();
+                }
+                Err(error) => {
+                    self.status = error;
+                    self.status_error = true;
                 }
             }
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => self.download_install_receiver = None,
         }
     }
 
