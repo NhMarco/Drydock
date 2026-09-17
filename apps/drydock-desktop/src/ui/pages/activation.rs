@@ -9,49 +9,26 @@ use crate::ui::types::*;
 use crate::ui::widgets::*;
 use crate::ui::helpers::*;
 
-#[allow(dead_code)]
-pub fn cloud_text_row(ui: &mut egui::Ui, label: &str, value: &mut String, secret: bool) {
-    ui.label(RichText::new(label).size(10.5).color(ACCENT));
-    ui.add_sized(
-        [ui.available_width(), 38.0],
-        egui::TextEdit::singleline(value)
-            .password(secret)
-            .margin(egui::Margin::symmetric(12, 9)),
+
+
+fn step_pill(ui: &mut egui::Ui, step: &str) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::hover());
+    ui.painter().rect_filled(rect, egui::CornerRadius::same(6), ACCENT_DEEP);
+    ui.painter().rect_stroke(rect, egui::CornerRadius::same(6), Stroke::new(1.0, ACCENT), egui::StrokeKind::Inside);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        step,
+        FontId::monospace(12.5),
+        Color32::WHITE,
     );
-    ui.add_space(8.0);
 }
-
-/// A labelled folder field with a Browse button that opens a native folder picker.
-#[allow(dead_code)]
-pub fn cloud_folder_row(ui: &mut egui::Ui, label: &str, hint: &str, value: &mut String) {
-    ui.label(RichText::new(label).size(10.5).color(ACCENT));
-    ui.horizontal(|ui| {
-        ui.add_sized(
-            [ui.available_width() - 96.0, 38.0],
-            egui::TextEdit::singleline(value)
-                .hint_text(hint)
-                .margin(egui::Margin::symmetric(12, 9)),
-        );
-        if ui.add(ghost_button("BROWSE")).clicked() {
-            let mut dialog = rfd::FileDialog::new().set_title(label);
-            let current = std::path::Path::new(value.trim());
-            if current.is_dir() {
-                dialog = dialog.set_directory(current);
-            }
-            if let Some(folder) = dialog.pick_folder() {
-                *value = folder.display().to_string();
-            }
-        }
-    });
-    ui.add_space(8.0);
-}
-
 
 pub fn activation_segment(ui: &mut egui::Ui, label: &str, active: bool) -> bool {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(108.0, 34.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(110.0, 36.0), Sense::click());
     let hover = ui.ctx().animate_bool(response.id, response.hovered());
     let fill = if active {
-        ACCENT_DEEP
+        ACCENT
     } else {
         lerp_color(SURFACE, SURFACE_RAISED, hover)
     };
@@ -62,7 +39,7 @@ pub fn activation_segment(ui: &mut egui::Ui, label: &str, active: bool) -> bool 
     };
     ui.painter().rect(
         rect,
-        egui::CornerRadius::same(10),
+        egui::CornerRadius::same(8),
         fill,
         stroke,
         egui::StrokeKind::Inside,
@@ -71,8 +48,8 @@ pub fn activation_segment(ui: &mut egui::Ui, label: &str, active: bool) -> bool 
         rect.center(),
         egui::Align2::CENTER_CENTER,
         label,
-        FontId::proportional(11.5),
-        if active { Color32::WHITE } else { TEXT },
+        FontId::proportional(13.5),
+        if active { Color32::from_rgb(4, 14, 24) } else { TEXT },
     );
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -82,24 +59,33 @@ pub fn activation_segment(ui: &mut egui::Ui, label: &str, active: bool) -> bool 
 
 /// The EA provider body — a placeholder until EA activation ships.
 pub fn activation_ea_body(ui: &mut egui::Ui) {
-    panel(ui, |ui| {
-        section_label(ui, "EA ACTIVATION");
-        ui.add_space(8.0);
-        ui.label(
-            RichText::new("EA activation is coming soon.")
-                .size(13.0)
-                .strong()
-                .color(TEXT),
-        );
-        ui.add_space(4.0);
-        ui.label(
-            RichText::new("This provider isn't available yet — use STEAM or UBISOFT for now.")
-                .size(10.5)
-                .color(MUTED),
-        );
-    });
+    egui::Frame::new()
+        .fill(SURFACE)
+        .stroke(Stroke::new(1.0, BORDER))
+        .corner_radius(16)
+        .inner_margin(36)
+        .show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(8.0);
+                ui.label(RichText::new(icons::SHIELD).size(40.0).color(AMBER));
+                ui.add_space(14.0);
+                ui.label(RichText::new("EA Activation Coming Soon").size(20.0).strong().color(TEXT));
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("EA Desktop / Origin entitlement support is currently in development.")
+                        .size(14.0)
+                        .color(MUTED),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("Please use Steam or Ubisoft activation for supported games.")
+                        .size(13.5)
+                        .color(MUTED),
+                );
+                ui.add_space(8.0);
+            });
+        });
 }
-
 
 pub fn response_code_fields(ui: &mut egui::Ui, characters: &mut [String; 8]) {
     let pasted = ui.input(|input| {
@@ -123,14 +109,35 @@ pub fn response_code_fields(ui: &mut egui::Ui, characters: &mut [String; 8]) {
         for index in 0..characters.len() {
             let id = egui::Id::new(("response_code_character", index));
             let was_empty = characters[index].is_empty();
-            let response = ui.add_sized(
-                [42.0, 48.0],
-                egui::TextEdit::singleline(&mut characters[index])
-                    .id(id)
-                    .char_limit(1)
-                    .font(egui::TextStyle::Heading)
-                    .horizontal_align(egui::Align::Center),
-            );
+            let is_focused = ui.memory(|m| m.has_focus(id));
+            let has_val = !characters[index].is_empty();
+
+            let (bg, stroke) = if is_focused {
+                (SURFACE_RAISED, Stroke::new(1.5, ACCENT))
+            } else if has_val {
+                (SURFACE_RAISED, Stroke::new(1.0, ACCENT_SOFT))
+            } else {
+                (Color32::from_rgb(10, 18, 28), Stroke::new(1.0, BORDER))
+            };
+
+            let response = egui::Frame::new()
+                .fill(bg)
+                .stroke(stroke)
+                .corner_radius(8)
+                .inner_margin(egui::Margin::symmetric(0, 4))
+                .show(ui, |ui| {
+                    ui.set_height(46.0);
+                    ui.set_width(40.0);
+                    let te = egui::TextEdit::singleline(&mut characters[index])
+                        .id(id)
+                        .char_limit(1)
+                        .frame(egui::Frame::NONE)
+                        .font(FontId::monospace(20.0))
+                        .text_color(if has_val { ACCENT } else { TEXT })
+                        .horizontal_align(egui::Align::Center);
+                    ui.add(te)
+                }).inner;
+
             if response.changed() {
                 characters[index] = normalize_response_fragment(&characters[index])
                     .chars()
@@ -232,17 +239,20 @@ impl DrydockApp {
     /// Loads in-game language options from an arbitrary folder (searching its subfolders for the
     /// Steam-settings language files), for the Tools tab language changer.
     pub fn activation_page(&mut self, ui: &mut egui::Ui) {
-        page_heading(ui, "ACTIVATION");
-        ui.add_space(18.0);
-        content_column(ui, CONTENT_WIDTH, |ui| {
-            self.activation_switcher(ui);
-            ui.add_space(16.0);
-            match self.activation_provider {
-                ActivationProvider::Steam => self.activation_steam_body(ui),
-                ActivationProvider::Ubisoft => self.activation_ubisoft_body(ui),
-                ActivationProvider::Ea => activation_ea_body(ui),
-            }
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            page_heading(ui, &format!("{}  Activation", icons::ACTIVATION));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                self.activation_switcher(ui);
+            });
         });
+        ui.add_space(18.0);
+
+        match self.activation_provider {
+            ActivationProvider::Steam => self.activation_steam_body(ui),
+            ActivationProvider::Ubisoft => self.activation_ubisoft_body(ui),
+            ActivationProvider::Ea => activation_ea_body(ui),
+        }
     }
 
     /// The STEAM / UBISOFT / EA segmented switcher at the top of the Activation page.
@@ -261,269 +271,404 @@ impl DrydockApp {
         });
     }
 
-    /// The Steam activation flow (unchanged): pick a game and folder, generate a machine-bound
+    /// The Steam activation flow: pick a game and folder, generate a machine-bound
     /// request code, then paste the bot's response code to verify and install the entitlement.
     pub fn activation_steam_body(&mut self, ui: &mut egui::Ui) {
-        panel(ui, |ui| {
-            section_label(ui, "SELECT GAME");
-            ui.add_space(8.0);
-            let selector_width = ui.available_width();
-
-            // Dynamic search: type a name or App ID, then pick from the fixed-height result list.
-            if let Some(app_id) = game_search_box(
-                ui,
-                "activation_search",
-                &mut self.activation_search,
-                self.selected_app,
-                &self.catalog,
-                &self.header_resolver,
-                selector_width,
-                false,
-                |_| true,
-            ) {
-                self.select_activation_game(app_id);
-            }
-
-            if let Some(app_id) = self.selected_app {
-                ui.add_space(16.0);
-                section_label(ui, "GAME FOLDER");
-                ui.add_space(8.0);
+        egui::Frame::new()
+            .fill(SURFACE)
+            .stroke(Stroke::new(1.0, BORDER))
+            .corner_radius(16)
+            .inner_margin(24)
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let field_width = (selector_width - 132.0).max(200.0);
-                    ui.add_sized(
-                        [field_width, 40.0],
-                        egui::TextEdit::singleline(&mut self.activation_path)
-                            .hint_text("…\\steamapps\\common\\Game  (or the repack folder)")
-                            .margin(egui::Margin::symmetric(12, 10)),
-                    );
-                    if ui
-                        .add_sized([120.0, 40.0], ghost_button("CHOOSE FOLDER"))
-                        .clicked()
-                        && let Some(folder) = rfd::FileDialog::new().pick_folder()
-                    {
-                        self.activation_path = folder.display().to_string();
-                        self.activation_root = None;
-                    }
+                    step_pill(ui, "1");
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("SELECT GAME TO ACTIVATE").size(13.0).strong().color(ACCENT));
                 });
+                ui.add_space(10.0);
 
-                ui.add_space(20.0);
-                let busy = self.activation_check_receiver.is_some()
-                    || self.activation_remove_receiver.is_some()
-                    || self.activation_receiver.is_some();
-                ui.horizontal(|ui| {
-                    let can_generate = !self.activation_path.trim().is_empty() && !busy;
-                    if ui
-                        .add_enabled(can_generate, primary_button("GENERATE ACTIVATION CODE"))
-                        .on_hover_text("Verify the game folder, then create a machine-bound request code")
-                        .clicked()
-                    {
-                        self.start_activation_check(app_id, PathBuf::from(self.activation_path.trim()));
-                    }
-                });
-            } else if self.catalog.is_empty() {
-                ui.add_space(8.0);
-                ui.label(RichText::new("Loading the game catalog…").size(10.5).color(MUTED));
-            }
-            if !self.activation_request_code.is_empty() {
-                let short_request = is_short_activation_code(&self.activation_request_code);
-                ui.add_space(18.0);
-                egui::Frame::new()
-                    .fill(Color32::from_rgb(18, 21, 24))
-                    .corner_radius(12)
-                    .inner_margin(18)
-                    .show(ui, |ui| {
-                        section_label(
-                            ui,
-                            if short_request {
-                                "REQUEST CODE"
-                            } else {
-                                "COMPLETE FALLBACK REQUEST"
-                            },
+                let selector_width = ui.available_width();
+                if let Some(app_id) = game_search_box(
+                    ui,
+                    "activation_search",
+                    &mut self.activation_search,
+                    self.selected_app,
+                    &self.catalog,
+                    &self.header_resolver,
+                    selector_width,
+                    false,
+                    |_| true,
+                ) {
+                    self.select_activation_game(app_id);
+                }
+
+                if let Some(app_id) = self.selected_app {
+                    ui.add_space(20.0);
+                    ui.separator();
+                    ui.add_space(16.0);
+
+                    ui.horizontal(|ui| {
+                        step_pill(ui, "2");
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("LOCATE GAME INSTALLATION FOLDER").size(13.0).strong().color(ACCENT));
+                    });
+                    ui.add_space(10.0);
+
+                    let field_width = (ui.available_width() - 136.0).max(200.0);
+                    ui.horizontal(|ui| {
+                        ui.add_sized(
+                            [field_width, 40.0],
+                            egui::TextEdit::singleline(&mut self.activation_path)
+                                .hint_text("…\\steamapps\\common\\Game  (or the repack folder)")
+                                .margin(egui::Margin::symmetric(12, 10)),
                         );
-                        if short_request {
-                            ui.label(
-                                RichText::new(&self.activation_request_code)
-                                    .size(22.0)
-                                    .strong()
-                                    .color(TEXT),
-                            );
-                        } else {
-                            ui.add_sized(
-                                [ui.available_width(), 78.0],
-                                egui::TextEdit::multiline(&mut self.activation_request_code)
-                                    .font(egui::TextStyle::Monospace)
-                                    .margin(egui::Margin::symmetric(12, 10))
-                                    .interactive(false),
-                            );
-                        }
                         if ui
-                            .add(ghost_button("COPY CODE"))
-                            .on_hover_text("Copy the activation request code to the clipboard")
+                            .add_sized([126.0, 40.0], ghost_button(&format!("{}  BROWSE", icons::FOLDER)))
                             .clicked()
+                            && let Some(folder) = rfd::FileDialog::new().pick_folder()
                         {
-                            ui.ctx().copy_text(self.activation_request_code.clone());
-                            self.status = "Activation code copied".into();
-                            self.status_error = false;
+                            self.activation_path = folder.display().to_string();
+                            self.activation_root = None;
                         }
-                        ui.add_space(18.0);
-                        section_label(ui, "RESPONSE CODE FROM THE BOT");
-                        ui.add_space(7.0);
-                        response_code_fields(ui, &mut self.response_code);
-                        ui.add_space(12.0);
-                        let response_is_complete = self.response_code.iter().all(|part| {
-                            part.len() == 1 && part.chars().all(|value| value.is_ascii_alphanumeric())
-                        });
+                    });
+
+                    ui.add_space(16.0);
+                    let busy = self.activation_check_receiver.is_some()
+                        || self.activation_remove_receiver.is_some()
+                        || self.activation_receiver.is_some();
+                    let can_generate = !self.activation_path.trim().is_empty() && !busy;
+
+                    ui.horizontal(|ui| {
                         if ui
                             .add_enabled(
-                                response_is_complete && self.activation_verify_receiver.is_none(),
-                                primary_button("ACTIVATE"),
+                                can_generate,
+                                primary_button(&format!("{}  GENERATE ACTIVATION CODE", icons::SPARKLES))
+                                    .min_size(Vec2::new(240.0, 40.0)),
                             )
-                            .on_hover_text("Verify and install the activation response")
+                            .on_hover_text("Verify the game folder, then create a machine-bound request code")
+                            .clicked()
+                        {
+                            self.start_activation_check(app_id, PathBuf::from(self.activation_path.trim()));
+                        }
+                        if busy {
+                            ui.add_space(8.0);
+                            ui.add(egui::Spinner::new().size(18.0).color(ACCENT));
+                        }
+                    });
+                } else if self.catalog.is_empty() {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Loading game catalog…").size(13.5).color(MUTED));
+                }
+            });
+
+        if !self.activation_request_code.is_empty() {
+            let short_request = is_short_activation_code(&self.activation_request_code);
+            ui.add_space(16.0);
+            egui::Frame::new()
+                .fill(SURFACE)
+                .stroke(Stroke::new(1.0, BORDER))
+                .corner_radius(16)
+                .inner_margin(24)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        step_pill(ui, "3");
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("SUBMIT REQUEST & ENTER RESPONSE").size(13.0).strong().color(ACCENT));
+                    });
+                    ui.add_space(14.0);
+
+                    egui::Frame::new()
+                        .fill(Color32::from_rgb(12, 18, 26))
+                        .stroke(Stroke::new(1.0, Color32::from_rgb(28, 42, 60)))
+                        .corner_radius(12)
+                        .inner_margin(16)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(if short_request {
+                                        "YOUR ACTIVATION REQUEST CODE"
+                                    } else {
+                                        "COMPLETE FALLBACK REQUEST"
+                                    })
+                                    .size(11.5)
+                                    .strong()
+                                    .color(MUTED),
+                                );
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui
+                                        .add(ghost_button("COPY CODE").compact())
+                                        .on_hover_text("Copy activation request code to clipboard")
+                                        .clicked()
+                                    {
+                                        ui.ctx().copy_text(self.activation_request_code.clone());
+                                        self.status = "Activation code copied to clipboard".into();
+                                        self.status_error = false;
+                                    }
+                                });
+                            });
+                            ui.add_space(8.0);
+
+                            if short_request {
+                                ui.label(
+                                    RichText::new(&self.activation_request_code)
+                                        .size(24.0)
+                                        .monospace()
+                                        .strong()
+                                        .color(TEXT),
+                                );
+                            } else {
+                                ui.add_sized(
+                                    [ui.available_width(), 78.0],
+                                    egui::TextEdit::multiline(&mut self.activation_request_code)
+                                        .font(egui::TextStyle::Monospace)
+                                        .margin(egui::Margin::symmetric(12, 10))
+                                        .interactive(false),
+                                );
+                            }
+                        });
+
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new(if short_request {
+                            "Send this short request code in your activation ticket. It expires after 30 minutes."
+                        } else {
+                            "The upload service could not be reached. Copy this complete fallback request into your ticket."
+                        })
+                        .size(13.0)
+                        .color(ACCENT_SOFT),
+                    );
+
+                    ui.add_space(18.0);
+                    ui.separator();
+                    ui.add_space(16.0);
+
+                    ui.label(RichText::new("ENTER 8-DIGIT RESPONSE CODE FROM BOT").size(12.5).strong().color(TEXT));
+                    ui.add_space(8.0);
+                    response_code_fields(ui, &mut self.response_code);
+
+                    ui.add_space(16.0);
+                    let response_is_complete = self.response_code.iter().all(|part| {
+                        part.len() == 1 && part.chars().all(|value| value.is_ascii_alphanumeric())
+                    });
+                    let is_verifying = self.activation_verify_receiver.is_some();
+
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                response_is_complete && !is_verifying,
+                                primary_button(&format!("{}  ACTIVATE GAME", icons::CHECK))
+                                    .min_size(Vec2::new(180.0, 40.0)),
+                            )
+                            .on_hover_text("Verify and install signed activation entitlement")
                             .clicked()
                             && let Some(app_id) = self.selected_app
                         {
                             self.verify_activation_response(app_id);
                         }
-                        if let Some(entitlement) = &self.verified_entitlement {
-                            ui.add_space(10.0);
-                            ui.label(
-                                RichText::new(format!(
-                                    "SIGNED ENTITLEMENT VERIFIED · {} protected bytes · valid until {}",
-                                    entitlement.payload_bytes, entitlement.expires_utc
-                                ))
-                                .size(9.5)
-                                .strong()
-                                .color(ACCENT_SOFT),
-                            );
+                        if is_verifying {
+                            ui.add_space(8.0);
+                            ui.add(egui::Spinner::new().size(18.0).color(ACCENT));
+                            ui.label(RichText::new("Verifying entitlement…").size(13.0).color(MUTED));
                         }
                     });
-                ui.add_space(10.0);
-                ui.label(
-                    RichText::new(if short_request {
-                        "Send the short request code in your Steam ticket. It expires after 30 minutes."
-                    } else {
-                        "The upload service could not be reached. Copy the complete fallback request into the ticket."
-                    })
-                    .size(10.5)
-                    .color(ACCENT),
-                );
-            }
-        });
+
+                    if let Some(entitlement) = &self.verified_entitlement {
+                        ui.add_space(16.0);
+                        egui::Frame::new()
+                            .fill(Color32::from_rgb(14, 38, 30))
+                            .stroke(Stroke::new(1.0, Color32::from_rgb(34, 197, 94)))
+                            .corner_radius(8)
+                            .inner_margin(12)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(icons::CHECK).size(16.0).color(Color32::from_rgb(34, 197, 94)));
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "SIGNED ENTITLEMENT VERIFIED · {} protected bytes · Valid until {}",
+                                            entitlement.payload_bytes, entitlement.expires_utc
+                                        ))
+                                        .size(13.0)
+                                        .strong()
+                                        .color(Color32::from_rgb(74, 222, 128)),
+                                    );
+                                });
+                            });
+                    }
+                });
+        }
     }
 
     /// The Ubisoft activation flow: pick a game + folder, PREPARE (adds magicfiles, launches the
     /// game once, captures token_req.txt into a machine-bound activation code), then paste the bot's
     /// response code to install token.ini next to the game exe.
     pub fn activation_ubisoft_body(&mut self, ui: &mut egui::Ui) {
-        panel(ui, |ui| {
-            section_label(ui, "SELECT GAME");
-            ui.add_space(8.0);
-            let selector_width = ui.available_width();
-            if let Some(app_id) = game_search_box(
-                ui,
-                "ubisoft_search",
-                &mut self.activation_search,
-                self.selected_app,
-                &self.catalog,
-                &self.header_resolver,
-                selector_width,
-                false,
-                |_| true,
-            ) {
-                self.select_activation_game(app_id);
-            }
-
-            if let Some(app_id) = self.selected_app {
-                ui.add_space(16.0);
-                section_label(ui, "GAME FOLDER");
-                ui.add_space(8.0);
+        egui::Frame::new()
+            .fill(SURFACE)
+            .stroke(Stroke::new(1.0, BORDER))
+            .corner_radius(16)
+            .inner_margin(24)
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let field_width = (selector_width - 132.0).max(200.0);
-                    ui.add_sized(
-                        [field_width, 40.0],
-                        egui::TextEdit::singleline(&mut self.activation_path)
-                            .hint_text("…\\steamapps\\common\\Game")
-                            .margin(egui::Margin::symmetric(12, 10)),
-                    );
-                    if ui
-                        .add_sized([120.0, 40.0], ghost_button("CHOOSE FOLDER"))
-                        .clicked()
-                        && let Some(folder) = rfd::FileDialog::new().pick_folder()
-                    {
-                        self.activation_path = folder.display().to_string();
-                        self.ubisoft_activation_code.clear();
-                    }
+                    step_pill(ui, "1");
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("SELECT GAME TO ACTIVATE").size(13.0).strong().color(ACCENT));
                 });
+                ui.add_space(10.0);
 
-                ui.add_space(14.0);
-                ui.label(
-                    RichText::new(
-                        "Drydock adds the Ubisoft magicfiles, launches the game once, and reads the \
-                         token_req.txt it generates. Close the game once the token request appears.",
-                    )
-                    .size(10.5)
-                    .color(MUTED),
-                );
-
-                ui.add_space(12.0);
-                let busy = self.ubisoft_prepare_receiver.is_some();
-                let can_prepare = !self.activation_path.trim().is_empty() && !busy;
-                if ui
-                    .add_enabled(can_prepare, primary_button("PREPARE & LAUNCH GAME"))
-                    .on_hover_text("Install magicfiles, launch the game, and capture its token request")
-                    .clicked()
-                {
-                    self.start_ubisoft_prepare(app_id, PathBuf::from(self.activation_path.trim()));
+                let selector_width = ui.available_width();
+                if let Some(app_id) = game_search_box(
+                    ui,
+                    "ubisoft_search",
+                    &mut self.activation_search,
+                    self.selected_app,
+                    &self.catalog,
+                    &self.header_resolver,
+                    selector_width,
+                    false,
+                    |_| true,
+                ) {
+                    self.select_activation_game(app_id);
                 }
-            } else if self.catalog.is_empty() {
-                ui.add_space(8.0);
-                ui.label(RichText::new("Loading the game catalog…").size(10.5).color(MUTED));
-            }
 
-            if !self.ubisoft_activation_code.is_empty() {
-                ui.add_space(18.0);
-                egui::Frame::new()
-                    .fill(Color32::from_rgb(18, 21, 24))
-                    .corner_radius(12)
-                    .inner_margin(18)
-                    .show(ui, |ui| {
-                        section_label(ui, "ACTIVATION CODE");
-                        ui.label(
-                            RichText::new(&self.ubisoft_activation_code)
-                                .size(22.0)
-                                .strong()
-                                .color(TEXT),
+                if let Some(app_id) = self.selected_app {
+                    ui.add_space(20.0);
+                    ui.separator();
+                    ui.add_space(16.0);
+
+                    ui.horizontal(|ui| {
+                        step_pill(ui, "2");
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("LOCATE GAME FOLDER & PREPARE").size(13.0).strong().color(ACCENT));
+                    });
+                    ui.add_space(10.0);
+
+                    let field_width = (ui.available_width() - 136.0).max(200.0);
+                    ui.horizontal(|ui| {
+                        ui.add_sized(
+                            [field_width, 40.0],
+                            egui::TextEdit::singleline(&mut self.activation_path)
+                                .hint_text("…\\steamapps\\common\\Game")
+                                .margin(egui::Margin::symmetric(12, 10)),
                         );
                         if ui
-                            .add(ghost_button("COPY CODE"))
-                            .on_hover_text("Copy the Ubisoft activation code to the clipboard")
+                            .add_sized([126.0, 40.0], ghost_button(&format!("{}  BROWSE", icons::FOLDER)))
                             .clicked()
+                            && let Some(folder) = rfd::FileDialog::new().pick_folder()
                         {
-                            ui.ctx().copy_text(self.ubisoft_activation_code.clone());
-                            self.status = "Activation code copied".into();
-                            self.status_error = false;
+                            self.activation_path = folder.display().to_string();
+                            self.ubisoft_activation_code.clear();
                         }
-                        ui.add_space(8.0);
-                        ui.label(
-                            RichText::new(
-                                "Send this code in your Ubisoft ticket. It expires after 30 minutes.",
-                            )
-                            .size(10.5)
-                            .color(ACCENT),
-                        );
+                    });
 
-                        ui.add_space(18.0);
-                        section_label(ui, "RESPONSE CODE FROM THE BOT");
-                        ui.add_space(7.0);
-                        response_code_fields(ui, &mut self.response_code);
-                        ui.add_space(12.0);
-                        let response_is_complete = self.response_code.iter().all(|part| {
-                            part.len() == 1 && part.chars().all(|value| value.is_ascii_alphanumeric())
-                        });
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new(
+                            "Drydock installs the Ubisoft magicfiles, launches the game once, and captures \
+                             the generated token_req.txt. Close the game once the token request appears.",
+                        )
+                        .size(13.0)
+                        .color(MUTED),
+                    );
+
+                    ui.add_space(14.0);
+                    let busy = self.ubisoft_prepare_receiver.is_some();
+                    let can_prepare = !self.activation_path.trim().is_empty() && !busy;
+                    ui.horizontal(|ui| {
                         if ui
                             .add_enabled(
-                                response_is_complete && self.activation_verify_receiver.is_none(),
-                                primary_button("ACTIVATE"),
+                                can_prepare,
+                                primary_button(&format!("{}  PREPARE & LAUNCH GAME", icons::PLAY))
+                                    .min_size(Vec2::new(240.0, 40.0)),
+                            )
+                            .on_hover_text("Install magicfiles, launch the game, and capture its token request")
+                            .clicked()
+                        {
+                            self.start_ubisoft_prepare(app_id, PathBuf::from(self.activation_path.trim()));
+                        }
+                        if busy {
+                            ui.add_space(8.0);
+                            ui.add(egui::Spinner::new().size(18.0).color(ACCENT));
+                        }
+                    });
+                } else if self.catalog.is_empty() {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Loading game catalog…").size(13.5).color(MUTED));
+                }
+            });
+
+        if !self.ubisoft_activation_code.is_empty() {
+            ui.add_space(16.0);
+            egui::Frame::new()
+                .fill(SURFACE)
+                .stroke(Stroke::new(1.0, BORDER))
+                .corner_radius(16)
+                .inner_margin(24)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        step_pill(ui, "3");
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("SUBMIT CODE & INSTALL TOKEN").size(13.0).strong().color(ACCENT));
+                    });
+                    ui.add_space(14.0);
+
+                    egui::Frame::new()
+                        .fill(Color32::from_rgb(12, 18, 26))
+                        .stroke(Stroke::new(1.0, Color32::from_rgb(28, 42, 60)))
+                        .corner_radius(12)
+                        .inner_margin(16)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("UBISOFT ACTIVATION CODE").size(11.5).strong().color(MUTED));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui
+                                        .add(ghost_button("COPY CODE").compact())
+                                        .on_hover_text("Copy the Ubisoft activation code to clipboard")
+                                        .clicked()
+                                    {
+                                        ui.ctx().copy_text(self.ubisoft_activation_code.clone());
+                                        self.status = "Activation code copied to clipboard".into();
+                                        self.status_error = false;
+                                    }
+                                });
+                            });
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new(&self.ubisoft_activation_code)
+                                    .size(24.0)
+                                    .monospace()
+                                    .strong()
+                                    .color(TEXT),
+                            );
+                        });
+
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new("Send this code in your Ubisoft ticket. It expires after 30 minutes.")
+                            .size(13.0)
+                            .color(ACCENT_SOFT),
+                    );
+
+                    ui.add_space(18.0);
+                    ui.separator();
+                    ui.add_space(16.0);
+
+                    ui.label(RichText::new("ENTER 8-DIGIT RESPONSE CODE FROM BOT").size(12.5).strong().color(TEXT));
+                    ui.add_space(8.0);
+                    response_code_fields(ui, &mut self.response_code);
+
+                    ui.add_space(16.0);
+                    let response_is_complete = self.response_code.iter().all(|part| {
+                        part.len() == 1 && part.chars().all(|value| value.is_ascii_alphanumeric())
+                    });
+                    let is_verifying = self.activation_verify_receiver.is_some();
+
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                response_is_complete && !is_verifying,
+                                primary_button(&format!("{}  ACTIVATE GAME", icons::CHECK))
+                                    .min_size(Vec2::new(180.0, 40.0)),
                             )
                             .on_hover_text("Verify the response and install token.ini next to the game")
                             .clicked()
@@ -531,21 +676,37 @@ impl DrydockApp {
                         {
                             self.verify_ubisoft_response(app_id);
                         }
-                        if let Some(entitlement) = &self.verified_entitlement {
-                            ui.add_space(10.0);
-                            ui.label(
-                                RichText::new(format!(
-                                    "TOKEN INSTALLED · {} bytes · valid until {}",
-                                    entitlement.payload_bytes, entitlement.expires_utc
-                                ))
-                                .size(9.5)
-                                .strong()
-                                .color(ACCENT_SOFT),
-                            );
+                        if is_verifying {
+                            ui.add_space(8.0);
+                            ui.add(egui::Spinner::new().size(18.0).color(ACCENT));
+                            ui.label(RichText::new("Verifying token…").size(13.0).color(MUTED));
                         }
                     });
-            }
-        });
+
+                    if let Some(entitlement) = &self.verified_entitlement {
+                        ui.add_space(16.0);
+                        egui::Frame::new()
+                            .fill(Color32::from_rgb(14, 38, 30))
+                            .stroke(Stroke::new(1.0, Color32::from_rgb(34, 197, 94)))
+                            .corner_radius(8)
+                            .inner_margin(12)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(icons::CHECK).size(16.0).color(Color32::from_rgb(34, 197, 94)));
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "TOKEN INSTALLED · {} bytes · Valid until {}",
+                                            entitlement.payload_bytes, entitlement.expires_utc
+                                        ))
+                                        .size(13.0)
+                                        .strong()
+                                        .color(Color32::from_rgb(74, 222, 128)),
+                                    );
+                                });
+                            });
+                    }
+                });
+        }
     }
 
     /// Runs the whole Ubisoft prepare sequence on a background thread (folder verify, magicfiles

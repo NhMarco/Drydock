@@ -5,48 +5,101 @@ use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke
 use crate::ui::theme::*;
 use crate::ui::types::*;
 use crate::ui::helpers::*;
-use crate::ui::widgets::*;
 
-pub fn sidebar_link(ui: &mut egui::Ui, icon: &str, label: &str, active: bool) -> egui::Response {
-    let font = FontId::proportional(11.5);
-    let text = if icon.is_empty() {
-        label.to_string()
-    } else {
-        format!("{icon}  {label}")
-    };
-    let galley = ui.painter().layout_no_wrap(text, font, TEXT);
-    let size = Vec2::new(ui.available_width(), 36.0);
+pub fn sidebar_link(
+    ui: &mut egui::Ui,
+    icon: &str,
+    label: &str,
+    active: bool,
+    badge: Option<(&str, Color32)>,
+) -> egui::Response {
+    let size = Vec2::new(ui.available_width(), 40.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let hover = ui.ctx().animate_bool(response.id, response.hovered());
 
     let fill = if active {
         Color32::from_rgba_unmultiplied(0, 225, 250, 26)
     } else {
-        lerp_color(Color32::TRANSPARENT, SURFACE_RAISED, hover)
+        lerp_color(
+            Color32::TRANSPARENT,
+            Color32::from_rgba_unmultiplied(255, 255, 255, 12),
+            hover,
+        )
     };
     let stroke = if active {
-        Stroke::new(1.0, lerp_color(BORDER, ACCENT, 0.85))
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 225, 250, 85))
     } else {
-        Stroke::new(1.0, lerp_color(Color32::TRANSPARENT, BORDER, hover))
+        Stroke::new(
+            1.0,
+            lerp_color(
+                Color32::TRANSPARENT,
+                Color32::from_rgba_unmultiplied(255, 255, 255, 18),
+                hover,
+            ),
+        )
     };
 
-    ui.painter().rect(rect, 8, fill, stroke, egui::StrokeKind::Inside);
+    ui.painter().rect(rect, 8.0, fill, stroke, egui::StrokeKind::Inside);
 
+    // Left active indicator pill
     if active {
-        let indicator = egui::Rect::from_min_size(rect.min, Vec2::new(3.0, rect.height()));
-        ui.painter().rect_filled(indicator, egui::CornerRadius::same(2), ACCENT);
+        let indicator_h = 20.0;
+        let indicator = egui::Rect::from_min_size(
+            egui::pos2(rect.min.x + 2.0, rect.center().y - indicator_h / 2.0),
+            Vec2::new(3.5, indicator_h),
+        );
+        ui.painter().rect_filled(indicator, 2.0, ACCENT);
     }
 
+    // Lucide Icon
+    let icon_color = if active {
+        ACCENT
+    } else {
+        lerp_color(MUTED, TEXT, hover * 0.7)
+    };
+    let icon_font = FontId::proportional(16.5);
+    let icon_galley = ui.painter().layout_no_wrap(icon.to_string(), icon_font, icon_color);
+    let icon_pos = egui::pos2(
+        rect.left() + 14.0,
+        rect.center().y - icon_galley.size().y / 2.0,
+    );
+    ui.painter().galley(icon_pos, icon_galley, icon_color);
+
+    // Label
     let text_color = if active {
-        ACCENT_SOFT
+        Color32::WHITE
     } else {
         lerp_color(MUTED, TEXT, hover)
     };
+    let text_font = if active {
+        FontId::proportional(14.5)
+    } else {
+        FontId::proportional(14.0)
+    };
+    let text_galley = ui.painter().layout_no_wrap(label.to_string(), text_font, text_color);
     let text_pos = egui::pos2(
-        rect.left() + 14.0,
-        rect.center().y - galley.size().y / 2.0,
+        rect.left() + 42.0,
+        rect.center().y - text_galley.size().y / 2.0,
     );
-    ui.painter().galley(text_pos, galley, text_color);
+    ui.painter().galley(text_pos, text_galley, text_color);
+
+    // Optional Badge on the right
+    if let Some((badge_label, badge_color)) = badge {
+        let b_font = FontId::proportional(11.0);
+        let b_galley = ui.painter().layout_no_wrap(badge_label.to_string(), b_font, Color32::WHITE);
+        let b_pad = Vec2::new(6.0, 2.0);
+        let b_size = b_galley.size() + 2.0 * b_pad;
+        let b_rect = egui::Rect::from_center_size(
+            egui::pos2(rect.right() - 14.0 - b_size.x / 2.0, rect.center().y),
+            b_size,
+        );
+        ui.painter().rect_filled(b_rect, 4.0, badge_color);
+        let bp = egui::pos2(
+            b_rect.left() + b_pad.x,
+            b_rect.center().y - b_galley.size().y / 2.0,
+        );
+        ui.painter().galley(bp, b_galley, Color32::WHITE);
+    }
 
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -54,162 +107,172 @@ pub fn sidebar_link(ui: &mut egui::Ui, icon: &str, label: &str, active: bool) ->
     response
 }
 
+fn sidebar_section_label(ui: &mut egui::Ui, title: &str) {
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new(title)
+                .size(11.5)
+                .strong()
+                .color(Color32::from_rgb(85, 115, 145)),
+        );
+    });
+    ui.add_space(6.0);
+}
+
 /// A left-arrow back button used to return from a detail page to the list it was opened from.
 
 impl DrydockApp {
     pub fn sidebar_nav(&mut self, root: &mut egui::Ui) {
         egui::Panel::left("sidebar_nav")
-            .exact_size(230.0)
+            .exact_size(232.0)
+            .exact_size(SIDEBAR_WIDTH)
             .resizable(false)
             .show_separator_line(false)
             .frame(
                 egui::Frame::new()
                     .fill(SIDEBAR_FILL)
-                    .inner_margin(egui::Margin::symmetric(16, 18))
+                    .inner_margin(egui::Margin::symmetric(14, 16))
                     .stroke(Stroke::new(1.0, BORDER)),
             )
             .show(root, |ui| {
-                // Header (Pinned at Top): Logo, Title & Search
+                // Header (Pinned at Top): App Icon, Brand & Version
                 ui.horizontal(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
-                    ui.painter().circle_filled(rect.center(), 14.0, ACCENT_DEEP);
+                    let icon_size = 32.0;
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(icon_size), Sense::hover());
+                    ui.painter().rect_filled(
+                        rect,
+                        8.0,
+                        Color32::from_rgb(12, 28, 44),
+                    );
+                    ui.painter().rect_stroke(
+                        rect,
+                        8.0,
+                        Stroke::new(1.0, lerp_color(BORDER, ACCENT, 0.5)),
+                        egui::StrokeKind::Inside,
+                    );
                     egui::Image::new(egui::include_image!("../../../../../assets/app-icon.png"))
-                        .corner_radius(14)
-                        .paint_at(ui, rect);
+                        .corner_radius(7)
+                        .paint_at(ui, rect.shrink(2.0));
+
                     ui.add_space(8.0);
+
                     ui.label(
                         RichText::new("Drydock")
                             .size(18.0)
                             .strong()
-                            .color(TEXT),
+                            .color(Color32::WHITE),
                     );
+
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(RichText::new(format!("v{APP_VERSION}")).size(9.5).color(MUTED));
+                        egui::Frame::new()
+                            .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 10))
+                            .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 20)))
+                            .corner_radius(5)
+                            .inner_margin(egui::Margin::symmetric(6, 2))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    RichText::new(format!("v{APP_VERSION}"))
+                                        .size(11.5)
+                                        .strong()
+                                        .color(MUTED),
+                                );
+                            });
                     });
                 });
 
                 ui.add_space(14.0);
+                ui.separator();
+                ui.add_space(14.0);
 
-                // Search input pill
-                let before = self.search.clone();
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut self.search)
-                        .hint_text("Search…")
-                        .desired_width(ui.available_width())
-                        .margin(egui::Margin {
-                            left: 30,
-                            right: 10,
-                            top: 7,
-                            bottom: 7,
-                        }),
-                );
-                let center = egui::pos2(response.rect.left() + 15.0, response.rect.center().y);
-                let radius = 4.5;
-                let painter = ui.painter();
-                painter.circle_stroke(center, radius, Stroke::new(1.5, MUTED));
-                let d = radius * std::f32::consts::FRAC_1_SQRT_2;
-                painter.line_segment(
-                    [
-                        egui::pos2(center.x + d, center.y + d),
-                        egui::pos2(center.x + d + 3.0, center.y + d + 3.0),
-                    ],
-                    Stroke::new(1.5, MUTED),
-                );
-                if response.changed() && self.search != before && !self.search.trim().is_empty() {
-                    self.page = Page::Home;
-                }
-
-                ui.add_space(16.0);
-
-                // Bottom section (Pinned at Bottom)
+                // Bottom pinned status info card
                 ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
                     ui.add_space(4.0);
-                    ui.label(
-                        RichText::new("Developed with ♥ for gamers")
-                            .size(9.5)
-                            .color(MUTED),
-                    );
-                    ui.add_space(6.0);
+                    let steam_ok = self.steam.root.is_some();
+                    let (dot_color, status_text) = if steam_ok {
+                        (VERDIGRIS, "Steam Connected")
+                    } else {
+                        (DANGER, "Steam Offline")
+                    };
 
-                    // Notifications summary tile
-                    let notes = self.collect_notifications();
-                    if let Some(note) = notes.first() {
-                        egui::Frame::new()
-                            .fill(SURFACE)
-                            .stroke(Stroke::new(1.0, BORDER))
-                            .corner_radius(8)
-                            .inner_margin(egui::Margin::symmetric(10, 8))
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.horizontal(|ui| {
-                                    let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                                    ui.painter().circle_filled(dot.center(), 3.5, note.accent);
-                                    ui.add_space(4.0);
-                                    ui.add(egui::Label::new(
-                                        RichText::new(&note.title).size(10.5).color(TEXT)
-                                    ).truncate());
-                                });
+                    egui::Frame::new()
+                        .fill(Color32::from_rgba_unmultiplied(12, 22, 34, 180))
+                        .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 16)))
+                        .corner_radius(8)
+                        .inner_margin(egui::Margin::symmetric(10, 7))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                                ui.painter().circle_filled(dot.center(), 3.5, dot_color);
+                                ui.add_space(4.0);
+                                ui.label(RichText::new(status_text).size(12.5).color(TEXT));
                             });
-                        ui.add_space(6.0);
-                    }
-
-                    // Downloads Status Pill button at bottom of sidebar
-                    let (dl_label, _dl_color) = self.download_status_label();
-                    if ui.add(ghost_button(dl_label).min_size(Vec2::new(ui.available_width(), 32.0))).clicked() {
-                        self.page = Page::Downloads;
-                    }
+                        });
                     ui.add_space(10.0);
 
-                    // Middle Section (Scrollable Navigation Area)
+                    // Scrollable Navigation Area in the middle
                     egui::ScrollArea::vertical()
                         .id_salt("sidebar_scroll")
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             ui.vertical(|ui| {
                                 // STOREFRONT section
-                                ui.label(RichText::new("STOREFRONT").size(9.5).strong().color(MUTED));
-                                ui.add_space(6.0);
-                                for (page, icon, label) in [
-                                    (Page::Home, "🛍", "STORE"),
-                                    (Page::Library, "📚", "LIBRARY"),
-                                    (Page::Downloads, "📥", "DOWNLOADS"),
+                                sidebar_section_label(ui, "STOREFRONT");
+                                let dl_badge = if self.download_running() {
+                                    Some(("ACTIVE", ACCENT))
+                                } else if self.download_paused {
+                                    Some(("PAUSED", DANGER))
+                                } else if !self.settings.download_queue.is_empty() {
+                                    Some(("QUEUED", AMBER))
+                                } else {
+                                    None
+                                };
+                                for (page, icon, label, badge) in [
+                                     (Page::Home, icons::STORE, "Store", None),
+                                     (Page::Library, icons::LIBRARY, "Library", None),
+                                     (Page::Downloads, icons::DOWNLOAD, "Downloads", dl_badge),
                                 ] {
-                                    if sidebar_link(ui, icon, label, self.page == page).clicked() {
+                                    let is_active = self.page == page || (page == Page::Home && self.page == Page::SeeAll);
+                                    if sidebar_link(ui, icon, label, is_active, badge).clicked() {
                                         self.page = page;
                                     }
-                                    ui.add_space(4.0);
+                                    ui.add_space(3.0);
                                 }
 
                                 ui.add_space(16.0);
 
                                 // SERVICES & TOOLS section
-                                ui.label(RichText::new("SERVICES & TOOLS").size(9.5).strong().color(MUTED));
-                                ui.add_space(6.0);
+                                sidebar_section_label(ui, "SERVICES & TOOLS");
                                 for (page, icon, label) in [
-                                    (Page::Activation, "🔑", "ACTIVATION"),
-                                    (Page::Tools, "🛠", "TOOLS"),
-                                    (Page::Cloud, "☁", "CLOUD"),
+                                     (Page::Activation, icons::ACTIVATION, "Activation"),
+                                     (Page::Tools, icons::TOOLS, "Tools"),
+                                     (Page::Cloud, icons::CLOUD, "Cloud"),
                                 ] {
-                                    if sidebar_link(ui, icon, label, self.page == page).clicked() {
+                                    if sidebar_link(ui, icon, label, self.page == page, None).clicked() {
                                         self.page = page;
                                     }
-                                    ui.add_space(4.0);
+                                    ui.add_space(3.0);
                                 }
 
                                 ui.add_space(16.0);
 
                                 // SYSTEM section
-                                ui.label(RichText::new("SYSTEM").size(9.5).strong().color(MUTED));
-                                ui.add_space(6.0);
-                                for (page, icon, label) in [
-                                    (Page::Settings, "⚙", "SETTINGS"),
-                                    (Page::Updates, "🔄", "UPDATES"),
-                                    (Page::Guide, "❓", "HELP"),
+                                sidebar_section_label(ui, "SYSTEM");
+                                let updates_badge = if self.update_receiver.is_some() {
+                                    Some(("...", ACCENT))
+                                } else {
+                                    None
+                                };
+                                for (page, icon, label, badge) in [
+                                     (Page::Settings, icons::SETTINGS, "Settings", None),
+                                     (Page::Updates, icons::UPDATES, "Updates", updates_badge),
+                                     (Page::Guide, icons::HELP, "Help & Guide", None),
                                 ] {
-                                    if sidebar_link(ui, icon, label, self.page == page).clicked() {
+                                    if sidebar_link(ui, icon, label, self.page == page, badge).clicked() {
                                         self.page = page;
                                     }
-                                    ui.add_space(4.0);
+                                    ui.add_space(3.0);
                                 }
                             });
                         });
@@ -239,10 +302,11 @@ impl DrydockApp {
 
     /// The full Downloads page, Steam-style: a hero banner of the current game, live network/peak
     /// speed tiles, the download + install/verify progress bars, and the (currently single-job) queue.
-    #[allow(dead_code)]
     pub fn status_bar(&mut self, root: &mut egui::Ui) {
         let (download_label, download_accent) = self.download_status_label();
+        let is_download_active = self.download_running();
         let mut open_downloads = false;
+
         egui::Panel::bottom("status_bar")
             .exact_size(STATUS_BAR_HEIGHT)
             .resizable(false)
@@ -254,73 +318,108 @@ impl DrydockApp {
                     .stroke(Stroke::new(1.0, BORDER)),
             )
             .show(root, |ui| {
-                let bar = ui.max_rect();
-                // Centred download status, painted on top of the bar (painting, not a widget, so it
-                // doesn't consume the panel's layout space). Always shown so the Downloads page is a
-                // click away; brightens on hover.
-                let hovered = ui.rect_contains_pointer(egui::Rect::from_center_size(
-                    bar.center(),
-                    Vec2::new(150.0, bar.height()),
-                ));
-                let color = if hovered {
-                    lerp_color(download_accent, TEXT, 0.5)
-                } else {
-                    download_accent
-                };
-                let text_rect = ui.painter().text(
-                    bar.center(),
-                    egui::Align2::CENTER_CENTER,
-                    download_label,
-                    FontId::proportional(11.5),
-                    color,
-                );
-                let response = ui.interact(text_rect, ui.id().with("dl_status"), Sense::click());
-                if response.hovered() {
+                let bar_rect = ui.max_rect();
+
+                // Centered Downloads button pill (Steam-style)
+                let dl_text = format!("{}  {}", icons::DOWNLOAD, download_label);
+                let font = FontId::proportional(14.0);
+                let galley = ui.painter().layout_no_wrap(dl_text, font, TEXT);
+                let padding = Vec2::new(14.0, 5.0);
+                let desired_size = galley.size() + 2.0 * padding;
+                let dl_rect = egui::Rect::from_center_size(bar_rect.center(), desired_size);
+
+                let dl_resp = ui.interact(dl_rect, ui.id().with("dl_center_pill"), Sense::click());
+                if dl_resp.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
-                if response.clicked() {
+                let fill = if dl_resp.hovered() { SURFACE_RAISED } else { SURFACE };
+                let stroke = if dl_resp.hovered() {
+                    Stroke::new(1.0, ACCENT)
+                } else if is_download_active {
+                    Stroke::new(1.0, download_accent)
+                } else {
+                    Stroke::new(1.0, BORDER)
+                };
+                ui.painter().rect(dl_rect, 8.0, fill, stroke, egui::StrokeKind::Inside);
+                let text_pos = egui::pos2(
+                    dl_rect.left() + padding.x,
+                    dl_rect.center().y - galley.size().y / 2.0,
+                );
+                let text_color = if dl_resp.hovered() {
+                    Color32::WHITE
+                } else if is_download_active {
+                    download_accent
+                } else {
+                    TEXT
+                };
+                ui.painter().galley(text_pos, galley, text_color);
+                if dl_resp.clicked() {
                     open_downloads = true;
                 }
+                dl_resp.on_hover_text("View Downloads");
+
                 ui.horizontal_centered(|ui| {
+                    // Left side: Notifications summary pill
                     let notes = self.collect_notifications();
                     if let Some(note) = notes.first() {
-                        // Keep the left status clear of the centred download label: cap the title so a
-                        // long message (e.g. a crack summary) ellipsises instead of running into it.
-                        let (dot, _) = ui.allocate_exact_size(Vec2::new(9.0, 9.0), Sense::hover());
-                        ui.painter().circle_filled(dot.center(), 4.0, note.accent);
-                        ui.add_space(4.0);
-                        let title = ellipsize(&note.title, 82);
-                        let title_label = ui.label(RichText::new(&title).size(11.0).color(TEXT));
-                        if title != note.title {
-                            title_label.on_hover_text(&note.title);
+                        let has_more = notes.len() > 1;
+                        let title = ellipsize(&note.title, 45);
+                        let more_text = if has_more {
+                            format!("  +{} more", notes.len() - 1)
+                        } else {
+                            String::new()
+                        };
+
+                        let frame_fill = if self.notifications_open {
+                            SURFACE_RAISED
+                        } else {
+                            SURFACE
+                        };
+                        let frame_stroke = if self.notifications_open {
+                            Stroke::new(1.0, ACCENT)
+                        } else {
+                            Stroke::new(1.0, BORDER)
+                        };
+
+                        let pill_frame = egui::Frame::new()
+                            .fill(frame_fill)
+                            .stroke(frame_stroke)
+                            .corner_radius(8)
+                            .inner_margin(egui::Margin::symmetric(12, 5))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                                    ui.painter().circle_filled(dot.center(), 4.0, note.accent);
+                                    ui.add_space(4.0);
+                                    ui.label(RichText::new(&title).size(14.0).color(TEXT));
+                                    if has_more {
+                                        ui.label(RichText::new(&more_text).size(14.0).color(MUTED));
+                                    }
+                                });
+                            });
+
+                        let pill_resp = ui.interact(pill_frame.response.rect, ui.id().with("notif_pill_click"), Sense::click());
+                        if pill_resp.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
-                        if !note.detail.is_empty() {
-                            ui.add_space(6.0);
-                            ui.label(RichText::new(ellipsize(&note.detail, 60)).size(10.5).color(MUTED));
+                        if pill_resp.clicked() {
+                            self.notifications_open = !self.notifications_open;
                         }
-                        if notes.len() > 1 {
-                            ui.add_space(8.0);
-                            ui.label(
-                                RichText::new(format!("+{} more", notes.len() - 1))
-                                    .size(10.0)
-                                    .color(MUTED),
-                            )
-                            .on_hover_text(
-                                notes
-                                    .iter()
-                                    .skip(1)
-                                    .map(|note| note.title.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join("\n"),
-                            );
-                        }
+                        let tooltip = if notes.len() > 1 {
+                            format!("Click to view all {} notifications", notes.len())
+                        } else {
+                            "Click to view notifications".to_string()
+                        };
+                        pill_resp.on_hover_text(tooltip);
                     }
+
+                    // Right side items
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(RichText::new(format!("v{APP_VERSION}")).size(10.0).color(MUTED));
-                        ui.add_space(10.0);
+                        ui.label(RichText::new(format!("v{APP_VERSION}")).size(14.0).color(MUTED));
+                        ui.add_space(12.0);
                         ui.label(
-                            RichText::new("Developed with ♥ from gamers for gamers")
-                                .size(10.0)
+                            RichText::new("Developed with ♥ for gamers")
+                                .size(14.0)
                                 .color(MUTED),
                         );
                     });

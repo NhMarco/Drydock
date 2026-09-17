@@ -811,6 +811,7 @@ dependencies = [
  "egui_extras",
  "ehttp",
  "image",
+ "open",
  "rfd",
  "sha2",
  "tempfile",

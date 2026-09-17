@@ -1,13 +1,11 @@
 use std::path::Path;
-
 use drydock_core::*;
-use eframe::egui::{self, RichText};
+use eframe::egui::{self, Color32, FontId, RichText, Stroke, Vec2};
 
 use crate::ui::theme::*;
 use crate::ui::types::*;
 use crate::ui::widgets::*;
 use crate::ui::helpers::*;
-use crate::ui::components::*;
 
 impl DrydockApp {
     pub fn validate_steam_draft(&mut self) -> SteamDirValidation {
@@ -103,54 +101,93 @@ impl DrydockApp {
     /// horizontal links, a live game search on the right, and a small overflow group for the
     /// secondary pages (Guide / Updates / Settings).
     pub fn settings_page(&mut self, ui: &mut egui::Ui) {
-        page_heading(ui, "SETTINGS");
-        ui.add_space(22.0);
-        content_column(ui, CONTENT_WIDTH, |ui| {
-            panel(ui, |ui| {
-                section_label(ui, "STEAM FOLDER");
-                ui.add_space(10.0);
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            page_heading(ui, &format!("{}  Settings", icons::SETTINGS));
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.steam.root.is_some() {
+                    status_pill(ui, "● Steam Linked", VERDIGRIS);
+                } else {
+                    status_pill(ui, "○ Steam Unset", MUTED);
+                }
+            });
+        });
+        ui.add_space(18.0);
+
+        // Card 1: Steam Directory & Data Storage
+        egui::Frame::new()
+            .fill(SURFACE)
+            .stroke(Stroke::new(1.0, BORDER))
+            .corner_radius(16)
+            .inner_margin(24)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(icons::FOLDER).size(18.0).color(ACCENT));
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("STEAM DIRECTORY").size(14.0).strong().color(TEXT));
+                });
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(
+                        "Point Drydock at your primary Steam installation folder. Drydock scans installed games \
+                         and configures Steam integrations here.",
+                    )
+                    .size(13.0)
+                    .color(MUTED),
+                );
+                ui.add_space(14.0);
+
                 ui.add_sized(
-                    [ui.available_width(), 42.0],
+                    [ui.available_width(), 40.0],
                     egui::TextEdit::singleline(&mut self.steam_directory_draft)
-                        .hint_text("Steam directory")
+                        .hint_text("C:\\Program Files (x86)\\Steam  (or custom Steam folder)")
+                        .font(FontId::monospace(13.0))
                         .margin(egui::Margin::symmetric(12, 10)),
                 );
-                // Real-time validation indicator below the text field.
-                match self.validate_steam_draft() {
-                    SteamDirValidation::Empty => {}
-                    SteamDirValidation::NotFound => {
-                        ui.label(RichText::new("Folder does not exist").size(11.0).color(DANGER));
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    match self.validate_steam_draft() {
+                        SteamDirValidation::Empty => {
+                            ui.label(RichText::new("Enter the path to your Steam folder above").size(12.5).color(MUTED));
+                        }
+                        SteamDirValidation::NotFound => {
+                            ui.label(RichText::new(format!("{}  Folder does not exist", icons::CLOSE)).size(12.5).color(DANGER));
+                        }
+                        SteamDirValidation::MissingExecutable => {
+                            ui.label(
+                                RichText::new(format!("{}  Not a Steam folder — missing steam.exe / steam.sh", icons::CLOSE))
+                                    .size(12.5)
+                                    .color(DANGER),
+                            );
+                        }
+                        SteamDirValidation::MissingSteamapps => {
+                            ui.label(
+                                RichText::new(format!("{}  Steam executable found, but steamapps folder is missing", icons::SHIELD))
+                                    .size(12.5)
+                                    .color(AMBER),
+                            );
+                        }
+                        SteamDirValidation::Valid => {
+                            ui.label(RichText::new(format!("{}  Steam installation verified", icons::CHECK)).size(12.5).color(VERDIGRIS));
+                        }
                     }
-                    SteamDirValidation::MissingExecutable => {
-                        ui.label(
-                            RichText::new("Not a Steam folder — missing steam.exe / steam.sh")
-                                .size(11.0)
-                                .color(DANGER),
-                        );
-                    }
-                    SteamDirValidation::MissingSteamapps => {
-                        ui.label(
-                            RichText::new("Steam executable found, but steamapps folder is missing")
-                                .size(11.0)
-                                .color(AMBER),
-                        );
-                    }
-                    SteamDirValidation::Valid => {
-                        ui.label(RichText::new("Steam folder found").size(11.0).color(VERDIGRIS));
-                    }
-                }
-                ui.add_space(10.0);
+                });
+                ui.add_space(14.0);
+
                 ui.horizontal(|ui| {
                     if ui
-                        .add(primary_button("SAVE AND RELOAD"))
+                        .add(primary_button(&format!("{}  SAVE AND RELOAD", icons::CHECK)).compact())
                         .on_hover_text("Save the Steam directory and reload installed games")
                         .clicked()
                         && self.save_settings()
                     {
                         self.refresh_steam();
                     }
+                    ui.add_space(8.0);
                     if ui
-                        .add(ghost_button("AUTO-DETECT"))
+                        .add(ghost_button(&format!("{}  AUTO-DETECT", icons::SEARCH)).compact())
                         .on_hover_text("Automatically find the Steam installation folder")
                         .clicked()
                     {
@@ -165,8 +202,9 @@ impl DrydockApp {
                             self.status_error = true;
                         }
                     }
+                    ui.add_space(8.0);
                     if ui
-                        .add(ghost_button("BROWSE"))
+                        .add(ghost_button(&format!("{}  BROWSE", icons::FOLDER)).compact())
                         .on_hover_text("Open a file picker to select the Steam folder")
                         .clicked()
                     {
@@ -183,245 +221,457 @@ impl DrydockApp {
                         }
                     }
                 });
+
                 ui.add_space(16.0);
                 ui.separator();
-                ui.add_space(10.0);
-                ui.label(RichText::new("DATA FOLDER").size(9.5).strong().color(ACCENT));
+                ui.add_space(14.0);
+
+                ui.label(RichText::new("DATA STORAGE DIRECTORY").size(12.0).strong().color(ACCENT));
+                ui.add_space(4.0);
+                let settings_path = self.paths.settings_dir().display().to_string();
                 ui.label(
-                    RichText::new(self.paths.settings_dir().display().to_string())
-                        .size(10.0)
+                    RichText::new(settings_path)
+                        .size(13.0)
+                        .font(FontId::monospace(13.0))
                         .color(MUTED),
                 );
             });
 
-            // The Steam Service controls (install / reinstall / uninstall / restart Steam) live here.
-            ui.add_space(16.0);
-            let service_action = steam_service_card(
-                ui,
-                &self.steam,
-                self.service_status.as_ref(),
-                self.service_receiver.is_some(),
-                self.background_action.is_none(),
-            );
-            match service_action {
-                SteamServiceCardAction::Install | SteamServiceCardAction::Reinstall => {
-                    self.install_steam_service();
-                }
-                SteamServiceCardAction::Uninstall => self.uninstall_steam_service(),
-                SteamServiceCardAction::Restart => self.restart_steam_in_background(),
-                SteamServiceCardAction::None => {}
-            }
+        ui.add_space(16.0);
 
-            ui.add_space(16.0);
-            panel(ui, |ui| {
-                section_label(ui, "GAME LIST");
-                ui.add_space(6.0);
-                ui.label(RichText::new(format!("{} games available", self.catalog.len())).color(TEXT));
-                ui.add_space(10.0);
-                let refreshing = self.catalog_receiver.is_some();
-                if ui
-                    .add_enabled(!refreshing, primary_button("FORCE REFRESH GAME LIST"))
-                    .on_hover_text("Re-download the full game list (cached locally for 24 hours)")
-                    .clicked()
-                {
-                    self.force_catalog_refresh();
-                }
-            });
+        // Card 2: Steam Service Integration
+        egui::Frame::new()
+            .fill(SURFACE)
+            .stroke(Stroke::new(1.0, BORDER))
+            .corner_radius(16)
+            .inner_margin(24)
+            .show(ui, |ui| {
+                let service_busy = self.service_receiver.is_some();
+                let restart_enabled = self.background_action.is_none();
 
-            ui.add_space(16.0);
-            panel(ui, |ui| {
-                section_label(ui, "DOWNLOADS");
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(icons::SHIELD).size(18.0).color(ACCENT));
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("STEAM SERVICE INTEGRATION").size(14.0).strong().color(TEXT));
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(status) = self.service_status.as_ref() {
+                            let (label, color) = match status.state {
+                                SteamServiceState::Current => ("● CURRENT", VERDIGRIS),
+                                SteamServiceState::UpdateAvailable => ("▲ UPDATE AVAILABLE", ACCENT_SOFT),
+                                SteamServiceState::NotInstalled => ("○ NOT INSTALLED", MUTED),
+                                SteamServiceState::Error => ("⚠ ATTENTION", DANGER),
+                            };
+                            status_pill(ui, label, color);
+                        } else if service_busy {
+                            status_pill(ui, "⏳ CHECKING…", MUTED);
+                        } else {
+                            status_pill(ui, "○ UNKNOWN", MUTED);
+                        }
+                    });
+                });
                 ui.add_space(6.0);
                 ui.label(
                     RichText::new(
-                        "Applies to new and resumed downloads (pause + resume to re-apply to a running one).",
+                        "The Steam Service enables seamless game unlocks, depot manifests injection, \
+                         and hook management without needing manual binary edits.",
                     )
-                    .size(11.0)
+                    .size(13.0)
                     .color(MUTED),
                 );
-                ui.add_space(12.0);
+                ui.add_space(14.0);
 
-                // Max parallel CDN connections (0 in an old settings file migrates to the default 8).
-                let mut connections = match self.settings.max_download_connections {
-                    0 => 8,
-                    n => n.clamp(1, 32),
+                let Some(_root) = &self.steam.root.clone() else {
+                    egui::Frame::new()
+                        .fill(Color32::from_rgb(32, 14, 14))
+                        .stroke(Stroke::new(1.0, Color32::from_rgb(220, 38, 38)))
+                        .corner_radius(8)
+                        .inner_margin(12)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(icons::CLOSE).size(16.0).color(Color32::from_rgb(220, 38, 38)));
+                                ui.add_space(6.0);
+                                ui.label(
+                                    RichText::new("Steam directory not set — configure and save your Steam folder above first.")
+                                        .size(13.0)
+                                        .strong()
+                                        .color(Color32::from_rgb(248, 113, 113)),
+                                );
+                            });
+                        });
+                    return;
                 };
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Max connections").size(12.0).color(ACCENT));
-                    ui.add(egui::Slider::new(&mut connections, 1..=32));
-                });
-                if connections != self.settings.max_download_connections {
-                    self.settings.max_download_connections = connections;
-                    self.status_error = self.persist_settings().is_err();
+
+                let is_current = matches!(
+                    self.service_status.as_ref().map(|s| s.state),
+                    Some(SteamServiceState::Current)
+                );
+                let installed = self.service_status.as_ref().map_or(false, |s| s.state != SteamServiceState::NotInstalled);
+                let message = self.service_status.as_ref().map(|s| s.message.clone()).unwrap_or_default();
+                let primary_label = self.service_status.as_ref()
+                    .map_or("INSTALL SERVICE".to_string(), |s| s.action_text().to_uppercase());
+
+                if !message.is_empty() {
+                    ui.add(egui::Label::new(RichText::new(message).size(13.0).color(MUTED)).wrap());
+                    ui.add_space(10.0);
                 }
 
-                ui.add_space(10.0);
-                let mut mbps = self.settings.max_download_mbps;
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Max speed").size(12.0).color(ACCENT));
-                    ui.add(
-                        egui::DragValue::new(&mut mbps)
-                            .range(0..=100_000)
-                            .speed(1.0)
-                            .suffix(" MB/s"),
-                    );
-                    ui.label(
-                        RichText::new(if mbps == 0 { "unlimited" } else { "" })
-                            .size(11.0)
-                            .color(MUTED),
-                    );
+                    if !is_current {
+                        if ui
+                            .add_enabled(
+                                !service_busy,
+                                primary_button(&format!("{}  {primary_label}", icons::DOWNLOAD)).compact(),
+                            )
+                            .clicked()
+                        {
+                            self.install_steam_service();
+                        }
+                        ui.add_space(8.0);
+                    }
+                    if installed {
+                        if ui
+                            .add_enabled(
+                                !service_busy,
+                                ghost_button(&format!("{}  REINSTALL", icons::UPDATES)).compact(),
+                            )
+                            .on_hover_text("Download and reinstall the Steam Service files")
+                            .clicked()
+                        {
+                            self.install_steam_service();
+                        }
+                        ui.add_space(8.0);
+                        if ui
+                            .add_enabled(
+                                !service_busy,
+                                ghost_button(&format!("{}  UNINSTALL", icons::CLOSE)).compact(),
+                            )
+                            .on_hover_text("Remove the Steam Service files and restart Steam")
+                            .clicked()
+                        {
+                            self.uninstall_steam_service();
+                        }
+                        ui.add_space(8.0);
+                    }
+                    if ui
+                        .add_enabled(
+                            restart_enabled && !service_busy,
+                            ghost_button(&format!("{}  RESTART STEAM", icons::PLAY)).compact(),
+                        )
+                        .on_hover_text("Stop and restart the Steam client")
+                        .clicked()
+                    {
+                        self.restart_steam_in_background();
+                    }
                 });
-                if mbps != self.settings.max_download_mbps {
-                    self.settings.max_download_mbps = mbps;
-                    self.status_error = self.persist_settings().is_err();
-                }
             });
 
-            ui.add_space(16.0);
-            panel(ui, |ui| {
-                section_label(ui, "CACHE");
+        ui.add_space(16.0);
+
+        // Card 3: Downloads & Catalog
+        egui::Frame::new()
+            .fill(SURFACE)
+            .stroke(Stroke::new(1.0, BORDER))
+            .corner_radius(16)
+            .inner_margin(24)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(icons::DOWNLOAD).size(18.0).color(ACCENT));
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("DOWNLOADS & CATALOG CONFIGURATION").size(14.0).strong().color(TEXT));
+                });
                 ui.add_space(6.0);
                 ui.label(
-                    RichText::new(self.paths.cache_dir().display().to_string())
-                        .size(9.5)
-                        .color(MUTED),
+                    RichText::new(
+                        "Configure concurrent chunk streams, download speed limits, and game catalog updates.",
+                    )
+                    .size(13.0)
+                    .color(MUTED),
                 );
-                ui.add_space(10.0);
-                if ui
-                .add(ghost_button("CLEAR CACHE"))
-                .on_hover_text(
-                    "Delete cached game list, Denuvo list, and store artwork — safe; everything re-downloads. Settings and activation are kept.",
-                )
-                .clicked()
-            {
-                self.clear_drydock_cache();
-            }
+                ui.add_space(16.0);
+
+                let avail_w = ui.available_width();
+                let col_w = ((avail_w - 24.0) / 2.0).max(260.0);
+
+                ui.horizontal_top(|ui| {
+                    // Left Column: Download Limits
+                    ui.allocate_ui_with_layout(Vec2::new(col_w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.label(RichText::new("PARALLEL CONNECTIONS").size(12.0).strong().color(ACCENT));
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new("Maximum concurrent chunk streams per download (default 8).")
+                                .size(12.0)
+                                .color(MUTED),
+                        );
+                        ui.add_space(6.0);
+
+                        let mut connections = match self.settings.max_download_connections {
+                            0 => 8,
+                            n => n.clamp(1, 32),
+                        };
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Slider::new(&mut connections, 1..=32).text("connections"));
+                        });
+                        if connections != self.settings.max_download_connections {
+                            self.settings.max_download_connections = connections;
+                            self.status_error = self.persist_settings().is_err();
+                        }
+
+                        ui.add_space(16.0);
+                        ui.label(RichText::new("BANDWIDTH LIMIT").size(12.0).strong().color(ACCENT));
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new("Throttle maximum download speed. Set to 0 for unlimited.")
+                                .size(12.0)
+                                .color(MUTED),
+                        );
+                        ui.add_space(6.0);
+
+                        let mut mbps = self.settings.max_download_mbps;
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut mbps)
+                                    .range(0..=100_000)
+                                    .speed(1.0)
+                                    .suffix(" MB/s"),
+                            );
+                            ui.add_space(6.0);
+                            if mbps == 0 {
+                                status_pill(ui, "UNLIMITED", VERDIGRIS);
+                            } else {
+                                status_pill(ui, &format!("Capped at {mbps} MB/s"), ACCENT_SOFT);
+                            }
+                        });
+                        if mbps != self.settings.max_download_mbps {
+                            self.settings.max_download_mbps = mbps;
+                            self.status_error = self.persist_settings().is_err();
+                        }
+                    });
+
+                    ui.add_space(24.0);
+
+                    // Right Column: Catalog Refresh
+                    ui.allocate_ui_with_layout(Vec2::new(col_w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.label(RichText::new("GAME CATALOG SYNC").size(12.0).strong().color(ACCENT));
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new("The full catalog is cached for 24 hours. Force a refresh to fetch new listings.")
+                                .size(12.0)
+                                .color(MUTED),
+                        );
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(format!("● {} games indexed", self.catalog.len())).size(13.5).strong().color(TEXT));
+                        });
+                        ui.add_space(12.0);
+                        let refreshing = self.catalog_receiver.is_some();
+                        if ui
+                            .add_enabled(
+                                !refreshing,
+                                ghost_button(&format!("{}  FORCE REFRESH GAME LIST", icons::UPDATES)).compact(),
+                            )
+                            .on_hover_text("Re-download the complete game catalog now")
+                            .clicked()
+                        {
+                            self.force_catalog_refresh();
+                        }
+                        if refreshing {
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                ui.add(egui::Spinner::new().size(14.0).color(ACCENT));
+                                ui.add_space(4.0);
+                                ui.label(RichText::new("Syncing game catalog…").size(12.0).color(ACCENT_SOFT));
+                            });
+                        }
+                    });
+                });
             });
 
-            ui.add_space(16.0);
-            self.self_hosting_panel(ui);
+        ui.add_space(16.0);
 
-            // Only shown when the settings file on disk could not be parsed at startup. Until the
-            // user decides, every save is blocked so their real library is not replaced by defaults.
-            if self.settings_read_only {
-                ui.add_space(16.0);
-                panel(ui, |ui| {
-                    section_label(ui, "BROKEN SETTINGS FILE");
-                    ui.add_space(6.0);
-                    ui.label(
-                        RichText::new(
-                            "Your settings file could not be read, so Drydock started with defaults and \
-                             is not saving anything. The original file was kept next to it — if your \
-                             library is in there, close Drydock and repair it. Otherwise start fresh:",
+        // Card 4: Cache & Storage
+        egui::Frame::new()
+            .fill(SURFACE)
+            .stroke(Stroke::new(1.0, BORDER))
+            .corner_radius(16)
+            .inner_margin(24)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(icons::TOOLS).size(18.0).color(ACCENT));
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("CACHE & STORAGE").size(14.0).strong().color(TEXT));
+                });
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(
+                        "Delete cached store artwork, game catalog, and Denuvo lists. \
+                         Safe to clear anytime; all assets re-download automatically while settings and activations remain intact.",
+                    )
+                    .size(13.0)
+                    .color(MUTED),
+                );
+                ui.add_space(14.0);
+
+                let cache_path = self.paths.cache_dir().display().to_string();
+                ui.label(RichText::new("CACHE DIRECTORY").size(12.0).strong().color(ACCENT));
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(cache_path)
+                        .size(13.0)
+                        .font(FontId::monospace(13.0))
+                        .color(MUTED),
+                );
+                ui.add_space(14.0);
+
+                if ui
+                    .add(ghost_button(&format!("{}  CLEAR CACHE", icons::CLOSE)).compact())
+                    .on_hover_text("Delete cached artwork, game lists, and temporary data")
+                    .clicked()
+                {
+                    self.clear_drydock_cache();
+                }
+            });
+
+        ui.add_space(16.0);
+
+        // Card 5: Proxy & Self-Hosting
+        self.self_hosting_panel(ui);
+
+        // Card 6: Broken Settings File Alert (Conditional)
+        if self.settings_read_only {
+            ui.add_space(16.0);
+            egui::Frame::new()
+                .fill(Color32::from_rgb(32, 20, 10))
+                .stroke(Stroke::new(1.0, AMBER))
+                .corner_radius(16)
+                .inner_margin(24)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(icons::SHIELD).size(18.0).color(AMBER));
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("BROKEN SETTINGS FILE DETECTED").size(14.0).strong().color(AMBER));
+                    });
+                    ui.add_space(8.0);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(
+                                "Your settings file could not be read on startup. Drydock initialized with defaults \
+                                 and is preventing file writes to protect your original library from being replaced. \
+                                 The original unreadable file is preserved beside it.",
+                            )
+                            .size(13.0)
+                            .color(TEXT),
                         )
-                        .size(11.0)
-                        .color(AMBER),
+                        .wrap(),
                     );
-                    ui.add_space(10.0);
+                    ui.add_space(14.0);
                     if ui
-                        .add(ghost_button("DISCARD BROKEN SETTINGS"))
-                        .on_hover_text(
-                            "Start a new settings file from the current state. The unreadable one stays on disk.",
-                        )
+                        .add(ghost_button(&format!("{}  DISCARD BROKEN SETTINGS", icons::CLOSE)).compact())
+                        .on_hover_text("Start a fresh settings file from current defaults. The unreadable file remains on disk.")
                         .clicked()
                     {
                         self.discard_broken_settings();
                     }
                 });
-            }
-        });
+        }
     }
 
     /// Settings panel for pointing this build at a self-hosted proxy or a fork's release channel.
-    ///
-    /// Drydock's proxy is open source and meant to be run by anyone, so the address, the shared
-    /// secret and the update repository must be changeable **without rebuilding**. Each field is
-    /// blank by default, which means "use whatever this build was compiled with"; an environment
-    /// variable of the same name still wins over anything entered here (see `drydock_core::config`).
     pub fn self_hosting_panel(&mut self, ui: &mut egui::Ui) {
-        panel(ui, |ui| {
-            section_label(ui, "PROXY / SELF-HOSTING");
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(
-                    "Leave these empty to use the values this build ships with. Fill them in to \
-                     point Drydock at your own proxy — see proxy/README.md for running one.",
-                )
-                .size(11.0)
-                .color(MUTED),
-            );
-            ui.add_space(10.0);
-
-            let mut changed = false;
-            let mut field = |ui: &mut egui::Ui, label: &str, hint: &str, value: &mut String, secret: bool| {
-                ui.label(RichText::new(label).size(9.5).strong().color(ACCENT));
-                ui.add_space(3.0);
-                let edit = egui::TextEdit::singleline(value)
-                    .hint_text(hint)
-                    .password(secret)
-                    .desired_width(f32::INFINITY);
-                if ui.add(edit).changed() {
-                    changed = true;
-                }
-                ui.add_space(10.0);
-            };
-            field(
-                ui,
-                "PROXY BASE URL",
-                "https://proxy.example  (origin only, no path)",
-                &mut self.settings.proxy_base_url,
-                false,
-            );
-            field(
-                ui,
-                "PROXY HMAC SECRET",
-                "must match one of the proxy's DRYDOCK_HMAC_SECRET values",
-                &mut self.settings.proxy_hmac_secret,
-                true,
-            );
-            field(
-                ui,
-                "UPDATE REPOSITORY",
-                "owner/repo  (leave empty unless you run your own release channel)",
-                &mut self.settings.update_repository,
-                false,
-            );
-
-            if changed {
-                // Apply immediately so the next request uses the new address — no restart needed.
-                self.settings.apply_config_overrides();
-                let _ = self.persist_settings();
-            }
-
-            // Show what actually resolved, so a typo or a stray environment variable is visible
-            // rather than presenting as "the proxy is down".
-            ui.add_space(2.0);
-            ui.separator();
-            ui.add_space(8.0);
-            ui.label(RichText::new("RESOLVED").size(9.5).strong().color(ACCENT));
-            ui.add_space(4.0);
-            for entry in drydock_core::describe_config() {
+        egui::Frame::new()
+            .fill(SURFACE)
+            .stroke(Stroke::new(1.0, BORDER))
+            .corner_radius(16)
+            .inner_margin(24)
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("{}:", entry.name)).size(10.5).color(MUTED));
-                    ui.label(RichText::new(&entry.value).size(10.5).color(TEXT));
-                    ui.label(
-                        RichText::new(format!("({})", entry.source.label()))
-                            .size(10.0)
-                            .color(if entry.source == ConfigSource::Unset {
-                                DANGER
-                            } else {
-                                MUTED
-                            }),
-                    );
+                    ui.label(RichText::new(icons::CLOUD).size(18.0).color(ACCENT));
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("PROXY & SELF-HOSTING OVERRIDES").size(14.0).strong().color(TEXT));
                 });
-            }
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new("Run `Drydock --config` for the same report on the command line.")
-                    .size(10.0)
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(
+                        "Leave these fields empty to use official defaults. Fill them in to connect \
+                         Drydock to a private proxy or your own release channel.",
+                    )
+                    .size(13.0)
                     .color(MUTED),
-            );
-        });
+                );
+                ui.add_space(16.0);
+
+                let mut changed = false;
+                let mut field = |ui: &mut egui::Ui, label: &str, hint: &str, value: &mut String, secret: bool| {
+                    ui.label(RichText::new(label).size(12.0).strong().color(ACCENT));
+                    ui.add_space(4.0);
+                    let edit = egui::TextEdit::singleline(value)
+                        .hint_text(hint)
+                        .password(secret)
+                        .font(FontId::monospace(13.0))
+                        .margin(egui::Margin::symmetric(12, 10));
+                    if ui.add_sized([ui.available_width(), 40.0], edit).changed() {
+                        changed = true;
+                    }
+                    ui.add_space(12.0);
+                };
+
+                field(
+                    ui,
+                    "PROXY BASE URL",
+                    "https://proxy.example  (origin only, no path)",
+                    &mut self.settings.proxy_base_url,
+                    false,
+                );
+                field(
+                    ui,
+                    "PROXY HMAC SECRET",
+                    "must match one of the proxy's DRYDOCK_HMAC_SECRET values",
+                    &mut self.settings.proxy_hmac_secret,
+                    true,
+                );
+                field(
+                    ui,
+                    "UPDATE REPOSITORY",
+                    "owner/repo  (leave empty unless running a custom release repository)",
+                    &mut self.settings.update_repository,
+                    false,
+                );
+
+                if changed {
+                    // Apply immediately so the next request uses the new address — no restart needed.
+                    self.settings.apply_config_overrides();
+                    let _ = self.persist_settings();
+                }
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(14.0);
+
+                ui.label(RichText::new("RESOLVED CONFIGURATION").size(12.0).strong().color(ACCENT));
+                ui.add_space(8.0);
+
+                for entry in drydock_core::describe_config() {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("{}:", entry.name)).size(13.0).strong().color(MUTED));
+                        ui.label(RichText::new(&entry.value).size(13.0).font(FontId::monospace(12.5)).color(TEXT));
+                        let (source_label, source_color) = match entry.source {
+                            ConfigSource::Unset => ("Unset", DANGER),
+                            ConfigSource::Environment => ("Env Override", ACCENT_SOFT),
+                            ConfigSource::UserSettings => ("User Settings", VERDIGRIS),
+                            ConfigSource::BuildDefault => ("Built-in", MUTED),
+                        };
+                        status_pill(ui, source_label, source_color);
+                    });
+                    ui.add_space(4.0);
+                }
+
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("Run `Drydock --config` from terminal for the same diagnostic report.")
+                        .size(12.0)
+                        .color(MUTED),
+                );
+            });
     }
 
     /// Deletes the on-disk cache and drops the in-memory caches derived from it so they refill.

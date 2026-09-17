@@ -43,7 +43,7 @@ pub fn screenshot_gallery(ui: &mut egui::Ui, screenshots: &[String], index: usiz
         // A rounded "current / total" badge tucked into the image's bottom-right corner.
         let galley = ui.painter().layout_no_wrap(
             format!("{} / {count}", new_index + 1),
-            FontId::proportional(11.0),
+            FontId::proportional(14.0),
             Color32::WHITE,
         );
         let badge_size = galley.size() + Vec2::new(20.0, 10.0);
@@ -146,8 +146,8 @@ pub fn overlay_arrow(ui: &mut egui::Ui, center: egui::Pos2, radius: f32, forward
 /// Visual weight of a [`PillButton`].
 
 pub fn detail_field(ui: &mut egui::Ui, label: &str, value: String) {
-    ui.label(RichText::new(label).size(8.5).strong().color(ACCENT));
-    ui.add(egui::Label::new(RichText::new(value).size(11.0).color(TEXT)).wrap());
+    ui.label(RichText::new(label).size(14.0).strong().color(ACCENT));
+    ui.add(egui::Label::new(RichText::new(value).size(14.0).color(TEXT)).wrap());
     ui.add_space(10.0);
 }
 
@@ -175,7 +175,7 @@ pub fn details_body(
     ui.add(egui::Label::new(RichText::new(&details.name).size(30.0).strong().color(TEXT)).wrap());
     ui.label(
         RichText::new(format!("APP {}", details.app_id))
-            .size(10.0)
+            .size(14.0)
             .color(ACCENT),
     );
     ui.add_space(16.0);
@@ -260,7 +260,7 @@ pub fn details_store_sidebar(
             ui.add_space(12.0);
         }
         if !details.short_description.is_empty() {
-            ui.add(egui::Label::new(RichText::new(&details.short_description).size(12.0).color(TEXT)).wrap());
+            ui.add(egui::Label::new(RichText::new(&details.short_description).size(14.0).color(TEXT)).wrap());
             ui.add_space(14.0);
         }
 
@@ -280,7 +280,7 @@ pub fn details_store_sidebar(
 
         if !details.genres.is_empty() {
             ui.add_space(6.0);
-            ui.label(RichText::new("TAGS").size(8.5).strong().color(MUTED));
+            ui.label(RichText::new("TAGS").size(14.0).strong().color(MUTED));
             ui.add_space(6.0);
             tag_chip_flow(ui, &details.genres);
         }
@@ -338,7 +338,7 @@ pub fn details_store_sidebar(
 /// One label + value line in the store sidebar, Steam-store style: a fixed-width right-aligned grey
 /// label column and a value column that starts at the same x on every row and wraps if needed.
 pub fn sidebar_fact(ui: &mut egui::Ui, label: &str, value: &str, value_color: Color32) {
-    pub const LABEL_W: f32 = 96.0;
+    pub const LABEL_W: f32 = 106.0;
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
         // Left-aligned label column of a fixed width, so labels sit flush left (aligned with TAGS)
@@ -346,9 +346,9 @@ pub fn sidebar_fact(ui: &mut egui::Ui, label: &str, value: &str, value_color: Co
         ui.allocate_ui_with_layout(Vec2::new(LABEL_W, 0.0), Layout::top_down(Align::Min), |ui| {
             ui.set_width(LABEL_W);
             ui.add_space(1.0);
-            ui.add(egui::Label::new(RichText::new(label).size(9.5).color(MUTED)));
+            ui.add(egui::Label::new(RichText::new(label).size(14.0).color(MUTED)));
         });
-        ui.add(egui::Label::new(RichText::new(value).size(11.5).color(value_color)).wrap());
+        ui.add(egui::Label::new(RichText::new(value).size(14.0).color(value_color)).wrap());
     });
     ui.add_space(8.0);
 }
@@ -367,7 +367,7 @@ pub fn tag_chip_flow(ui: &mut egui::Ui, tags: &[String]) {
     for tag in tags.iter().take(14) {
         let galley = ui
             .painter()
-            .layout_no_wrap(tag.clone(), FontId::proportional(10.5), TEXT);
+            .layout_no_wrap(tag.clone(), FontId::proportional(14.0), TEXT);
         let w = galley.size().x + CHIP_PAD;
         let row = rows.last_mut().expect("one row always present");
         if !row.is_empty() && used + GAP + w > avail {
@@ -408,7 +408,7 @@ pub fn tag_chip(ui: &mut egui::Ui, text: &str) {
             ui.add(
                 egui::Label::new(
                     RichText::new(text)
-                        .size(10.5)
+                        .size(14.0)
                         .color(lerp_color(TEXT, ACCENT_SOFT, 0.4)),
                 )
                 .wrap_mode(egui::TextWrapMode::Extend),
@@ -439,9 +439,9 @@ pub fn details_features(ui: &mut egui::Ui, details: &SteamStoreDetails, activati
         } else {
             "None — no activation needed".to_owned()
         };
-        ui.label(RichText::new("THIRD-PARTY DRM").size(8.5).strong().color(ACCENT));
+        ui.label(RichText::new("THIRD-PARTY DRM").size(14.0).strong().color(ACCENT));
         ui.add(
-            egui::Label::new(RichText::new(drm).size(11.0).color(if activation_required {
+            egui::Label::new(RichText::new(drm).size(14.0).color(if activation_required {
                 AMBER
             } else {
                 TEXT
@@ -585,7 +585,7 @@ pub fn details_about(ui: &mut egui::Ui, details: &SteamStoreDetails) {
                 } else {
                     &details.about_the_game
                 })
-                .size(12.0)
+                .size(14.0)
                 .color(if empty { MUTED } else { TEXT }),
             )
             .wrap(),
@@ -613,11 +613,11 @@ pub fn details_requirements(ui: &mut egui::Ui, details: &SteamStoreDetails) {
 }
 
 pub fn requirement_column(ui: &mut egui::Ui, heading: &str, value: &str) {
-    ui.label(RichText::new(heading).size(10.0).strong().color(ACCENT));
+    ui.label(RichText::new(heading).size(14.0).strong().color(ACCENT));
     ui.add_space(6.0);
     ui.label(
         RichText::new(if value.is_empty() { "Not specified" } else { value })
-            .size(10.5)
+            .size(14.0)
             .color(if value.is_empty() { MUTED } else { TEXT }),
     );
 }

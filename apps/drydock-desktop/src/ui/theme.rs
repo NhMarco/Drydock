@@ -25,8 +25,10 @@ pub const CATALOG_REFRESH_COOLDOWN: Duration = Duration::from_secs(24 * 60 * 60)
 /// Steam header art is 460×215 — this ratio is used for card cover heights and detail artwork.
 pub const STEAM_HEADER_ASPECT: f32 = 0.467;
 /// Height of the top navigation bar and the bottom status strip that frame the storefront.
+pub const SIDEBAR_WIDTH: f32 = 256.0;
+#[allow(dead_code)]
 pub const TOP_NAV_HEIGHT: f32 = 52.0;
-pub const STATUS_BAR_HEIGHT: f32 = 30.0;
+pub const STATUS_BAR_HEIGHT: f32 = 42.0;
 pub const MIN_CONTENT_GUTTER: f32 = 24.0;
 /// Every tab's content is capped to this single width and centred, so all pages share one aligned
 /// column and none stretches edge-to-edge on wide monitors; on narrower windows it fills to within
@@ -42,22 +44,92 @@ pub const UPDATE_CHECK_COOLDOWN: Duration = Duration::from_secs(15 * 60);
 /// switches, so rapidly flipping tabs does not hammer the payload repository.
 pub const SERVICE_RECHECK_COOLDOWN: Duration = Duration::from_secs(30);
 
+/// Lucide Vector Icons Unicode mappings (Private Use Area glyphs from lucide.ttf).
+#[allow(dead_code)]
+pub mod icons {
+    pub const STORE: &str = "\u{e3e4}";
+    pub const LIBRARY: &str = "\u{e100}";
+    pub const DOWNLOAD: &str = "\u{e0b2}";
+    pub const ACTIVATION: &str = "\u{e0fd}";
+    pub const TOOLS: &str = "\u{e1b1}";
+    pub const CLOUD: &str = "\u{e088}";
+    pub const SETTINGS: &str = "\u{e154}";
+    pub const UPDATES: &str = "\u{e145}";
+    pub const HELP: &str = "\u{e082}";
+    pub const SEARCH: &str = "\u{e151}";
+    pub const FLAME: &str = "\u{e0d2}";
+    pub const STAR: &str = "\u{e176}";
+    pub const SHIELD: &str = "\u{e158}";
+    pub const CHEVRON_RIGHT: &str = "\u{e06f}";
+    pub const CHEVRON_LEFT: &str = "\u{e06e}";
+    pub const CHECK: &str = "\u{e06c}";
+    pub const CLOSE: &str = "\u{e1b2}";
+    pub const PLAY: &str = "\u{e13c}";
+    pub const FOLDER: &str = "\u{e0d7}";
+    pub const SPARKLES: &str = "\u{e412}";
+}
 
 pub fn install_fonts(context: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
+
+    // 1. Plus Jakarta Sans (Primary font)
+    fonts.font_data.insert(
+        "jakarta".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../../../../assets/fonts/PlusJakartaSans-Medium.ttf"
+        ))),
+    );
+    fonts.font_data.insert(
+        "jakarta-bold".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../../../../assets/fonts/PlusJakartaSans-Bold.ttf"
+        ))),
+    );
+
+    // 2. Lucide Icons (Vector icon glyphs)
+    fonts.font_data.insert(
+        "lucide".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../../../../assets/fonts/lucide.ttf"
+        ))),
+    );
+
+    // 3. Noto Sans CJK Fallback
     fonts.font_data.insert(
         "noto-cjk".to_owned(),
         std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
             "../../../../assets/fonts/NotoSansCJKsc-Regular.otf"
         ))),
     );
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        fonts
-            .families
-            .entry(family)
-            .or_default()
-            .push("noto-cjk".to_owned());
-    }
+
+    // Prioritize Plus Jakarta Sans, then Lucide Icons, then CJK Fallback:
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "noto-cjk".to_owned());
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "lucide".to_owned());
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "jakarta".to_owned());
+
+    fonts
+        .families
+        .entry(egui::FontFamily::Monospace)
+        .or_default()
+        .push("lucide".to_owned());
+    fonts
+        .families
+        .entry(egui::FontFamily::Monospace)
+        .or_default()
+        .push("noto-cjk".to_owned());
+
     context.set_fonts(fonts);
 }
 
@@ -98,6 +170,13 @@ pub fn install_style(context: &egui::Context) {
         &mut style.visuals.widgets.open,
     ] {
         widget.corner_radius = radius;
+    }
+
+    // Ensure smallest font size is at least 14px so text is never too small
+    for (_style, font_id) in style.text_styles.iter_mut() {
+        if font_id.size < 14.0 {
+            font_id.size = 14.0;
+        }
     }
 
     // Thin, floating scrollbars with cyan glow handle on hover.

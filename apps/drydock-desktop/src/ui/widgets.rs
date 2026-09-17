@@ -1,4 +1,4 @@
-use egui::{Color32, FontId, RichText, Sense, Stroke, Vec2, Layout, Align};
+use egui::{Color32, FontId, RichText, Sense, Stroke, Vec2};
 use drydock_core::*;
 use crate::ui::theme::*;
 use crate::ui::types::*;
@@ -47,11 +47,17 @@ pub struct PillButton {
     pub label: String,
     pub kind: ButtonKind,
     pub min_size: Vec2,
+    pub padding: Option<Vec2>,
 }
 
 impl PillButton {
     pub fn min_size(mut self, size: Vec2) -> Self {
         self.min_size = size;
+        self
+    }
+
+    pub fn compact(mut self) -> Self {
+        self.padding = Some(Vec2::new(8.0, 5.0));
         self
     }
 }
@@ -61,50 +67,17 @@ pub fn primary_button(label: &str) -> PillButton {
         label: label.to_owned(),
         kind: ButtonKind::Primary,
         min_size: Vec2::ZERO,
+        padding: None,
     }
 }
 
-/// A labelled single-line text field for the Cloud provider form. `secret` masks the input.
-pub fn cloud_text_row(ui: &mut egui::Ui, label: &str, value: &mut String, secret: bool) {
-    ui.label(RichText::new(label).size(10.5).color(ACCENT));
-    ui.add_sized(
-        [ui.available_width(), 38.0],
-        egui::TextEdit::singleline(value)
-            .password(secret)
-            .margin(egui::Margin::symmetric(12, 9)),
-    );
-    ui.add_space(8.0);
-}
-
-/// A labelled folder field with a Browse button that opens a native folder picker.
-pub fn cloud_folder_row(ui: &mut egui::Ui, label: &str, hint: &str, value: &mut String) {
-    ui.label(RichText::new(label).size(10.5).color(ACCENT));
-    ui.horizontal(|ui| {
-        ui.add_sized(
-            [ui.available_width() - 96.0, 38.0],
-            egui::TextEdit::singleline(value)
-                .hint_text(hint)
-                .margin(egui::Margin::symmetric(12, 9)),
-        );
-        if ui.add(ghost_button("BROWSE")).clicked() {
-            let mut dialog = rfd::FileDialog::new().set_title(label);
-            let current = std::path::Path::new(value.trim());
-            if current.is_dir() {
-                dialog = dialog.set_directory(current);
-            }
-            if let Some(folder) = dialog.pick_folder() {
-                *value = folder.display().to_string();
-            }
-        }
-    });
-    ui.add_space(8.0);
-}
 
 pub fn ghost_button(label: &str) -> PillButton {
     PillButton {
         label: label.to_owned(),
         kind: ButtonKind::Ghost,
         min_size: Vec2::ZERO,
+        padding: None,
     }
 }
 
@@ -114,19 +87,20 @@ pub fn success_button(label: &str) -> PillButton {
         label: label.to_owned(),
         kind: ButtonKind::Success,
         min_size: Vec2::ZERO,
+        padding: None,
     }
 }
 
 impl egui::Widget for PillButton {
     fn ui(self, ui: &mut egui::Ui) -> egui::Response {
         let enabled = ui.is_enabled();
-        let font = FontId::proportional(10.5);
+        let font = FontId::proportional(14.0);
         let galley = ui
             .painter()
-            .layout_no_wrap(self.label.clone(), font, Color32::WHITE);
-        let padding = Vec2::new(16.0, 9.0);
+            .layout_no_wrap(self.label.clone(), font.clone(), Color32::WHITE);
+        let padding = self.padding.unwrap_or_else(|| Vec2::new(18.0, 9.0));
         let mut size = (galley.size() + 2.0 * padding).max(self.min_size);
-        size.y = size.y.max(32.0);
+        size.y = size.y.max(36.0);
         // Fill the allocated box when placed by `add_sized` (a justified layout).
         let layout = *ui.layout();
         if layout.main_justify || layout.cross_justify {
@@ -142,7 +116,7 @@ impl egui::Widget for PillButton {
         let (fill, stroke, text_color) = match self.kind {
             ButtonKind::Primary => (
                 lerp_color(ACCENT, ACCENT_SOFT, hover),
-                Stroke::new(1.0, lerp_color(ACCENT, Color32::WHITE, hover)),
+                Stroke::new(1.2, lerp_color(ACCENT, Color32::WHITE, hover)),
                 Color32::from_rgb(4, 14, 24),
             ),
             ButtonKind::Ghost => (
@@ -151,8 +125,8 @@ impl egui::Widget for PillButton {
                 lerp_color(TEXT, ACCENT_SOFT, hover),
             ),
             ButtonKind::Success => (
-                lerp_color(VERDIGRIS, Color32::from_rgb(60, 245, 200), hover),
-                Stroke::new(1.0, lerp_color(VERDIGRIS, Color32::WHITE, hover)),
+                lerp_color(VERDIGRIS, Color32::from_rgb(80, 255, 210), hover),
+                Stroke::new(1.2, lerp_color(VERDIGRIS, Color32::WHITE, hover)),
                 Color32::from_rgb(4, 20, 15),
             ),
         };
@@ -170,7 +144,7 @@ impl egui::Widget for PillButton {
             ui.painter().rect(rect, 10, fill, stroke, egui::StrokeKind::Inside);
             let galley = ui
                 .painter()
-                .layout_no_wrap(self.label, FontId::proportional(10.5), text_color);
+                .layout_no_wrap(self.label, font, text_color);
             let pos = rect.center() - galley.size() / 2.0;
             ui.painter().galley(pos, galley, text_color);
         }
@@ -186,16 +160,6 @@ pub fn page_heading(ui: &mut egui::Ui, title: &str) {
     ui.add(egui::Label::new(RichText::new(title).size(30.0).strong().color(TEXT)).wrap());
 }
 
-/// Lays out page content in a left-aligned column capped at `max_width`, so forms stay a readable
-/// width on wide/fullscreen windows while staying anchored to the left (the page scrollbar keeps to
-/// the window edge, and cards don't float in the middle).
-pub fn content_column(ui: &mut egui::Ui, max_width: f32, add_contents: impl FnOnce(&mut egui::Ui)) {
-    let width = ui.available_width().min(max_width);
-    ui.allocate_ui_with_layout(Vec2::new(width, 0.0), Layout::top_down(Align::Min), |ui| {
-        ui.set_width(width);
-        add_contents(ui);
-    });
-}
 
 /// A dynamic game search: a heading-sized search field over a fixed-height results list. Returns the
 /// App ID the user clicked, if any. The results box is a constant height (never resizing with the
@@ -269,7 +233,7 @@ pub fn game_search_box(
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.add_space(6.0);
-                        ui.label(RichText::new("No matching games").size(12.0).color(MUTED));
+                        ui.label(RichText::new("No matching games").size(14.0).color(MUTED));
                     });
             } else {
                 // Fixed-height rows via `show_rows` so only the visible results are laid out — this
@@ -299,7 +263,7 @@ pub fn game_search_box(
 }
 
 pub fn section_label(ui: &mut egui::Ui, label: &str) {
-    ui.label(RichText::new(label).size(10.0).strong().color(ACCENT));
+    ui.label(RichText::new(label).size(14.0).strong().color(ACCENT));
 }
 
 
@@ -322,15 +286,15 @@ pub fn pill(ui: &mut egui::Ui, text: &str, color: Color32, warning: bool) {
         .fill(lerp_color(SURFACE, color, 0.18))
         .stroke(Stroke::new(1.0, lerp_color(BORDER, color, 0.55)))
         .corner_radius(255)
-        .inner_margin(egui::Margin::symmetric(9, 4))
+        .inner_margin(egui::Margin::symmetric(10, 5))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 5.0;
                 if warning {
-                    let (rect, _) = ui.allocate_exact_size(Vec2::new(11.0, 10.0), Sense::hover());
+                    let (rect, _) = ui.allocate_exact_size(Vec2::new(13.0, 12.0), Sense::hover());
                     draw_warning_triangle(ui.painter(), rect, color);
                 }
-                ui.label(RichText::new(text).size(9.5).strong().color(color));
+                ui.label(RichText::new(text).size(14.0).strong().color(color));
             });
         });
 }
@@ -415,7 +379,7 @@ pub fn paint_remote_image(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 fallback,
-                FontId::monospace(11.0),
+                FontId::monospace(14.0),
                 MUTED,
             );
             true
@@ -465,7 +429,7 @@ pub fn paint_remote_image_cover(ui: &mut egui::Ui, rect: egui::Rect, uri: &str, 
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 "SCREENSHOT UNAVAILABLE",
-                FontId::monospace(11.0),
+                FontId::monospace(14.0),
                 MUTED,
             );
         }

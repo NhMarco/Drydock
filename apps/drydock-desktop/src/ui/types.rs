@@ -57,6 +57,7 @@ impl RateLimiter {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Page {
     Home,
+    SeeAll,
     Library,
     Details,
     Activation,
@@ -68,8 +69,27 @@ pub enum Page {
     Downloads,
 }
 
+/// Which section the "See All" page is displaying.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SeeAllSection {
+    Featured,
+    TopPicks,
+    NewReleases,
+}
+
+impl SeeAllSection {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Featured     => "Featured Games",
+            Self::TopPicks     => "Top Picks For You",
+            Self::NewReleases  => "New Releases",
+        }
+    }
+}
+
 /// The Store's sub-tabs, mirroring Steam's own storefront navigation. `DenuvoWatch` is Drydock-only:
 /// the set of games that actually need activation.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum StoreTab {
     #[default]
@@ -79,6 +99,7 @@ pub enum StoreTab {
     DenuvoWatch,
 }
 
+#[allow(dead_code)]
 impl StoreTab {
     pub const ALL: [(Self, &'static str); 4] = [
         (Self::Featured, "Featured"),
@@ -203,8 +224,14 @@ pub struct DrydockApp {
     /// Cache of the last validated draft path and its result, to avoid re-checking every frame.
     pub validated_steam_path: Option<(String, SteamDirValidation)>,
     pub selected_app: Option<u32>,
-    /// The game highlighted in the Steam-style Library rail (right-hand overview shows this one).
+    /// The game highlighted in the Library (or currently opened in modal overlay).
     pub library_selected: Option<u32>,
+    /// The App ID of the game currently opened in the Library detail modal overlay.
+    pub library_modal: Option<u32>,
+    /// Search filter query for the Library game grid.
+    pub library_search: String,
+    /// Category tab filter for the Library grid.
+    pub library_filter: LibraryFilter,
     /// The folder chosen for the "Add game to Drydock" flow; `Some` puts the Library into add-mode
     /// (pick which game the folder is), cleared when the game is added or the flow is cancelled.
     pub add_game_folder: Option<PathBuf>,
@@ -238,11 +265,17 @@ pub struct DrydockApp {
     pub store_receiver: Option<Receiver<(u32, Result<SteamStoreDetails, String>)>>,
     pub store_loading: bool,
     // Store tab (Steam-style storefront): the selected sub-tab and the live featured feed.
+    #[allow(dead_code)]
     pub store_tab: StoreTab,
     pub featured: Option<StoreFeatured>,
     pub featured_loading: bool,
     pub featured_error: Option<String>,
     pub featured_receiver: Option<Receiver<Result<StoreFeatured, String>>>,
+    pub hero_carousel_index: usize,
+    pub hero_last_scroll: Option<Instant>,
+    /// Which section the "See All" page is currently showing.
+    pub see_all_section: Option<SeeAllSection>,
+    pub notifications_open: bool,
     pub screenshot_index: usize,
     pub activation_request_code: String,
     pub activation_receiver: Option<Receiver<Result<String, String>>>,
@@ -442,8 +475,16 @@ pub struct AddGameOutcome {
     pub exe: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LibraryFilter {
+    #[default]
+    All,
+    Installed,
+    Available,
+}
+
 /// Where a Library game comes from — decides its rail group and which management buttons it gets.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LibrarySource {
     /// Steam has it installed (a Steam `appmanifest.acf`).
     SteamInstalled,
@@ -454,6 +495,7 @@ pub enum LibrarySource {
 }
 
 /// One row of the Library page: a game the user owns, with enough state to render its Play button.
+#[derive(Clone, Debug)]
 pub struct LibraryEntry {
     pub app_id: u32,
     pub name: String,
@@ -461,6 +503,10 @@ pub struct LibraryEntry {
     pub installed: bool,
     /// A remembered `.exe` for a game activated outside Steam, launched directly.
     pub launch_path: Option<String>,
+    /// Resolved root or installation folder on disk, if known.
+    pub install_dir: Option<PathBuf>,
+    /// Size on disk in bytes, if reported by manifest.
+    pub size_on_disk: Option<u64>,
     /// Which group/buttons this game belongs to.
     pub source: LibrarySource,
 }
@@ -469,6 +515,7 @@ pub struct LibraryEntry {
 /// the entries list ends).
 pub enum LibraryAction {
     /// Highlight this game in the rail (right-hand overview switches to it).
+    #[allow(dead_code)]
     Select(u32),
     Details(u32),
     Launch(u32),
@@ -489,6 +536,8 @@ pub enum LibraryAction {
     CrackDrydock(u32),
     /// Delete a Drydock-downloaded game's install folder (confirmed first).
     UninstallDrydock(u32),
+    /// Open the game's installation folder in Windows File Explorer.
+    OpenFolder(PathBuf),
 }
 
 
@@ -511,14 +560,7 @@ pub enum EmuArch {
 /// Guesses the architecture from a depot's file layout: a Windows exe/dll under a `win64`/`bin64`/
 /// `x64` path means x64, `win32`/`x86` means x86. Used as an account-free fallback when Steam
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub enum SteamServiceCardAction {
-    None,
-    Install,
-    Uninstall,
-    Reinstall,
-    Restart,
-}
+
 
 /// A compact bottom-left status card: a coloured accent dot with a title and optional detail.
 pub struct Notification {

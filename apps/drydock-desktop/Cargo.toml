@@ -26,6 +26,7 @@ image.workspace = true
 rfd.workspace = true
 # Stable disk-cache keys for the image loader (DefaultHasher is not stable across Rust releases).
 sha2.workspace = true
+open.workspace = true
 drydock-core = { path = "../../crates/drydock-core" }
 
 [dev-dependencies]

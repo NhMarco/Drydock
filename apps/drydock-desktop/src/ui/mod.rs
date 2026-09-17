@@ -174,6 +174,9 @@ impl DrydockApp {
             validated_steam_path: None,
             selected_app: None,
             library_selected: None,
+            library_modal: None,
+            library_search: String::new(),
+            library_filter: LibraryFilter::default(),
             add_game_folder: None,
             add_game_search: String::new(),
             add_game_receiver: None,
@@ -200,6 +203,10 @@ impl DrydockApp {
             featured_loading: false,
             featured_error: None,
             featured_receiver: None,
+            hero_carousel_index: 0,
+            hero_last_scroll: None,
+            see_all_section: None,
+            notifications_open: false,
             screenshot_index: 0,
             activation_request_code: String::new(),
             activation_search: String::new(),
@@ -1577,6 +1584,7 @@ impl eframe::App for DrydockApp {
         };
         context.request_repaint_after(next_frame);
         self.sidebar_nav(ui);
+        self.status_bar(ui);
         egui::CentralPanel::default()
             // No side inner-margin: the scroll area spans the full width so its bar sits at the true
             // window edge. The horizontal gutter is applied inside, around a centred content column.
@@ -1606,15 +1614,16 @@ impl eframe::App for DrydockApp {
                                 |ui| {
                                     ui.set_width(content_w);
                                     match self.page {
-                                        Page::Home => self.home_page(ui),
-                                        Page::Library => self.library_page(ui),
-                                        Page::Details => self.details_page(ui),
+                                        Page::Home     => self.home_page(ui),
+                                        Page::SeeAll   => self.home_see_all_page(ui),
+                                        Page::Library  => self.library_page(ui),
+                                        Page::Details  => self.details_page(ui),
                                         Page::Activation => self.activation_page(ui),
-                                        Page::Tools => self.tools_page(ui),
-                                        Page::Cloud => self.cloud_page(ui),
-                                        Page::Updates => self.updates_page(ui),
+                                        Page::Tools    => self.tools_page(ui),
+                                        Page::Cloud    => self.cloud_page(ui),
+                                        Page::Updates  => self.updates_page(ui),
                                         Page::Settings => self.settings_page(ui),
-                                        Page::Guide => self.guide_page(ui),
+                                        Page::Guide    => self.guide_page(ui),
                                         Page::Downloads => self.downloads_page(ui),
                                     }
                                 },
@@ -1624,6 +1633,7 @@ impl eframe::App for DrydockApp {
             });
         self.crack_removal_window(&context);
         self.entitlement_success_window(&context);
+        self.notifications_window(&context);
         self.busy_overlay(&context);
     }
 }
@@ -1642,6 +1652,15 @@ mod ui_tests {
         let focus = distribute_response_code(&mut characters, 0, " ab-12 cd34 ");
         assert_eq!(characters.concat(), "AB12CD34");
         assert_eq!(focus, 7);
+    }
+
+    #[test]
+    fn format_number_with_commas_formats_correctly() {
+        assert_eq!(format_number_with_commas(0), "0");
+        assert_eq!(format_number_with_commas(999), "999");
+        assert_eq!(format_number_with_commas(1000), "1,000");
+        assert_eq!(format_number_with_commas(70616), "70,616");
+        assert_eq!(format_number_with_commas(1234567), "1,234,567");
     }
 
     #[test]

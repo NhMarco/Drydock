@@ -1,5 +1,4 @@
 
-use drydock_core::*;
 use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Stroke, Vec2};
 
 use crate::ui::theme::*;
@@ -7,122 +6,7 @@ use crate::ui::types::*;
 use crate::ui::widgets::*;
 
 
-pub fn steam_service_card(
-    ui: &mut egui::Ui,
-    steam: &SteamDiscovery,
-    status: Option<&SteamServiceStatus>,
-    service_busy: bool,
-    restart_enabled: bool,
-) -> SteamServiceCardAction {
-    let mut action = SteamServiceCardAction::None;
-    egui::Frame::new()
-        .fill(SURFACE)
-        .stroke(Stroke::new(1.0, BORDER))
-        .corner_radius(12)
-        .inner_margin(14)
-        .show(ui, |ui| {
-            section_label(ui, "STEAM SERVICE");
-            let Some(root) = &steam.root else {
-                ui.label(RichText::new("STEAM NOT FOUND").size(15.0).strong().color(DANGER));
-                ui.label(
-                    RichText::new("Set the Steam folder in Settings.")
-                        .size(8.5)
-                        .color(MUTED),
-                );
-                return;
-            };
 
-            let (state_label, color, message, installed) = match status {
-                Some(status) => {
-                    let (label, color) = match status.state {
-                        SteamServiceState::Current => ("CURRENT", ACCENT_SOFT),
-                        SteamServiceState::UpdateAvailable => ("UPDATE AVAILABLE", ACCENT),
-                        SteamServiceState::NotInstalled => ("NOT INSTALLED", MUTED),
-                        SteamServiceState::Error => ("ATTENTION", DANGER),
-                    };
-                    let installed = status.state != SteamServiceState::NotInstalled;
-                    (label, color, status.message.clone(), installed)
-                }
-                None if service_busy => ("CHECKING…", MUTED, String::new(), false),
-                None => ("UNKNOWN", MUTED, String::new(), false),
-            };
-            ui.add_space(6.0);
-            status_pill(ui, state_label, color);
-            ui.add_space(6.0);
-            ui.add(
-                egui::Label::new(RichText::new(root.display().to_string()).size(8.5).color(MUTED)).truncate(),
-            );
-            if !message.is_empty() {
-                ui.add(egui::Label::new(RichText::new(message).size(9.0).color(MUTED)).wrap());
-            }
-            ui.add_space(10.0);
-
-            let full = ui.available_width();
-            let is_current = matches!(
-                status.map(|status| status.state),
-                Some(SteamServiceState::Current)
-            );
-            // The primary button carries the state action (Install/Update/Repair). When the
-            // service is already current there is nothing to install, so it is hidden and the
-            // Reinstall/Uninstall pair below takes over.
-            if !is_current {
-                let primary_label = status
-                    .map_or("INSTALL", SteamServiceStatus::action_text)
-                    .to_uppercase();
-                if ui
-                    .add_enabled(
-                        !service_busy,
-                        primary_button(&primary_label).min_size(Vec2::new(full, 34.0)),
-                    )
-                    .clicked()
-                {
-                    action = SteamServiceCardAction::Install;
-                }
-                if installed {
-                    ui.add_space(6.0);
-                }
-            }
-            // Reinstall and uninstall only make sense once the service is installed. They are
-            // stacked full-width so their labels never overflow the narrow sidebar card.
-            if installed {
-                if ui
-                    .add_enabled(
-                        !service_busy,
-                        ghost_button("REINSTALL").min_size(Vec2::new(full, 30.0)),
-                    )
-                    .on_hover_text("Download and reinstall the Steam Service files")
-                    .clicked()
-                {
-                    action = SteamServiceCardAction::Reinstall;
-                }
-                ui.add_space(6.0);
-                if ui
-                    .add_enabled(
-                        !service_busy,
-                        ghost_button("UNINSTALL").min_size(Vec2::new(full, 30.0)),
-                    )
-                    .on_hover_text("Remove the Steam Service files and restart Steam")
-                    .clicked()
-                {
-                    action = SteamServiceCardAction::Uninstall;
-                }
-            }
-            ui.add_space(6.0);
-            if ui
-                .add_enabled(
-                    restart_enabled && !service_busy,
-                    ghost_button("RESTART STEAM").min_size(Vec2::new(full, 30.0)),
-                )
-                .on_hover_text("Stop and restart the Steam client")
-                .clicked()
-            {
-                action = SteamServiceCardAction::Restart;
-            }
-        });
-    action
-}
-
-/// A segmented-control tab for switching How It Works walkthroughs.
 
 impl DrydockApp {
     pub fn crack_removal_window(&mut self, context: &egui::Context) {
@@ -160,18 +44,18 @@ impl DrydockApp {
                     RichText::new(format!(
                         "{count} file(s)/folder(s) will be deleted from the game folder:"
                     ))
-                    .size(10.5)
+                    .size(14.0)
                     .color(MUTED),
                 );
                 ui.add_space(6.0);
                 egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
                     for name in &names {
-                        ui.label(RichText::new(format!("•  {name}")).size(10.5).color(TEXT));
+                        ui.label(RichText::new(format!("•  {name}")).size(14.0).color(TEXT));
                     }
                     if count > names.len() {
                         ui.label(
                             RichText::new(format!("…and {} more", count - names.len()))
-                                .size(10.0)
+                                .size(14.0)
                                 .color(MUTED),
                         );
                     }
@@ -252,11 +136,125 @@ impl DrydockApp {
                         ui.vertical_centered(|ui| {
                             ui.spinner();
                             ui.add_space(12.0);
-                            ui.label(RichText::new(label).size(13.0).strong().color(TEXT));
+                            ui.label(RichText::new(label).size(15.0).strong().color(TEXT));
                         });
                     });
                 });
             });
+    }
+
+    pub fn notifications_window(&mut self, context: &egui::Context) {
+        if !self.notifications_open {
+            return;
+        }
+        let notes = self.collect_notifications();
+        let mut close = false;
+        let mut open_page: Option<Page> = None;
+
+        egui::Window::new("Notifications")
+            .open(&mut self.notifications_open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(420.0)
+            .anchor(egui::Align2::LEFT_BOTTOM, [240.0, -48.0])
+            .anchor(egui::Align2::LEFT_BOTTOM, [SIDEBAR_WIDTH + 8.0, -48.0])
+            .frame(
+                egui::Frame::new()
+                    .fill(SIDEBAR_FILL)
+                    .stroke(Stroke::new(1.0, BORDER))
+                    .corner_radius(12)
+                    .inner_margin(16),
+            )
+            .show(context, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("NOTIFICATIONS")
+                            .size(15.0)
+                            .strong()
+                            .color(ACCENT_SOFT),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let count_text = format!("{} active", notes.len());
+                        ui.label(RichText::new(count_text).size(14.0).color(MUTED));
+                    });
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                if notes.is_empty() {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(14.0);
+                        ui.label(
+                            RichText::new("No active notifications.")
+                                .size(14.0)
+                                .color(MUTED),
+                        );
+                        ui.add_space(14.0);
+                    });
+                } else {
+                    egui::ScrollArea::vertical()
+                        .max_height(280.0)
+                        .show(ui, |ui| {
+                            for (i, note) in notes.iter().enumerate() {
+                                if i > 0 {
+                                    ui.add_space(8.0);
+                                }
+                                egui::Frame::new()
+                                    .fill(SURFACE)
+                                    .stroke(Stroke::new(1.0, BORDER))
+                                    .corner_radius(8)
+                                    .inner_margin(egui::Margin::symmetric(12, 10))
+                                    .show(ui, |ui| {
+                                        ui.vertical(|ui| {
+                                            ui.horizontal(|ui| {
+                                                let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                                                ui.painter().circle_filled(dot.center(), 4.0, note.accent);
+                                                ui.add_space(4.0);
+                                                ui.label(RichText::new(&note.title).size(14.0).strong().color(TEXT));
+                                            });
+                                            if !note.detail.is_empty() {
+                                                ui.add_space(4.0);
+                                                ui.label(
+                                                    RichText::new(&note.detail)
+                                                        .size(14.0)
+                                                        .color(MUTED),
+                                                );
+                                            }
+
+                                            if note.title.contains("Steam Service") || note.title.contains("Steam not found") {
+                                                ui.add_space(6.0);
+                                                if ui.add(ghost_button("OPEN SETTINGS").min_size(Vec2::new(120.0, 26.0))).clicked() {
+                                                    open_page = Some(Page::Settings);
+                                                }
+                                            } else if note.title.contains("Download") {
+                                                ui.add_space(6.0);
+                                                if ui.add(ghost_button("OPEN DOWNLOADS").min_size(Vec2::new(120.0, 26.0))).clicked() {
+                                                    open_page = Some(Page::Downloads);
+                                                }
+                                            }
+                                        });
+                                    });
+                            }
+                        });
+                }
+
+                ui.add_space(12.0);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.add(ghost_button("DISMISS")).clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if close {
+            self.notifications_open = false;
+        }
+        if let Some(page) = open_page {
+            self.page = page;
+            self.notifications_open = false;
+        }
     }
 }
 

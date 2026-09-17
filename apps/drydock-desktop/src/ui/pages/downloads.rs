@@ -87,7 +87,7 @@ pub fn run_depot_job(
 pub fn download_mini_stat(ui: &mut egui::Ui, caption: &str, value: &str, accent: Color32) {
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 3.0;
-        ui.label(RichText::new(caption).size(9.0).strong().color(accent));
+        ui.label(RichText::new(caption).size(14.0).strong().color(accent));
         ui.label(RichText::new(value).size(15.0).strong().color(TEXT));
     });
 }
@@ -398,14 +398,80 @@ impl DrydockApp {
             }
         }
     }
+}
 
-    pub fn downloads_page(&mut self, ui: &mut egui::Ui) {
-        if back_button(ui, "Return to the store").clicked() {
-            self.page = Page::Home;
-            return;
+fn format_eta(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        let mins = secs / 60;
+        let s = secs % 60;
+        format!("{mins}m {s:02}s")
+    } else {
+        let hours = secs / 3600;
+        let mins = (secs % 3600) / 60;
+        format!("{hours}h {mins:02}m")
+    }
+}
+
+fn modern_progress_bar(ui: &mut egui::Ui, fraction: f32, width: f32, height: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    let corner = egui::CornerRadius::same((height / 2.0) as u8);
+    // Background track
+    ui.painter().rect_filled(
+        rect,
+        corner,
+        Color32::from_rgba_unmultiplied(6, 14, 24, 220),
+    );
+    ui.painter().rect_stroke(
+        rect,
+        corner,
+        Stroke::new(1.0, Color32::from_white_alpha(25)),
+        egui::StrokeKind::Inside,
+    );
+    // Filled bar
+    let fill_w = (rect.width() * fraction.clamp(0.0, 1.0)).max(0.0);
+    if fill_w > 0.0 {
+        let fill_rect = egui::Rect::from_min_size(rect.min, Vec2::new(fill_w, height));
+        ui.painter().rect_filled(
+            fill_rect,
+            corner,
+            ACCENT,
+        );
+        if fill_w > 8.0 {
+            let glow_rect = egui::Rect::from_min_size(
+                egui::pos2(fill_rect.right() - 5.0, fill_rect.top()),
+                Vec2::new(5.0, height),
+            );
+            ui.painter().rect_filled(
+                glow_rect,
+                corner,
+                Color32::from_white_alpha(140),
+            );
         }
-        ui.add_space(12.0);
-        page_heading(ui, "Downloads");
+    }
+}
+
+impl DrydockApp {
+    pub fn downloads_page(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(10.0);
+
+        // Header with live telemetry pills on the right
+        ui.horizontal(|ui| {
+            page_heading(ui, &format!("{}  Downloads", icons::DOWNLOAD));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let queue_len = self.settings.download_queue.len();
+                if queue_len > 0 {
+                    status_pill(ui, &format!("{} IN QUEUE", queue_len), MUTED);
+                }
+                if let Some(job) = self.download_job.as_ref().filter(|j| j.finished.is_none()) {
+                    if job.speed_bps > 0.0 {
+                        status_pill(ui, &format!("⚡ {}", human_bps(job.speed_bps)), ACCENT);
+                    }
+                }
+            });
+        });
         ui.add_space(16.0);
 
         // The banner shows a running/finished verify, or the current download (queue front) whether
@@ -416,25 +482,43 @@ impl DrydockApp {
             .filter(|job| job.kind == DownloadKind::Verify);
         let front = self.settings.download_queue.first().cloned();
         if verify.is_none() && front.is_none() {
-            panel(ui, |ui| {
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new("No active downloads.")
-                        .size(13.5)
-                        .strong()
-                        .color(TEXT),
-                );
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new("Open a game and press Download to fetch its files here.")
-                        .size(11.5)
-                        .color(MUTED),
-                );
-                ui.add_space(8.0);
-                if ui.add(primary_button("BROWSE THE STORE")).clicked() {
-                    self.page = Page::Home;
-                }
-            });
+            egui::Frame::new()
+                .fill(SURFACE)
+                .stroke(Stroke::new(1.0, BORDER))
+                .corner_radius(16)
+                .inner_margin(36)
+                .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(12.0);
+                        ui.label(RichText::new(icons::DOWNLOAD).size(42.0).color(ACCENT));
+                        ui.add_space(14.0);
+                        ui.label(RichText::new("No Active Downloads").size(22.0).strong().color(TEXT));
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new("Games you download or verify will appear here with live transfer speeds and progress.")
+                                .size(14.0)
+                                .color(MUTED),
+                        );
+                        ui.add_space(22.0);
+
+                        // Centered button row
+                        let btn_w = 160.0;
+                        let gap = 12.0;
+                        let total_w = btn_w * 2.0 + gap;
+                        let side_space = ((ui.available_width() - total_w) / 2.0).max(0.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(side_space);
+                            ui.spacing_mut().item_spacing = Vec2::new(gap, 0.0);
+                            if ui.add(primary_button(&format!("{}  BROWSE STORE", icons::STORE)).min_size(Vec2::new(btn_w, 40.0))).clicked() {
+                                self.page = Page::Home;
+                            }
+                            if ui.add(ghost_button(&format!("{}  VIEW LIBRARY", icons::LIBRARY)).min_size(Vec2::new(btn_w, 40.0))).clicked() {
+                                self.page = Page::Library;
+                            }
+                        });
+                        ui.add_space(12.0);
+                    });
+                });
             return;
         }
 
@@ -481,208 +565,338 @@ impl DrydockApp {
             0.0
         };
 
-        // A wide banner like Steam's Downloads header: the game's hero art fills the card, a solid
-        // info panel sits on the right (speed stats on top, the progress bar below), and the game
-        // name is set over the art on the left. The panel is opaque with a soft shadow fading into
-        // it, so there's no hard seam or stray rounded corner in the middle of the image.
+        // ── Active Download Hero Card ──────────────────────────────────────────
         let width = ui.available_width();
-        let banner_h = (width * 0.26).clamp(220.0, 290.0);
-        let corner = egui::CornerRadius::same(12);
+        let banner_h = 240.0;
+        let corner = egui::CornerRadius::same(16);
         let (rect, _) = ui.allocate_exact_size(Vec2::new(width, banner_h), Sense::hover());
-        // The `header.jpg`/`capsule` art matches the banner's art region far better than the very wide
-        // `library_hero`, so cover-fitting it fills the region with almost no crop — and no borders.
+
+        // Background container
+        ui.painter().rect_filled(rect, corner, SURFACE);
+        ui.painter().rect_stroke(rect, corner, Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
+
+        // Left Cover Art with smooth gradient fade into SURFACE
+        let art_w = (width * 0.36).clamp(240.0, 360.0);
+        let art_rect = egui::Rect::from_min_size(rect.min, Vec2::new(art_w, banner_h));
         let urls = [
             format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id}/header.jpg"),
             format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id}/capsule_616x353.jpg"),
             format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id}/library_hero.jpg"),
         ];
         let refs: Vec<&str> = urls.iter().map(String::as_str).collect();
-        // The solid banner base (also the right-hand info panel), then the game art cover-fitted into
-        // the left art region — filled edge to edge, no borders.
-        ui.painter().rect_filled(rect, corner, SURFACE);
-        let panel_w = (width * 0.5).clamp(380.0, 640.0);
-        let split_x = rect.right() - panel_w;
-        let art_rect = egui::Rect::from_min_max(rect.min, egui::pos2(split_x, rect.bottom()));
         paint_remote_image_cover_multi(
             ui,
             art_rect,
             &refs,
             egui::CornerRadius {
-                nw: 12,
+                nw: 16,
                 ne: 0,
-                sw: 12,
+                sw: 16,
                 se: 0,
             },
         );
+
+        // Horizontal gradient fade (right 45% of art_rect blends into SURFACE)
+        {
+            let fade_w = art_w * 0.45;
+            let fade_start = art_rect.right() - fade_w;
+            let strips = 20usize;
+            let painter = ui.painter().with_clip_rect(art_rect);
+            for i in 0..strips {
+                let t = (i + 1) as f32 / strips as f32;
+                let x0 = fade_start + fade_w * (i as f32 / strips as f32);
+                let x1 = fade_start + fade_w * t;
+                let a = (t.powf(1.5) * 255.0) as u8;
+                let band = egui::Rect::from_min_max(
+                    egui::pos2(x0, rect.top()),
+                    egui::pos2(x1, rect.bottom()),
+                );
+                painter.rect_filled(band, 0, Color32::from_rgba_unmultiplied(13, 27, 40, a));
+            }
+        }
+
+        // Left Art Overlays: App ID badge + Title + Status
         {
             let painter = ui.painter().with_clip_rect(art_rect);
-            // A bottom band under the name so it stays legible over any art.
-            painter.rect_filled(
-                egui::Rect::from_min_max(
-                    egui::pos2(rect.left(), rect.bottom() - 58.0),
-                    egui::pos2(split_x, rect.bottom()),
-                ),
-                egui::CornerRadius {
-                    nw: 0,
-                    ne: 0,
-                    sw: 12,
-                    se: 0,
-                },
-                Color32::from_rgba_unmultiplied(8, 12, 18, 150),
+
+            // App ID Badge (top-left)
+            let app_badge_rect = egui::Rect::from_min_size(
+                egui::pos2(rect.left() + 16.0, rect.top() + 16.0),
+                Vec2::new(76.0, 22.0),
             );
+            painter.rect_filled(app_badge_rect, egui::CornerRadius::same(5), Color32::from_black_alpha(170));
+            painter.rect_stroke(app_badge_rect, egui::CornerRadius::same(5), Stroke::new(1.0, Color32::from_white_alpha(35)), egui::StrokeKind::Inside);
             painter.text(
-                egui::pos2(rect.left() + 22.0, rect.bottom() - 19.0),
+                app_badge_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("APP {app_id}"),
+                FontId::proportional(11.0),
+                Color32::from_white_alpha(160),
+            );
+
+            // Bottom gradient for text readability
+            let bottom_fade_h = 100.0;
+            for i in 0..16usize {
+                let t = (i + 1) as f32 / 16.0;
+                let y0 = rect.bottom() - bottom_fade_h * (1.0 - (i as f32 / 16.0));
+                let y1 = rect.bottom() - bottom_fade_h * (1.0 - t);
+                let a = (t.powf(1.6) * 230.0) as u8;
+                painter.rect_filled(
+                    egui::Rect::from_min_max(egui::pos2(rect.left(), y0), egui::pos2(art_rect.right(), y1)),
+                    if i == 15 { egui::CornerRadius { sw: 16, nw: 0, ne: 0, se: 0 } } else { egui::CornerRadius::ZERO },
+                    Color32::from_rgba_unmultiplied(6, 14, 24, a),
+                );
+            }
+
+            // Status dot + label
+            let (status_text, status_color) = if is_verify {
+                if verify_finished.is_some() {
+                    ("VERIFY COMPLETE", VERDIGRIS)
+                } else {
+                    ("VERIFYING FILES", ACCENT)
+                }
+            } else if running {
+                ("DOWNLOADING", VERDIGRIS)
+            } else if error.is_some() {
+                ("DOWNLOAD ERROR", DANGER)
+            } else {
+                ("PAUSED", AMBER)
+            };
+
+            let status_y = rect.bottom() - 20.0;
+            painter.circle_filled(egui::pos2(rect.left() + 20.0, status_y), 4.0, status_color);
+            painter.text(
+                egui::pos2(rect.left() + 30.0, status_y),
+                egui::Align2::LEFT_CENTER,
+                status_text,
+                FontId::proportional(12.0),
+                status_color,
+            );
+
+            // Game Name above status
+            let title_text = ellipsize(&name, 26);
+            painter.text(
+                egui::pos2(rect.left() + 18.0, status_y - 14.0),
                 egui::Align2::LEFT_BOTTOM,
-                &name,
-                FontId::proportional(24.0),
-                Color32::WHITE,
+                title_text,
+                FontId::proportional(22.0),
+                TEXT,
             );
         }
 
-        // The info content, laid out inside the solid right-hand panel.
-        let content = egui::Rect::from_min_max(
-            egui::pos2(split_x + 26.0, rect.top() + 22.0),
-            egui::pos2(rect.right() - 26.0, rect.bottom() - 20.0),
+        // Right Info Content: Telemetry Bento + Custom Progress Bar + Controls
+        let info_rect = egui::Rect::from_min_max(
+            egui::pos2(art_rect.right() + 18.0, rect.top() + 18.0),
+            egui::pos2(rect.right() - 20.0, rect.bottom() - 18.0),
         );
-        let stage_label = if is_verify {
-            if verify_finished.is_some() {
-                "Complete"
-            } else {
-                "Files are being verified…"
-            }
-        } else if running {
-            "Data is downloading…"
-        } else if error.is_some() {
-            "Paused — download error"
-        } else {
-            "Paused"
-        };
-        ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
+
+        ui.scope_builder(egui::UiBuilder::new().max_rect(info_rect), |ui| {
+            // 1. Live Telemetry Strip (4 stats)
             ui.horizontal(|ui| {
-                download_mini_stat(ui, "NETWORK", &human_bps(speed), ACCENT_SOFT);
-                ui.add_space(24.0);
-                download_mini_stat(ui, "PEAK", &human_bps(peak), ACCENT);
-                ui.add_space(24.0);
-                download_mini_stat(ui, "TOTAL SIZE", &human_bytes(total), AMBER);
+                ui.spacing_mut().item_spacing.x = 24.0;
+                let eta_str = if running && speed > 1024.0 && total > done {
+                    let rem = total.saturating_sub(done);
+                    format!("~{}", format_eta((rem as f64 / speed) as u64))
+                } else if running {
+                    "Calculating…".to_string()
+                } else if is_verify {
+                    "—".to_string()
+                } else {
+                    "Paused".to_string()
+                };
+
+                let speed_str = if running { human_bps(speed) } else { "0 B/s".to_string() };
+                let peak_str = if peak > 0.0 { human_bps(peak) } else { "—".to_string() };
+                let progress_str = if total > 0 {
+                    format!("{} / {}", human_bytes(done), human_bytes(total))
+                } else {
+                    "—".to_string()
+                };
+
+                download_mini_stat(ui, "SPEED", &speed_str, ACCENT);
+                download_mini_stat(ui, "PEAK", &peak_str, ACCENT_SOFT);
+                download_mini_stat(ui, "TRANSFERRED", &progress_str, TEXT);
+                download_mini_stat(ui, "TIME LEFT", &eta_str, AMBER);
             });
+
             ui.add_space(14.0);
             ui.painter().line_segment(
                 [
-                    egui::pos2(content.left(), ui.cursor().top()),
-                    egui::pos2(content.right(), ui.cursor().top()),
+                    egui::pos2(info_rect.left(), ui.cursor().min.y),
+                    egui::pos2(info_rect.right(), ui.cursor().min.y),
                 ],
-                Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 30)),
+                Stroke::new(1.0, Color32::from_white_alpha(20)),
             );
             ui.add_space(14.0);
 
+            // 2. Activity status & Percentage
             ui.horizontal(|ui| {
-                ui.label(RichText::new(stage_label).size(12.5).strong().color(TEXT));
+                let pct = format!("{:.1}%", fraction * 100.0);
+                ui.label(RichText::new(pct).size(15.0).strong().color(ACCENT_SOFT));
+
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(format!("{} / {}", human_bytes(done), human_bytes(total)))
-                            .size(12.0)
-                            .color(MUTED),
-                    );
+                    if let Some(p) = &progress {
+                        if !p.current_file.is_empty() {
+                            ui.label(RichText::new(tail(&p.current_file, 42)).size(12.5).color(MUTED));
+                            ui.label(RichText::new(icons::FOLDER).size(12.0).color(MUTED));
+                        }
+                    } else if running {
+                        ui.label(RichText::new("Initializing download…").size(12.5).color(MUTED));
+                        ui.add(egui::Spinner::new().size(12.0).color(ACCENT));
+                    }
                 });
             });
             ui.add_space(8.0);
-            ui.add(
-                egui::ProgressBar::new(fraction)
-                    .desired_width(content.width())
-                    .text(format!("{:.0}%", fraction * 100.0)),
-            );
-            if let Some(p) = &progress {
-                if !p.current_file.is_empty() {
-                    ui.add_space(8.0);
-                    ui.label(RichText::new(tail(&p.current_file, 48)).size(10.5).color(MUTED));
-                }
-            } else if running {
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.add(egui::Spinner::new().size(14.0).color(ACCENT));
-                    ui.add_space(6.0);
-                    ui.label(RichText::new("Preparing…").size(11.0).color(MUTED));
-                });
-            }
-            ui.add_space(10.0);
+
+            // 3. Custom Neon Progress Bar
+            modern_progress_bar(ui, fraction, info_rect.width(), 10.0);
+
+            // 4. Action Command Bar (bottom-right aligned)
+            ui.add_space(14.0);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(8.0, 0.0);
                 if is_verify {
                     match &verify_finished {
                         Some(Ok(message)) => {
-                            if ui.add(primary_button("DISMISS")).clicked() {
+                            if ui.add(primary_button("DISMISS").compact()).clicked() {
                                 dismiss = true;
                             }
-                            ui.label(RichText::new(message).size(10.5).color(VERDIGRIS));
+                            ui.label(RichText::new(message).size(13.0).color(VERDIGRIS));
                         }
                         Some(Err(message)) => {
-                            if ui.add(primary_button("DISMISS")).clicked() {
+                            if ui.add(primary_button("DISMISS").compact()).clicked() {
                                 dismiss = true;
                             }
-                            ui.label(RichText::new(message).size(10.5).color(DANGER));
+                            ui.label(RichText::new(message).size(13.0).color(DANGER));
                         }
                         None => {
-                            if ui.add(ghost_button("CANCEL")).clicked() {
+                            if ui.add(ghost_button(&format!("{}  CANCEL", icons::CLOSE)).compact()).clicked() {
                                 cancel_clicked = true;
                             }
                         }
                     }
                 } else if running {
-                    if ui.add(ghost_button("PAUSE")).clicked() {
+                    if ui.add(ghost_button(&format!("{}  PAUSE", icons::CLOSE)).compact()).clicked() {
                         pause_clicked = true;
                     }
                     if queue_len > 1
                         && ui
-                            .add(ghost_button("TO QUEUE"))
+                            .add(ghost_button(&format!("{}  TO QUEUE", icons::CHEVRON_RIGHT)).compact())
                             .on_hover_text("Send this download to the back of the queue and start the next")
                             .clicked()
                     {
                         demote_clicked = true;
                     }
                 } else {
-                    if ui.add(ghost_button("REMOVE")).clicked() {
+                    if ui.add(ghost_button(&format!("{}  REMOVE", icons::CLOSE)).compact()).clicked() {
                         remove_clicked = true;
                     }
-                    if ui.add(primary_button("RESUME")).clicked() {
+                    if ui.add(success_button(&format!("{}  RESUME", icons::PLAY)).compact()).clicked() {
                         resume_clicked = true;
                     }
                     if let Some(message) = &error {
-                        ui.label(RichText::new(message).size(10.5).color(DANGER));
+                        ui.label(RichText::new(message).size(13.0).color(DANGER));
                     }
                 }
             });
         });
 
-        // UP NEXT: the queued downloads behind the current one, each removable.
+        // ── UP NEXT: Queued downloads behind the current one ──────────────────
         let upcoming: Vec<QueuedDownload> = self.settings.download_queue.iter().skip(1).cloned().collect();
         let mut remove_queued: Option<u32> = None;
         let mut activate_queued: Option<u32> = None;
-        ui.add_space(22.0);
-        section_label(ui, &format!("UP NEXT ({})", upcoming.len()));
+
+        ui.add_space(28.0);
+        ui.horizontal(|ui| {
+            section_label(ui, &format!("UP NEXT ({})", upcoming.len()));
+            if !upcoming.is_empty() {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(RichText::new("Downloads start automatically in order").size(12.5).color(MUTED));
+                });
+            }
+        });
         ui.add_space(10.0);
+
         if upcoming.is_empty() {
-            panel(ui, |ui| {
-                ui.label(RichText::new("No downloads are queued.").size(11.5).color(MUTED));
-            });
-        } else {
-            for item in &upcoming {
-                panel(ui, |ui| {
+            egui::Frame::new()
+                .fill(SURFACE)
+                .stroke(Stroke::new(1.0, BORDER))
+                .corner_radius(12)
+                .inner_margin(20)
+                .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(&item.name).size(12.5).color(TEXT));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.add(ghost_button("REMOVE")).clicked() {
-                                remove_queued = Some(item.app_id);
-                            }
-                            if ui
-                                .add(primary_button("ACTIVATE"))
-                                .on_hover_text("Download this now (the current one goes back into the queue)")
-                                .clicked()
-                            {
-                                activate_queued = Some(item.app_id);
-                            }
-                        });
+                        ui.label(RichText::new(icons::CHECK).size(16.0).color(MUTED));
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("No other downloads are queued.").size(14.0).color(MUTED));
                     });
                 });
-                ui.add_space(6.0);
+        } else {
+            for (idx, item) in upcoming.iter().enumerate() {
+                egui::Frame::new()
+                    .fill(SURFACE)
+                    .stroke(Stroke::new(1.0, BORDER))
+                    .corner_radius(12)
+                    .inner_margin(egui::Margin::symmetric(14, 10))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(12.0, 0.0);
+
+                            // 1. Order badge (#1, #2...)
+                            let badge_size = Vec2::new(32.0, 32.0);
+                            let (badge_rect, _) = ui.allocate_exact_size(badge_size, Sense::hover());
+                            ui.painter().rect_filled(badge_rect, egui::CornerRadius::same(6), SURFACE_RAISED);
+                            ui.painter().rect_stroke(badge_rect, egui::CornerRadius::same(6), Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
+                            ui.painter().text(
+                                badge_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                format!("#{}", idx + 1),
+                                FontId::monospace(13.0),
+                                ACCENT_SOFT,
+                            );
+
+                            // 2. Mini Game Header Thumbnail
+                            let thumb_size = Vec2::new(86.0, 40.0);
+                            let (thumb_rect, _) = ui.allocate_exact_size(thumb_size, Sense::hover());
+                            let thumb_urls = [
+                                format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{}/header.jpg", item.app_id),
+                                format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{}/capsule_231x87.jpg", item.app_id),
+                            ];
+                            let thumb_refs: Vec<&str> = thumb_urls.iter().map(String::as_str).collect();
+                            paint_remote_image_cover_multi(ui, thumb_rect, &thumb_refs, egui::CornerRadius::same(6));
+
+                            // 3. Info (Title + Subtitle)
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                ui.label(RichText::new(&item.name).size(15.0).strong().color(TEXT));
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 6.0;
+                                    ui.label(RichText::new(format!("APP {}", item.app_id)).size(12.0).color(MUTED));
+                                    ui.label(RichText::new("·").size(12.0).color(MUTED));
+                                    ui.label(RichText::new("Waiting in queue").size(12.0).color(AMBER));
+                                });
+                            });
+
+                            // 4. Action buttons (right-aligned)
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.spacing_mut().item_spacing = Vec2::new(8.0, 0.0);
+                                if ui
+                                    .add(ghost_button(&format!("{}  REMOVE", icons::CLOSE)).compact())
+                                    .on_hover_text("Remove this game from the download queue")
+                                    .clicked()
+                                {
+                                    remove_queued = Some(item.app_id);
+                                }
+                                if ui
+                                    .add(primary_button(&format!("{}  DOWNLOAD NOW", icons::DOWNLOAD)).compact())
+                                    .on_hover_text("Start downloading this game immediately (moves to front)")
+                                    .clicked()
+                                {
+                                    activate_queued = Some(item.app_id);
+                                }
+                            });
+                        });
+                    });
+                ui.add_space(8.0);
             }
         }
 
@@ -715,6 +929,4 @@ impl DrydockApp {
             self.remove_queued_download(app_id);
         }
     }
-
 }
-

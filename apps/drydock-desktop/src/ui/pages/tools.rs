@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, TryRecvError};
 
 use drydock_core::*;
-use eframe::egui::{self, RichText};
+use eframe::egui::{self, Color32, FontId, RichText, Sense, Stroke, Vec2};
 
 use crate::ui::theme::*;
 use crate::ui::types::*;
@@ -193,6 +193,39 @@ pub fn build_emu_crack(
     }
 }
 
+fn tool_segment(ui: &mut egui::Ui, label: &str, active: bool, width: f32) -> bool {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 34.0), Sense::click());
+    let hover = ui.ctx().animate_bool(response.id, response.hovered());
+    let fill = if active {
+        ACCENT
+    } else {
+        lerp_color(SURFACE, SURFACE_RAISED, hover)
+    };
+    let stroke = if active {
+        Stroke::NONE
+    } else {
+        Stroke::new(1.0, lerp_color(BORDER, ACCENT, hover))
+    };
+    ui.painter().rect(
+        rect,
+        egui::CornerRadius::same(8),
+        fill,
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        FontId::proportional(13.0),
+        if active { Color32::from_rgb(4, 14, 24) } else { TEXT },
+    );
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response.clicked()
+}
+
 #[allow(clippy::too_many_arguments)]
 
 impl DrydockApp {
@@ -284,13 +317,35 @@ impl DrydockApp {
     /// writes the chosen one. Greyed out with an explanation on non-Windows builds is not needed —
     /// language files are cross-platform — but the picker is always available here.
     pub fn tools_page(&mut self, ui: &mut egui::Ui) {
-        page_heading(ui, "TOOLS");
-        ui.add_space(22.0);
-        content_column(ui, CONTENT_WIDTH, |ui| {
-            panel(ui, |ui| {
-                section_label(ui, "CHANGE GAME LANGUAGE");
-                ui.add_space(10.0);
-                let field_width = (ui.available_width() - 132.0).max(200.0);
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            page_heading(ui, &format!("{}  Tools & Utilities", icons::TOOLS));
+        });
+        ui.add_space(18.0);
+
+        egui::Frame::new()
+            .fill(SURFACE)
+            .stroke(Stroke::new(1.0, BORDER))
+            .corner_radius(16)
+            .inner_margin(24)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(icons::SETTINGS).size(18.0).color(ACCENT));
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("GAME LANGUAGE MANAGER").size(14.0).strong().color(TEXT));
+                });
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(
+                        "Scan any game or repack folder for Steam-settings language files, \
+                         view supported languages, and apply your preferred language with a single click.",
+                    )
+                    .size(13.0)
+                    .color(MUTED),
+                );
+                ui.add_space(16.0);
+
+                let field_width = (ui.available_width() - 250.0).max(200.0);
                 ui.horizontal(|ui| {
                     ui.add_sized(
                         [field_width, 40.0],
@@ -299,35 +354,36 @@ impl DrydockApp {
                             .margin(egui::Margin::symmetric(12, 10)),
                     );
                     if ui
-                        .add_sized([120.0, 40.0], ghost_button("CHOOSE FOLDER"))
+                        .add_sized([116.0, 40.0], ghost_button(&format!("{}  BROWSE", icons::FOLDER)))
                         .clicked()
                         && let Some(folder) = rfd::FileDialog::new().pick_folder()
                     {
                         self.tools_language_path = folder.display().to_string();
                         self.load_language_from(PathBuf::from(self.tools_language_path.trim()));
                     }
+                    if ui
+                        .add_sized(
+                            [116.0, 40.0],
+                            ghost_button(&format!("{}  SCAN", icons::SEARCH)),
+                        )
+                        .on_hover_text("Search this folder (and its subfolders) for language files")
+                        .clicked()
+                    {
+                        self.load_language_from(PathBuf::from(self.tools_language_path.trim()));
+                    }
                 });
-
-                ui.add_space(12.0);
-                if ui
-                    .add_enabled(
-                        !self.tools_language_path.trim().is_empty(),
-                        ghost_button("SCAN FOLDER"),
-                    )
-                    .on_hover_text("Search this folder (and its subfolders) for language files")
-                    .clicked()
-                {
-                    self.load_language_from(PathBuf::from(self.tools_language_path.trim()));
-                }
 
                 if let Some(options) = self.language_options.clone() {
                     ui.add_space(18.0);
-                    section_label(ui, "LANGUAGE");
+                    ui.separator();
+                    ui.add_space(14.0);
+
+                    ui.label(RichText::new("SELECT TARGET LANGUAGE").size(12.5).strong().color(ACCENT));
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         egui::ComboBox::from_id_salt("tools_language_selection")
-                            .selected_text(self.language_selection.to_uppercase())
-                            .width(280.0)
+                            .selected_text(RichText::new(self.language_selection.to_uppercase()).strong())
+                            .width(260.0)
                             .show_ui(ui, |ui| {
                                 for language in &options.languages {
                                     ui.selectable_value(
@@ -337,9 +393,10 @@ impl DrydockApp {
                                     );
                                 }
                             });
+                        ui.add_space(8.0);
                         if ui
-                            .add(primary_button("APPLY LANGUAGE"))
-                            .on_hover_text("Write the selected language to this game")
+                            .add(primary_button(&format!("{}  APPLY LANGUAGE", icons::CHECK)).min_size(Vec2::new(170.0, 38.0)))
+                            .on_hover_text("Write the selected language configuration to this game")
                             .clicked()
                         {
                             self.apply_tools_language();
@@ -348,9 +405,8 @@ impl DrydockApp {
                 }
             });
 
-            ui.add_space(16.0);
-            self.emu_template_panel(ui);
-        });
+        ui.add_space(18.0);
+        self.emu_template_panel(ui);
     }
 
     /// The Tools emulator-cracker: builds a Cold Client Loader crack for a game entirely on the
@@ -359,89 +415,145 @@ impl DrydockApp {
     /// (cached in AppData), then either deploys them into the game folder or saves a ZIP. The game
     /// exe is picked so the correct architecture (x64/x86) is used.
     pub fn emu_template_panel(&mut self, ui: &mut egui::Ui) {
-        panel(ui, |ui| {
-            section_label(ui, "STEAM EMU CRACKER (LOCAL)");
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new(
-                    "Cracks a game with Cold Client Loader + gbe_fork — fully on your PC, no Steam \
-                     account. Enter the App ID — Drydock writes the steam_settings and the \
-                     matching-architecture emu DLLs, either straight into the game folder or as a \
-                     ZIP. The architecture is auto-detected from Steam; the emu binaries are \
-                     downloaded once and cached.",
-                )
-                .size(11.0)
-                .color(MUTED),
-            );
-            ui.add_space(10.0);
+        egui::Frame::new()
+            .fill(SURFACE)
+            .stroke(Stroke::new(1.0, BORDER))
+            .corner_radius(16)
+            .inner_margin(24)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(icons::SPARKLES).size(18.0).color(ACCENT));
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("STEAM EMU CRACKER (LOCAL)").size(14.0).strong().color(TEXT));
+                });
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(
+                        "Generates a standalone Cold Client Loader + gbe_fork emulator crack directly on \
+                         your machine — no Steam account needed. Resolves configurations, DLCs, \
+                         depots, achievements, and deploys matching emulator binaries.",
+                    )
+                    .size(13.0)
+                    .color(MUTED),
+                );
+                ui.add_space(18.0);
 
-            let busy = self.emu_receiver.is_some();
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("App ID").size(11.0).color(ACCENT));
+                ui.label(RichText::new("TARGET STEAM APP ID").size(12.0).strong().color(ACCENT));
+                ui.add_space(6.0);
+
+                let busy = self.emu_receiver.is_some();
+
                 ui.add_sized(
-                    [140.0, 36.0],
+                    [280.0, 38.0],
                     egui::TextEdit::singleline(&mut self.emu_appid)
                         .hint_text("e.g. 2406770")
-                        .margin(egui::Margin::symmetric(12, 8)),
+                        .font(FontId::monospace(14.0))
+                        .margin(egui::Margin::symmetric(12, 9)),
                 );
-                ui.add_space(14.0);
-                ui.label(RichText::new("Arch").size(11.0).color(ACCENT));
-                ui.selectable_value(&mut self.emu_arch, EmuArch::Auto, "Auto");
-                ui.selectable_value(&mut self.emu_arch, EmuArch::X64, "x64");
-                ui.selectable_value(&mut self.emu_arch, EmuArch::X86, "x86");
-                ui.add_space(14.0);
-                ui.label(RichText::new("Loader").size(11.0).color(ACCENT));
-                ui.selectable_value(&mut self.emu_loader_winmm, false, "version.dll");
-                ui.selectable_value(&mut self.emu_loader_winmm, true, "winmm.dll");
-            });
 
-            ui.add_space(6.0);
-            ui.checkbox(
-                &mut self.emu_reframework,
-                "Include REFramework (latest nightly dinput8.dll)",
-            )
-            .on_hover_text(
-                "Adds praydog's REFramework next to the exe — only needed by some RE-Engine / \
+                ui.add_space(16.0);
+                ui.separator();
+                ui.add_space(16.0);
+
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("ARCHITECTURE").size(12.0).strong().color(ACCENT));
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            if tool_segment(ui, "Auto Detect", self.emu_arch == EmuArch::Auto, 100.0) {
+                                self.emu_arch = EmuArch::Auto;
+                            }
+                            if tool_segment(ui, "x64", self.emu_arch == EmuArch::X64, 60.0) {
+                                self.emu_arch = EmuArch::X64;
+                            }
+                            if tool_segment(ui, "x86", self.emu_arch == EmuArch::X86, 60.0) {
+                                self.emu_arch = EmuArch::X86;
+                            }
+                        });
+                    });
+
+                    ui.add_space(32.0);
+
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("LOADER PROXY").size(12.0).strong().color(ACCENT));
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            if tool_segment(ui, "version.dll", !self.emu_loader_winmm, 100.0) {
+                                self.emu_loader_winmm = false;
+                            }
+                            if tool_segment(ui, "winmm.dll", self.emu_loader_winmm, 100.0) {
+                                self.emu_loader_winmm = true;
+                            }
+                        });
+                    });
+                });
+
+                ui.add_space(18.0);
+                ui.separator();
+                ui.add_space(14.0);
+
+                ui.checkbox(
+                    &mut self.emu_reframework,
+                    RichText::new("Include REFramework (latest nightly dinput8.dll)").size(13.5).color(TEXT),
+                )
+                .on_hover_text(
+                    "Adds praydog's REFramework next to the exe — needed by some RE-Engine / \
                      Denuvo titles. Downloaded on demand and cached.",
-            );
+                );
 
-            ui.add_space(10.0);
-            let valid = self.emu_appid.trim().parse::<u32>().is_ok_and(|id| id > 0);
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(valid && !busy, success_button("CRACK INTO GAME…"))
-                    .on_hover_text("Pick the game's install folder — the crack is deployed into it")
-                    .clicked()
-                    && let Some(folder) = rfd::FileDialog::new()
-                        .set_title("Pick the game's install folder")
-                        .pick_folder()
-                {
-                    self.start_emu_crack(EmuOutput::Deploy(folder));
-                }
-                if ui
-                    .add_enabled(valid && !busy, primary_button("SAVE AS ZIP…"))
-                    .on_hover_text("Save the crack as a ZIP with the game's folder structure")
-                    .clicked()
-                    && let Some(zip) = rfd::FileDialog::new()
-                        .add_filter("ZIP archive", &["zip"])
-                        .set_file_name(format!("{}_crack.zip", self.emu_appid.trim()))
-                        .save_file()
-                {
-                    self.start_emu_crack(EmuOutput::Zip(zip));
-                }
-                if busy {
-                    ui.add(egui::Spinner::new().size(16.0).color(ACCENT));
-                }
+                ui.add_space(20.0);
+
+                let valid = self.emu_appid.trim().parse::<u32>().is_ok_and(|id| id > 0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    if ui
+                        .add_enabled(
+                            valid && !busy,
+                            success_button(&format!("{}  CRACK INTO GAME…", icons::CHECK)).min_size(Vec2::new(210.0, 40.0)),
+                        )
+                        .on_hover_text("Pick the game's install folder — the crack is deployed directly into it")
+                        .clicked()
+                        && let Some(folder) = rfd::FileDialog::new()
+                            .set_title("Pick the game's install folder")
+                            .pick_folder()
+                    {
+                        self.start_emu_crack(EmuOutput::Deploy(folder));
+                    }
+
+                    if ui
+                        .add_enabled(
+                            valid && !busy,
+                            primary_button(&format!("{}  EXPORT AS ZIP…", icons::DOWNLOAD)).min_size(Vec2::new(190.0, 40.0)),
+                        )
+                        .on_hover_text("Save the crack files and structure as a portable ZIP archive")
+                        .clicked()
+                        && let Some(zip) = rfd::FileDialog::new()
+                            .add_filter("ZIP archive", &["zip"])
+                            .set_file_name(format!("{}_crack.zip", self.emu_appid.trim()))
+                            .save_file()
+                    {
+                        self.start_emu_crack(EmuOutput::Zip(zip));
+                    }
+
+                    if ui
+                        .add_enabled(
+                            !busy,
+                            ghost_button(&format!("{}  RE-DOWNLOAD EMU", icons::UPDATES)).min_size(Vec2::new(170.0, 40.0)),
+                        )
+                        .on_hover_text("Force a fresh download of the Cold Client Loader / gbe_fork binaries")
+                        .clicked()
+                    {
+                        self.start_emu_toolchain_refresh();
+                    }
+
+                    if busy {
+                        ui.add_space(8.0);
+                        ui.add(egui::Spinner::new().size(20.0).color(ACCENT));
+                    }
+                });
             });
-            ui.add_space(8.0);
-            if ui
-                .add_enabled(!busy, ghost_button("RE-DOWNLOAD EMU FILES"))
-                .on_hover_text("Force a fresh download of the Cold Client Loader / gbe_fork binaries")
-                .clicked()
-            {
-                self.start_emu_toolchain_refresh();
-            }
-        });
     }
 
     /// Spawns the crack job: resolve config + architecture, ensure the emu toolchain, deploy or zip.

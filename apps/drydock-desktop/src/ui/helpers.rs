@@ -56,6 +56,21 @@ pub fn human_bps(bytes_per_sec: f64) -> String {
     format!("{value:.1} {}", UNITS[unit])
 }
 
+/// Formats a count with thousands comma separators (e.g. 70616 -> "70,616").
+#[allow(dead_code)]
+pub fn format_number_with_commas(n: usize) -> String {
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    let len = s.len();
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(ch);
+    }
+    result
+}
+
 /// A compact Downloads-panel stat: an accent-coloured caption over its value.
 
 pub fn tail(text: &str, max: usize) -> String {
@@ -79,6 +94,7 @@ pub fn ellipsize(text: &str, max: usize) -> String {
     format!("{}…", kept.trim_end())
 }
 
+#[allow(dead_code)]
 pub fn group_thousands(value: usize) -> String {
     let digits = value.to_string();
     let bytes = digits.as_bytes();
