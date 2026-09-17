@@ -4,10 +4,10 @@ use std::sync::mpsc::{self, TryRecvError};
 use drydock_core::*;
 use eframe::egui::{self, Color32, RichText, Stroke};
 
+use crate::ui::helpers::*;
 use crate::ui::theme::*;
 use crate::ui::types::*;
 use crate::ui::widgets::*;
-use crate::ui::helpers::*;
 
 impl DrydockApp {
     pub fn start_update_check(&mut self, automatic: bool) {
@@ -87,7 +87,11 @@ impl DrydockApp {
                 let active_count = (self.settings.auto_update_drydock as usize)
                     + (self.settings.auto_update_unlocks as usize);
                 if !self.settings.legacy_update_blocks.is_empty() {
-                    status_pill(ui, &format!("⚠ {} Legacy Blocks", self.settings.legacy_update_blocks.len()), AMBER);
+                    status_pill(
+                        ui,
+                        &format!("⚠ {} Legacy Blocks", self.settings.legacy_update_blocks.len()),
+                        AMBER,
+                    );
                 } else if active_count == 2 {
                     status_pill(ui, "● All Auto-Updates Active", VERDIGRIS);
                 } else if active_count == 1 {

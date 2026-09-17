@@ -18,25 +18,19 @@ fn heal_git_index() {
     while let Some(current) = dir {
         let git_index = current.join(".git").join("index");
         if git_index.exists() {
-            if let Ok(meta) = std::fs::metadata(&git_index) {
-                if meta.len() == 0 {
-                    let _ = std::fs::remove_file(&git_index);
-                    let _ = std::process::Command::new("git")
-                        .args(["reset"])
-                        .current_dir(&current)
-                        .status();
-                    println!("cargo:warning=Auto-healed corrupted 0-byte .git/index file");
-                }
+            if std::fs::metadata(&git_index).is_ok_and(|meta| meta.len() == 0) {
+                let _ = std::fs::remove_file(&git_index);
+                let _ = std::process::Command::new("git")
+                    .args(["reset"])
+                    .current_dir(&current)
+                    .status();
+                println!("cargo:warning=Auto-healed corrupted 0-byte .git/index file");
             }
             break;
         }
         let git_lock = current.join(".git").join("index.lock");
-        if git_lock.exists() {
-            if let Ok(meta) = std::fs::metadata(&git_lock) {
-                if meta.len() == 0 {
-                    let _ = std::fs::remove_file(&git_lock);
-                }
-            }
+        if std::fs::metadata(&git_lock).is_ok_and(|meta| meta.len() == 0) {
+            let _ = std::fs::remove_file(&git_lock);
         }
         dir = current.parent().map(|p| p.to_path_buf());
     }

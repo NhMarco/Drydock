@@ -1,9 +1,9 @@
-use egui::{Color32, FontId, RichText, Sense, Stroke, Vec2};
-use drydock_core::*;
-use crate::ui::theme::*;
-use crate::ui::types::*;
 use crate::ui::helpers::*;
 use crate::ui::pages::home::search_result_row;
+use crate::ui::theme::*;
+use crate::ui::types::*;
+use drydock_core::*;
+use egui::{Color32, FontId, RichText, Sense, Stroke, Vec2};
 
 pub fn back_button(ui: &mut egui::Ui, tooltip: &str) -> egui::Response {
     let size = Vec2::new(34.0, 34.0);
@@ -70,7 +70,6 @@ pub fn primary_button(label: &str) -> PillButton {
         padding: None,
     }
 }
-
 
 pub fn ghost_button(label: &str) -> PillButton {
     PillButton {
@@ -141,10 +140,9 @@ impl egui::Widget for PillButton {
         };
 
         if ui.is_rect_visible(rect) {
-            ui.painter().rect(rect, 10, fill, stroke, egui::StrokeKind::Inside);
-            let galley = ui
-                .painter()
-                .layout_no_wrap(self.label, font, text_color);
+            ui.painter()
+                .rect(rect, 10, fill, stroke, egui::StrokeKind::Inside);
+            let galley = ui.painter().layout_no_wrap(self.label, font, text_color);
             let pos = rect.center() - galley.size() / 2.0;
             ui.painter().galley(pos, galley, text_color);
         }
@@ -155,18 +153,15 @@ impl egui::Widget for PillButton {
     }
 }
 
-
 pub fn page_heading(ui: &mut egui::Ui, title: &str) {
     ui.add(egui::Label::new(RichText::new(title).size(30.0).strong().color(TEXT)).wrap());
 }
-
 
 /// A dynamic game search: a heading-sized search field over a fixed-height results list. Returns the
 /// App ID the user clicked, if any. The results box is a constant height (never resizing with the
 /// match count), so neither it nor its scrollbar jumps as the query changes. When the query already
 /// equals the selected game's name the list stays collapsed (the caller has its pick).
 #[allow(clippy::too_many_arguments)]
-
 pub fn game_search_box(
     ui: &mut egui::Ui,
     id: &str,
@@ -266,7 +261,6 @@ pub fn section_label(ui: &mut egui::Ui, label: &str) {
     ui.label(RichText::new(label).size(14.0).strong().color(ACCENT));
 }
 
-
 pub fn panel(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
         .fill(SURFACE)
@@ -279,7 +273,6 @@ pub fn panel(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
             content(ui);
         });
 }
-
 
 pub fn pill(ui: &mut egui::Ui, text: &str, color: Color32, warning: bool) {
     egui::Frame::new()
@@ -345,8 +338,7 @@ pub fn toggle_switch(ui: &mut egui::Ui, on: &mut bool, accent: Color32) -> egui:
     response
 }
 
-/// Which sidebar Steam Service button the user clicked this frame.
-
+/// Paints a remote image into `rect`. Returns true if the image failed to load.
 pub fn paint_remote_image(
     ui: &mut egui::Ui,
     rect: egui::Rect,
@@ -491,4 +483,3 @@ pub fn paint_remote_image_cover_multi(
     }
     true
 }
-

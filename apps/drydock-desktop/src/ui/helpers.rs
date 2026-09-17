@@ -1,8 +1,8 @@
+use drydock_core::*;
 use egui::Color32;
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
-use drydock_core::*;
 
 use crate::ui::types::UbisoftPrepared;
 
@@ -37,11 +37,7 @@ pub fn arch_from_depot_paths(data: &DepotData) -> Option<PeArch> {
     None
 }
 
-/// Builds a Cold Client Loader crack for `app_id`: resolves the account-free config (depots from the
-/// manifest, DLCs + languages from the store, achievements from the proxy) and the architecture (from
-/// `arch_choice`, else Steam app-info, else the game exe's PE header), ensures the emu toolchain is
-/// cached, then deploys into the game folder or writes a ZIP. Returns a summary or an error message.
-
+/// Formats a byte-per-second rate as a compact human string (e.g. `9.9 MB/s`).
 pub fn human_bps(bytes_per_sec: f64) -> String {
     if bytes_per_sec < 1.0 {
         return "0 B/s".to_owned();
@@ -63,7 +59,7 @@ pub fn format_number_with_commas(n: usize) -> String {
     let mut result = String::with_capacity(s.len() + s.len() / 3);
     let len = s.len();
     for (i, ch) in s.chars().enumerate() {
-        if i > 0 && (len - i) % 3 == 0 {
+        if i > 0 && (len - i).is_multiple_of(3) {
             result.push(',');
         }
         result.push(ch);
@@ -71,8 +67,7 @@ pub fn format_number_with_commas(n: usize) -> String {
     result
 }
 
-/// A compact Downloads-panel stat: an accent-coloured caption over its value.
-
+/// Keeps only the last `max` characters of `text`, prefixing an ellipsis when it was truncated.
 pub fn tail(text: &str, max: usize) -> String {
     let count = text.chars().count();
     if count <= max {
@@ -111,8 +106,11 @@ pub fn group_thousands(value: usize) -> String {
 /// The blocking Ubisoft prepare sequence (runs on a background thread): resolve the game exe via
 /// Steam, download + install the magicfiles beside it, launch it once, capture the generated
 /// token_req.txt, and mint the machine/App-bound activation code.
-
-pub fn prepare_ubisoft(app_id: u32, chosen: &Path, settings_directory: &Path) -> Result<UbisoftPrepared, String> {
+pub fn prepare_ubisoft(
+    app_id: u32,
+    chosen: &Path,
+    settings_directory: &Path,
+) -> Result<UbisoftPrepared, String> {
     if !chosen.is_dir() {
         return Err("Select the game's folder first.".to_owned());
     }
@@ -145,8 +143,7 @@ pub fn prepare_ubisoft(app_id: u32, chosen: &Path, settings_directory: &Path) ->
     })
 }
 
-/// One segment of the Activation page's STEAM/UBISOFT/EA switcher. Returns true when clicked.
-
+/// Linearly interpolates between two colors.
 pub fn lerp_color(from: Color32, to: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
     let mix = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
@@ -157,10 +154,7 @@ pub fn lerp_color(from: Color32, to: Color32, t: f32) -> Color32 {
     )
 }
 
-/// A small rounded status chip with a translucent tint of `color`.
-/// A small rounded chip. `warning` prepends a drawn triangle. Both variants share the exact
-/// same structure so status and activation pills always render at the same height.
-
+/// Returns a comma-separated list of values, or "Not available" if empty.
 pub fn joined_or_unknown(values: &[String]) -> String {
     if values.is_empty() {
         "Not available".into()
@@ -176,7 +170,6 @@ pub fn value_or_unknown(value: &str) -> String {
         value.to_owned()
     }
 }
-
 
 pub fn is_short_activation_code(value: &str) -> bool {
     value.len() == 8 && value.chars().all(|character| character.is_ascii_alphanumeric())
@@ -203,10 +196,6 @@ pub fn distribute_response_code(characters: &mut [String; 8], start: usize, valu
     }
     next
 }
-
-/// Paints a remote image into `rect`. Returns true if the image failed to load, so callers
-/// can try to resolve a better URL.
-
 
 /// The Steam artwork URLs to try for an app, in order of preference. Steam has no single image that
 /// exists for every app — some (unreleased titles, soundtracks, some DLC) are missing the classic
@@ -340,4 +329,3 @@ pub fn added_note(name: &str, manifests: &Result<usize, String>) -> String {
         Err(_) => format!("\"{name}\" added to Steam. Depot manifests could not be cached."),
     }
 }
-

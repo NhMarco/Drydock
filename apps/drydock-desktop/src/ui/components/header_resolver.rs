@@ -1,7 +1,7 @@
+use drydock_core::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use drydock_core::*;
 
 pub enum HeaderSlot {
     /// A resolution is in flight (or queued) — don't enqueue it again.
@@ -15,6 +15,7 @@ pub enum HeaderSlot {
 /// How many resolver threads run in parallel. Each pulls App IDs off the shared queue and calls
 /// `appdetails`; the store's token-bucket limiter still caps the aggregate request rate, so this only
 
+/// parallelises latency, not store throughput.
 pub const HEADER_RESOLVER_WORKERS: usize = 4;
 
 /// Upper bound on queued-but-unstarted header resolutions.
@@ -148,5 +149,3 @@ impl HeaderResolver {
         }
     }
 }
-
-

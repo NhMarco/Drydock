@@ -1,10 +1,9 @@
-
 use drydock_core::*;
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke, Vec2};
 
+use crate::ui::helpers::*;
 use crate::ui::theme::*;
 use crate::ui::types::*;
-use crate::ui::helpers::*;
 
 pub fn sidebar_link(
     ui: &mut egui::Ui,
@@ -39,7 +38,8 @@ pub fn sidebar_link(
         )
     };
 
-    ui.painter().rect(rect, 8.0, fill, stroke, egui::StrokeKind::Inside);
+    ui.painter()
+        .rect(rect, 8.0, fill, stroke, egui::StrokeKind::Inside);
 
     // Left active indicator pill
     if active {
@@ -58,11 +58,10 @@ pub fn sidebar_link(
         lerp_color(MUTED, TEXT, hover * 0.7)
     };
     let icon_font = FontId::proportional(16.5);
-    let icon_galley = ui.painter().layout_no_wrap(icon.to_string(), icon_font, icon_color);
-    let icon_pos = egui::pos2(
-        rect.left() + 14.0,
-        rect.center().y - icon_galley.size().y / 2.0,
-    );
+    let icon_galley = ui
+        .painter()
+        .layout_no_wrap(icon.to_string(), icon_font, icon_color);
+    let icon_pos = egui::pos2(rect.left() + 14.0, rect.center().y - icon_galley.size().y / 2.0);
     ui.painter().galley(icon_pos, icon_galley, icon_color);
 
     // Label
@@ -76,17 +75,18 @@ pub fn sidebar_link(
     } else {
         FontId::proportional(14.0)
     };
-    let text_galley = ui.painter().layout_no_wrap(label.to_string(), text_font, text_color);
-    let text_pos = egui::pos2(
-        rect.left() + 42.0,
-        rect.center().y - text_galley.size().y / 2.0,
-    );
+    let text_galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), text_font, text_color);
+    let text_pos = egui::pos2(rect.left() + 42.0, rect.center().y - text_galley.size().y / 2.0);
     ui.painter().galley(text_pos, text_galley, text_color);
 
     // Optional Badge on the right
     if let Some((badge_label, badge_color)) = badge {
         let b_font = FontId::proportional(11.0);
-        let b_galley = ui.painter().layout_no_wrap(badge_label.to_string(), b_font, Color32::WHITE);
+        let b_galley = ui
+            .painter()
+            .layout_no_wrap(badge_label.to_string(), b_font, Color32::WHITE);
         let b_pad = Vec2::new(6.0, 2.0);
         let b_size = b_galley.size() + 2.0 * b_pad;
         let b_rect = egui::Rect::from_center_size(
@@ -120,12 +120,9 @@ fn sidebar_section_label(ui: &mut egui::Ui, title: &str) {
     ui.add_space(6.0);
 }
 
-/// A left-arrow back button used to return from a detail page to the list it was opened from.
-
 impl DrydockApp {
     pub fn sidebar_nav(&mut self, root: &mut egui::Ui) {
         egui::Panel::left("sidebar_nav")
-            .exact_size(232.0)
             .exact_size(SIDEBAR_WIDTH)
             .resizable(false)
             .show_separator_line(false)
@@ -140,11 +137,7 @@ impl DrydockApp {
                 ui.horizontal(|ui| {
                     let icon_size = 32.0;
                     let (rect, _) = ui.allocate_exact_size(Vec2::splat(icon_size), Sense::hover());
-                    ui.painter().rect_filled(
-                        rect,
-                        8.0,
-                        Color32::from_rgb(12, 28, 44),
-                    );
+                    ui.painter().rect_filled(rect, 8.0, Color32::from_rgb(12, 28, 44));
                     ui.painter().rect_stroke(
                         rect,
                         8.0,
@@ -157,17 +150,15 @@ impl DrydockApp {
 
                     ui.add_space(8.0);
 
-                    ui.label(
-                        RichText::new("Drydock")
-                            .size(18.0)
-                            .strong()
-                            .color(Color32::WHITE),
-                    );
+                    ui.label(RichText::new("Drydock").size(18.0).strong().color(Color32::WHITE));
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         egui::Frame::new()
                             .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 10))
-                            .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 20)))
+                            .stroke(Stroke::new(
+                                1.0,
+                                Color32::from_rgba_unmultiplied(255, 255, 255, 20),
+                            ))
                             .corner_radius(5)
                             .inner_margin(egui::Margin::symmetric(6, 2))
                             .show(ui, |ui| {
@@ -197,7 +188,10 @@ impl DrydockApp {
 
                     egui::Frame::new()
                         .fill(Color32::from_rgba_unmultiplied(12, 22, 34, 180))
-                        .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 16)))
+                        .stroke(Stroke::new(
+                            1.0,
+                            Color32::from_rgba_unmultiplied(255, 255, 255, 16),
+                        ))
                         .corner_radius(8)
                         .inner_margin(egui::Margin::symmetric(10, 7))
                         .show(ui, |ui| {
@@ -229,11 +223,12 @@ impl DrydockApp {
                                     None
                                 };
                                 for (page, icon, label, badge) in [
-                                     (Page::Home, icons::STORE, "Store", None),
-                                     (Page::Library, icons::LIBRARY, "Library", None),
-                                     (Page::Downloads, icons::DOWNLOAD, "Downloads", dl_badge),
+                                    (Page::Home, icons::STORE, "Store", None),
+                                    (Page::Library, icons::LIBRARY, "Library", None),
+                                    (Page::Downloads, icons::DOWNLOAD, "Downloads", dl_badge),
                                 ] {
-                                    let is_active = self.page == page || (page == Page::Home && self.page == Page::SeeAll);
+                                    let is_active = self.page == page
+                                        || (page == Page::Home && self.page == Page::SeeAll);
                                     if sidebar_link(ui, icon, label, is_active, badge).clicked() {
                                         self.page = page;
                                     }
@@ -245,9 +240,9 @@ impl DrydockApp {
                                 // SERVICES & TOOLS section
                                 sidebar_section_label(ui, "SERVICES & TOOLS");
                                 for (page, icon, label) in [
-                                     (Page::Activation, icons::ACTIVATION, "Activation"),
-                                     (Page::Tools, icons::TOOLS, "Tools"),
-                                     (Page::Cloud, icons::CLOUD, "Cloud"),
+                                    (Page::Activation, icons::ACTIVATION, "Activation"),
+                                    (Page::Tools, icons::TOOLS, "Tools"),
+                                    (Page::Cloud, icons::CLOUD, "Cloud"),
                                 ] {
                                     if sidebar_link(ui, icon, label, self.page == page, None).clicked() {
                                         self.page = page;
@@ -265,9 +260,9 @@ impl DrydockApp {
                                     None
                                 };
                                 for (page, icon, label, badge) in [
-                                     (Page::Settings, icons::SETTINGS, "Settings", None),
-                                     (Page::Updates, icons::UPDATES, "Updates", updates_badge),
-                                     (Page::Guide, icons::HELP, "Help & Guide", None),
+                                    (Page::Settings, icons::SETTINGS, "Settings", None),
+                                    (Page::Updates, icons::UPDATES, "Updates", updates_badge),
+                                    (Page::Guide, icons::HELP, "Help & Guide", None),
                                 ] {
                                     if sidebar_link(ui, icon, label, self.page == page, badge).clicked() {
                                         self.page = page;
@@ -332,7 +327,11 @@ impl DrydockApp {
                 if dl_resp.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
-                let fill = if dl_resp.hovered() { SURFACE_RAISED } else { SURFACE };
+                let fill = if dl_resp.hovered() {
+                    SURFACE_RAISED
+                } else {
+                    SURFACE
+                };
                 let stroke = if dl_resp.hovered() {
                     Stroke::new(1.0, ACCENT)
                 } else if is_download_active {
@@ -340,7 +339,8 @@ impl DrydockApp {
                 } else {
                     Stroke::new(1.0, BORDER)
                 };
-                ui.painter().rect(dl_rect, 8.0, fill, stroke, egui::StrokeKind::Inside);
+                ui.painter()
+                    .rect(dl_rect, 8.0, fill, stroke, egui::StrokeKind::Inside);
                 let text_pos = egui::pos2(
                     dl_rect.left() + padding.x,
                     dl_rect.center().y - galley.size().y / 2.0,
@@ -398,7 +398,11 @@ impl DrydockApp {
                                 });
                             });
 
-                        let pill_resp = ui.interact(pill_frame.response.rect, ui.id().with("notif_pill_click"), Sense::click());
+                        let pill_resp = ui.interact(
+                            pill_frame.response.rect,
+                            ui.id().with("notif_pill_click"),
+                            Sense::click(),
+                        );
                         if pill_resp.hovered() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
@@ -492,4 +496,3 @@ impl DrydockApp {
         errors
     }
 }
-

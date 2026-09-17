@@ -373,30 +373,44 @@ impl DrydockApp {
             .corner_radius(16)
             .inner_margin(20)
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    match self.guide_flow {
-                        GuideFlow::Activation => {
-                            ui.label(RichText::new("Ready to generate an activation code?").size(13.5).strong().color(TEXT));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui
-                                    .add(primary_button(&format!("{}  OPEN ACTIVATION PAGE", icons::ACTIVATION)).compact())
-                                    .clicked()
-                                {
-                                    self.page = Page::Activation;
-                                }
-                            });
-                        }
-                        GuideFlow::Fixes => {
-                            ui.label(RichText::new("Ready to explore available fixes and utilities?").size(13.5).strong().color(TEXT));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui
-                                    .add(primary_button(&format!("{}  OPEN TOOLS & UTILITIES", icons::TOOLS)).compact())
-                                    .clicked()
-                                {
-                                    self.page = Page::Tools;
-                                }
-                            });
-                        }
+                ui.horizontal(|ui| match self.guide_flow {
+                    GuideFlow::Activation => {
+                        ui.label(
+                            RichText::new("Ready to generate an activation code?")
+                                .size(13.5)
+                                .strong()
+                                .color(TEXT),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    primary_button(&format!("{}  OPEN ACTIVATION PAGE", icons::ACTIVATION))
+                                        .compact(),
+                                )
+                                .clicked()
+                            {
+                                self.page = Page::Activation;
+                            }
+                        });
+                    }
+                    GuideFlow::Fixes => {
+                        ui.label(
+                            RichText::new("Ready to explore available fixes and utilities?")
+                                .size(13.5)
+                                .strong()
+                                .color(TEXT),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    primary_button(&format!("{}  OPEN TOOLS & UTILITIES", icons::TOOLS))
+                                        .compact(),
+                                )
+                                .clicked()
+                            {
+                                self.page = Page::Tools;
+                            }
+                        });
                     }
                 });
             });

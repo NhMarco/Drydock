@@ -1,6 +1,6 @@
+use crate::ui::helpers::lerp_color;
 use egui::{Color32, Stroke, Vec2};
 use std::time::Duration;
-use crate::ui::helpers::lerp_color;
 
 pub const BACKGROUND: Color32 = Color32::from_rgb(6, 14, 23); // #060E17 Deepest oceanic void
 pub const SURFACE: Color32 = Color32::from_rgb(13, 27, 40); // #0D1B28 Dark glass surface
@@ -37,7 +37,6 @@ pub const MIN_CONTENT_GUTTER: f32 = 24.0;
 /// ratio (1920×620), used to size that banner.
 pub const CONTENT_WIDTH: f32 = 1040.0;
 pub const STORE_HERO_ASPECT: f32 = 3.1;
-
 
 pub const UPDATE_CHECK_COOLDOWN: Duration = Duration::from_secs(15 * 60);
 /// Shortest gap between network-backed Steam Service status checks triggered by page
@@ -179,7 +178,7 @@ pub fn install_style(context: &egui::Context) {
     }
 
     // Ensure smallest font size is at least 14px so text is never too small
-    for (_style, font_id) in style.text_styles.iter_mut() {
+    for font_id in style.text_styles.values_mut() {
         if font_id.size < 14.0 {
             font_id.size = 14.0;
         }
@@ -231,4 +230,3 @@ pub fn paint_backdrop(ui: &mut egui::Ui, seconds: f32) {
         Color32::from_rgba_unmultiplied(VERDIGRIS.r(), VERDIGRIS.g(), VERDIGRIS.b(), 10),
     );
 }
-

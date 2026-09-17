@@ -1,11 +1,11 @@
-use std::path::Path;
 use drydock_core::*;
 use eframe::egui::{self, Color32, FontId, RichText, Stroke, Vec2};
+use std::path::Path;
 
+use crate::ui::helpers::*;
 use crate::ui::theme::*;
 use crate::ui::types::*;
 use crate::ui::widgets::*;
-use crate::ui::helpers::*;
 
 impl DrydockApp {
     pub fn validate_steam_draft(&mut self) -> SteamDirValidation {
@@ -437,7 +437,7 @@ impl DrydockApp {
                     self.service_status.as_ref().map(|s| s.state),
                     Some(SteamServiceState::Current)
                 );
-                let installed = self.service_status.as_ref().map_or(false, |s| s.state != SteamServiceState::NotInstalled);
+                let installed = self.service_status.as_ref().is_some_and(|s| s.state != SteamServiceState::NotInstalled);
                 let message = self.service_status.as_ref().map(|s| s.message.clone()).unwrap_or_default();
                 let primary_label = self.service_status.as_ref()
                     .map_or("INSTALL SERVICE".to_string(), |s| s.action_text().to_uppercase());
@@ -718,7 +718,12 @@ impl DrydockApp {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(icons::CLOUD).size(18.0).color(ACCENT));
                     ui.add_space(4.0);
-                    ui.label(RichText::new("PROXY & SELF-HOSTING OVERRIDES").size(14.0).strong().color(TEXT));
+                    ui.label(
+                        RichText::new("PROXY & SELF-HOSTING OVERRIDES")
+                            .size(14.0)
+                            .strong()
+                            .color(TEXT),
+                    );
                 });
                 ui.add_space(6.0);
                 ui.label(
@@ -732,19 +737,20 @@ impl DrydockApp {
                 ui.add_space(16.0);
 
                 let mut changed = false;
-                let mut field = |ui: &mut egui::Ui, label: &str, hint: &str, value: &mut String, secret: bool| {
-                    ui.label(RichText::new(label).size(12.0).strong().color(ACCENT));
-                    ui.add_space(4.0);
-                    let edit = egui::TextEdit::singleline(value)
-                        .hint_text(hint)
-                        .password(secret)
-                        .font(FontId::monospace(13.0))
-                        .margin(egui::Margin::symmetric(12, 10));
-                    if ui.add_sized([ui.available_width(), 40.0], edit).changed() {
-                        changed = true;
-                    }
-                    ui.add_space(12.0);
-                };
+                let mut field =
+                    |ui: &mut egui::Ui, label: &str, hint: &str, value: &mut String, secret: bool| {
+                        ui.label(RichText::new(label).size(12.0).strong().color(ACCENT));
+                        ui.add_space(4.0);
+                        let edit = egui::TextEdit::singleline(value)
+                            .hint_text(hint)
+                            .password(secret)
+                            .font(FontId::monospace(13.0))
+                            .margin(egui::Margin::symmetric(12, 10));
+                        if ui.add_sized([ui.available_width(), 40.0], edit).changed() {
+                            changed = true;
+                        }
+                        ui.add_space(12.0);
+                    };
 
                 field(
                     ui,
@@ -778,13 +784,28 @@ impl DrydockApp {
                 ui.separator();
                 ui.add_space(14.0);
 
-                ui.label(RichText::new("RESOLVED CONFIGURATION").size(12.0).strong().color(ACCENT));
+                ui.label(
+                    RichText::new("RESOLVED CONFIGURATION")
+                        .size(12.0)
+                        .strong()
+                        .color(ACCENT),
+                );
                 ui.add_space(8.0);
 
                 for entry in drydock_core::describe_config() {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(format!("{}:", entry.name)).size(13.0).strong().color(MUTED));
-                        ui.label(RichText::new(&entry.value).size(13.0).font(FontId::monospace(12.5)).color(TEXT));
+                        ui.label(
+                            RichText::new(format!("{}:", entry.name))
+                                .size(13.0)
+                                .strong()
+                                .color(MUTED),
+                        );
+                        ui.label(
+                            RichText::new(&entry.value)
+                                .size(13.0)
+                                .font(FontId::monospace(12.5))
+                                .color(TEXT),
+                        );
                         let (source_label, source_color) = match entry.source {
                             ConfigSource::Unset => ("Unset", DANGER),
                             ConfigSource::Environment => ("Env Override", ACCENT_SOFT),
@@ -821,6 +842,4 @@ impl DrydockApp {
             }
         }
     }
-
 }
-

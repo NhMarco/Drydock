@@ -7,17 +7,17 @@ use std::time::{Duration, Instant};
 use drydock_core::*;
 use eframe::egui::{self, Align, Layout, Vec2};
 
+pub mod components;
+pub mod helpers;
+pub mod pages;
 pub mod theme;
 pub mod types;
-pub mod helpers;
 pub mod widgets;
-pub mod components;
-pub mod pages;
 
+pub use components::*;
+pub use helpers::*;
 pub use theme::*;
 pub use types::*;
-pub use helpers::*;
-pub use components::*;
 
 impl DrydockApp {
     pub fn new(context: &eframe::CreationContext<'_>) -> Self {
@@ -1795,16 +1795,16 @@ impl eframe::App for DrydockApp {
                                 |ui| {
                                     ui.set_width(content_w);
                                     match self.page {
-                                        Page::Home     => self.home_page(ui),
-                                        Page::SeeAll   => self.home_see_all_page(ui),
-                                        Page::Library  => self.library_page(ui),
-                                        Page::Details  => self.details_page(ui),
+                                        Page::Home => self.home_page(ui),
+                                        Page::SeeAll => self.home_see_all_page(ui),
+                                        Page::Library => self.library_page(ui),
+                                        Page::Details => self.details_page(ui),
                                         Page::Activation => self.activation_page(ui),
-                                        Page::Tools    => self.tools_page(ui),
-                                        Page::Cloud    => self.cloud_page(ui),
-                                        Page::Updates  => self.updates_page(ui),
+                                        Page::Tools => self.tools_page(ui),
+                                        Page::Cloud => self.cloud_page(ui),
+                                        Page::Updates => self.updates_page(ui),
                                         Page::Settings => self.settings_page(ui),
-                                        Page::Guide    => self.guide_page(ui),
+                                        Page::Guide => self.guide_page(ui),
                                         Page::Downloads => self.downloads_page(ui),
                                     }
                                 },
@@ -1818,10 +1818,6 @@ impl eframe::App for DrydockApp {
         self.busy_overlay(&context);
     }
 }
-
-/// Registers an embedded CJK font as a fallback so non-Latin game titles (Chinese, Japanese,
-/// Korean) render real glyphs instead of tofu boxes. Latin text keeps egui's default font; the
-/// fallback is only consulted for code points the primary font has no glyph for.
 
 #[cfg(test)]
 mod ui_tests {
@@ -1882,4 +1878,3 @@ mod ui_tests {
         ));
     }
 }
-

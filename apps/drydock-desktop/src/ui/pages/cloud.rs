@@ -689,6 +689,4 @@ impl DrydockApp {
             });
         ui.add_space(28.0);
     }
-
 }
-

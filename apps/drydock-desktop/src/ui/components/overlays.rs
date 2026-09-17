@@ -1,12 +1,8 @@
-
 use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Stroke, Vec2};
 
 use crate::ui::theme::*;
 use crate::ui::types::*;
 use crate::ui::widgets::*;
-
-
-
 
 impl DrydockApp {
     pub fn crack_removal_window(&mut self, context: &egui::Context) {
@@ -186,58 +182,65 @@ impl DrydockApp {
                 if notes.is_empty() {
                     ui.vertical_centered(|ui| {
                         ui.add_space(14.0);
-                        ui.label(
-                            RichText::new("No active notifications.")
-                                .size(14.0)
-                                .color(MUTED),
-                        );
+                        ui.label(RichText::new("No active notifications.").size(14.0).color(MUTED));
                         ui.add_space(14.0);
                     });
                 } else {
-                    egui::ScrollArea::vertical()
-                        .max_height(280.0)
-                        .show(ui, |ui| {
-                            for (i, note) in notes.iter().enumerate() {
-                                if i > 0 {
-                                    ui.add_space(8.0);
-                                }
-                                egui::Frame::new()
-                                    .fill(SURFACE)
-                                    .stroke(Stroke::new(1.0, BORDER))
-                                    .corner_radius(8)
-                                    .inner_margin(egui::Margin::symmetric(12, 10))
-                                    .show(ui, |ui| {
-                                        ui.vertical(|ui| {
-                                            ui.horizontal(|ui| {
-                                                let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                                                ui.painter().circle_filled(dot.center(), 4.0, note.accent);
-                                                ui.add_space(4.0);
-                                                ui.label(RichText::new(&note.title).size(14.0).strong().color(TEXT));
-                                            });
-                                            if !note.detail.is_empty() {
-                                                ui.add_space(4.0);
-                                                ui.label(
-                                                    RichText::new(&note.detail)
-                                                        .size(14.0)
-                                                        .color(MUTED),
-                                                );
-                                            }
-
-                                            if note.title.contains("Steam Service") || note.title.contains("Steam not found") {
-                                                ui.add_space(6.0);
-                                                if ui.add(ghost_button("OPEN SETTINGS").min_size(Vec2::new(120.0, 26.0))).clicked() {
-                                                    open_page = Some(Page::Settings);
-                                                }
-                                            } else if note.title.contains("Download") {
-                                                ui.add_space(6.0);
-                                                if ui.add(ghost_button("OPEN DOWNLOADS").min_size(Vec2::new(120.0, 26.0))).clicked() {
-                                                    open_page = Some(Page::Downloads);
-                                                }
-                                            }
-                                        });
-                                    });
+                    egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
+                        for (i, note) in notes.iter().enumerate() {
+                            if i > 0 {
+                                ui.add_space(8.0);
                             }
-                        });
+                            egui::Frame::new()
+                                .fill(SURFACE)
+                                .stroke(Stroke::new(1.0, BORDER))
+                                .corner_radius(8)
+                                .inner_margin(egui::Margin::symmetric(12, 10))
+                                .show(ui, |ui| {
+                                    ui.vertical(|ui| {
+                                        ui.horizontal(|ui| {
+                                            let (dot, _) =
+                                                ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                                            ui.painter().circle_filled(dot.center(), 4.0, note.accent);
+                                            ui.add_space(4.0);
+                                            ui.label(
+                                                RichText::new(&note.title).size(14.0).strong().color(TEXT),
+                                            );
+                                        });
+                                        if !note.detail.is_empty() {
+                                            ui.add_space(4.0);
+                                            ui.label(RichText::new(&note.detail).size(14.0).color(MUTED));
+                                        }
+
+                                        if note.title.contains("Steam Service")
+                                            || note.title.contains("Steam not found")
+                                        {
+                                            ui.add_space(6.0);
+                                            if ui
+                                                .add(
+                                                    ghost_button("OPEN SETTINGS")
+                                                        .min_size(Vec2::new(120.0, 26.0)),
+                                                )
+                                                .clicked()
+                                            {
+                                                open_page = Some(Page::Settings);
+                                            }
+                                        } else if note.title.contains("Download") {
+                                            ui.add_space(6.0);
+                                            if ui
+                                                .add(
+                                                    ghost_button("OPEN DOWNLOADS")
+                                                        .min_size(Vec2::new(120.0, 26.0)),
+                                                )
+                                                .clicked()
+                                            {
+                                                open_page = Some(Page::Downloads);
+                                            }
+                                        }
+                                    });
+                                });
+                        }
+                    });
                 }
 
                 ui.add_space(12.0);
@@ -257,4 +260,3 @@ impl DrydockApp {
         }
     }
 }
-

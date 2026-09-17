@@ -1,13 +1,11 @@
-
 use drydock_core::*;
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke, Vec2};
 
+use crate::ui::components::*;
+use crate::ui::helpers::*;
 use crate::ui::theme::*;
 use crate::ui::types::*;
 use crate::ui::widgets::*;
-use crate::ui::helpers::*;
-use crate::ui::components::*;
-
 
 /// Whether a catalog app passes the active Home filters.
 pub fn catalog_matches_filters(
@@ -35,7 +33,6 @@ pub fn catalog_matches_filters(
         FixFilter::Denuvo => fix_flags_by_app.contains(&entry.app_id),
     }
 }
-
 
 pub fn search_result_row(
     ui: &mut egui::Ui,
@@ -113,10 +110,7 @@ pub fn search_result_row(
     );
 
     // App ID pill badge
-    let id_rect = egui::Rect::from_min_size(
-        egui::pos2(text_x, rect.center().y + 3.0),
-        Vec2::new(56.0, 16.0),
-    );
+    let id_rect = egui::Rect::from_min_size(egui::pos2(text_x, rect.center().y + 3.0), Vec2::new(56.0, 16.0));
     painter.rect_filled(
         id_rect,
         egui::CornerRadius::same(4),
@@ -198,10 +192,21 @@ pub fn store_subtab(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Respo
         Stroke::new(1.0, lerp_color(BORDER, ACCENT, hover * 0.4))
     };
 
-    ui.painter().rect(rect, egui::CornerRadius::same(10), fill, stroke, egui::StrokeKind::Inside);
+    ui.painter().rect(
+        rect,
+        egui::CornerRadius::same(10),
+        fill,
+        stroke,
+        egui::StrokeKind::Inside,
+    );
 
-    let color = if active { ACCENT_SOFT } else { lerp_color(MUTED, TEXT, hover) };
-    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, label, font, color);
+    let color = if active {
+        ACCENT_SOFT
+    } else {
+        lerp_color(MUTED, TEXT, hover)
+    };
+    ui.painter()
+        .text(rect.center(), egui::Align2::CENTER_CENTER, label, font, color);
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -217,7 +222,8 @@ pub fn section_header(ui: &mut egui::Ui, title: &str, subtitle: Option<&str>, se
             ui.horizontal(|ui| {
                 // Accent indicator bar aligned specifically with the title text
                 let (bar_rect, _) = ui.allocate_exact_size(Vec2::new(3.5, 18.0), Sense::hover());
-                ui.painter().rect_filled(bar_rect, egui::CornerRadius::same(2), ACCENT);
+                ui.painter()
+                    .rect_filled(bar_rect, egui::CornerRadius::same(2), ACCENT);
                 ui.add_space(8.0);
                 ui.label(RichText::new(title).size(20.0).strong().color(Color32::WHITE));
             });
@@ -311,8 +317,14 @@ pub fn store_poster_card_v2(
 
     // Cover art
     let urls = [
-        format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{}/library_600x900.jpg", capsule.app_id),
-        format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{}/header.jpg", capsule.app_id),
+        format!(
+            "https://cdn.cloudflare.steamstatic.com/steam/apps/{}/library_600x900.jpg",
+            capsule.app_id
+        ),
+        format!(
+            "https://cdn.cloudflare.steamstatic.com/steam/apps/{}/header.jpg",
+            capsule.app_id
+        ),
         capsule.header_image_url.clone(),
     ];
     let refs: Vec<&str> = urls.iter().map(String::as_str).collect();
@@ -326,11 +338,18 @@ pub fn store_poster_card_v2(
     for i in 0..scrim_strips {
         let t = i as f32 / (scrim_strips - 1) as f32;
         let alpha = (200.0 * (1.0 - t).powf(1.2)) as u8;
-        if alpha == 0 { continue; }
+        if alpha == 0 {
+            continue;
+        }
         let y0 = rect.bottom() - scrim_h * ((i + 1) as f32 / scrim_strips as f32);
         let y1 = rect.bottom() - scrim_h * (i as f32 / scrim_strips as f32);
         let rnd = if i == scrim_strips - 1 {
-            egui::CornerRadius { sw: 12, se: 12, nw: 0, ne: 0 }
+            egui::CornerRadius {
+                sw: 12,
+                se: 12,
+                nw: 0,
+                ne: 0,
+            }
         } else {
             egui::CornerRadius::ZERO
         };
@@ -377,12 +396,7 @@ pub fn store_poster_card_v2(
 
 /// Old poster card — kept for compatibility with any remaining callers.
 #[allow(dead_code)]
-pub fn store_poster_card(
-    ui: &mut egui::Ui,
-    capsule: &StoreCapsule,
-    width: f32,
-    rating: &str,
-) -> bool {
+pub fn store_poster_card(ui: &mut egui::Ui, capsule: &StoreCapsule, width: f32, rating: &str) -> bool {
     store_poster_card_v2(ui, capsule, width, rating, false)
 }
 
@@ -436,7 +450,12 @@ pub fn store_banner_sized(
         let x0 = rect.left() + fade_w * (i as f32 / strips as f32);
         let x1 = rect.left() + fade_w * ((i + 1) as f32 / strips as f32);
         let round = if i == 0 {
-            egui::CornerRadius { nw: 14, sw: 14, ne: 0, se: 0 }
+            egui::CornerRadius {
+                nw: 14,
+                sw: 14,
+                ne: 0,
+                se: 0,
+            }
         } else {
             egui::CornerRadius::ZERO
         };
@@ -523,8 +542,17 @@ pub fn store_banner_sized(
     }
 
     // Secondary action button (DETAILS + icon)
-    let sec_rect = egui::Rect::from_min_size(egui::pos2(left + btn_w + 12.0, rect.bottom() - 52.0), Vec2::new(120.0, 36.0));
-    if ui.put(sec_rect, ghost_button(&format!("DETAILS  {}", icons::CHEVRON_RIGHT)).min_size(Vec2::new(120.0, 36.0))).clicked() {
+    let sec_rect = egui::Rect::from_min_size(
+        egui::pos2(left + btn_w + 12.0, rect.bottom() - 52.0),
+        Vec2::new(120.0, 36.0),
+    );
+    if ui
+        .put(
+            sec_rect,
+            ghost_button(&format!("DETAILS  {}", icons::CHEVRON_RIGHT)).min_size(Vec2::new(120.0, 36.0)),
+        )
+        .clicked()
+    {
         action = Some(StoreAction::Details(capsule.app_id));
     }
 
@@ -573,7 +601,11 @@ pub fn list_row_base(
     let text_x = thumb.right() + 16.0;
     let painter = ui.painter().with_clip_rect(rect);
     let has_meta = !meta.is_empty();
-    let title_y = if has_meta { rect.center().y - 9.0 } else { rect.center().y };
+    let title_y = if has_meta {
+        rect.center().y - 9.0
+    } else {
+        rect.center().y
+    };
     painter.text(
         egui::pos2(text_x, title_y),
         egui::Align2::LEFT_CENTER,
@@ -595,7 +627,11 @@ pub fn list_row_base(
         egui::pos2(rect.right() - right_w - 12.0, rect.center().y - 16.0),
         Vec2::new(right_w, 32.0),
     );
-    let click_right = if right_w > 0.0 { right_zone.left() - 8.0 } else { rect.right() };
+    let click_right = if right_w > 0.0 {
+        right_zone.left() - 8.0
+    } else {
+        rect.right()
+    };
     let click_rect = egui::Rect::from_min_max(rect.min, egui::pos2(click_right, rect.bottom()));
     let click = ui.interact(click_rect, hover_resp.id.with("click"), Sense::click());
     if click.hovered() {
@@ -690,7 +726,9 @@ impl DrydockApp {
         let bar_w = ui.available_width();
         let (bar_rect, bar_resp) = ui.allocate_exact_size(Vec2::new(bar_w, bar_height), Sense::click());
 
-        let hover = ui.ctx().animate_bool(bar_id, bar_resp.hovered() || is_focused || is_searching);
+        let hover = ui
+            .ctx()
+            .animate_bool(bar_id, bar_resp.hovered() || is_focused || is_searching);
 
         let border_color = if is_focused {
             ACCENT
@@ -761,7 +799,10 @@ impl DrydockApp {
                     // ESC keycap badge
                     egui::Frame::new()
                         .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 12))
-                        .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 24)))
+                        .stroke(Stroke::new(
+                            1.0,
+                            Color32::from_rgba_unmultiplied(255, 255, 255, 24),
+                        ))
                         .corner_radius(4)
                         .inner_margin(egui::Margin::symmetric(6, 2))
                         .show(ui, |ui| {
@@ -875,7 +916,6 @@ impl DrydockApp {
         let hero = available[current_index];
         let mut action = None;
 
-
         // ════════════════════════════════════════════════════════════════════════════════
         // SECTION 1 – FEATURED GAMES  (full-width hero banner + scrollable poster strip)
         // ════════════════════════════════════════════════════════════════════════════════
@@ -887,33 +927,48 @@ impl DrydockApp {
         // ── Hero banner ──────────────────────────────────────────────────────────────────
         {
             let total_w = ui.available_width();
-            let hero_h   = (total_w / 2.5).clamp(240.0, 360.0);
+            let hero_h = (total_w / 2.5).clamp(240.0, 360.0);
             let (rect, _) = ui.allocate_exact_size(Vec2::new(total_w, hero_h), Sense::hover());
             let corner = egui::CornerRadius::same(16);
 
             let urls = [
-                format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{}/library_hero.jpg", hero.app_id),
+                format!(
+                    "https://cdn.cloudflare.steamstatic.com/steam/apps/{}/library_hero.jpg",
+                    hero.app_id
+                ),
                 hero.header_image_url.clone(),
             ];
             let refs: Vec<&str> = urls.iter().map(String::as_str).collect();
             paint_remote_image_cover_multi(ui, rect, &refs, corner);
 
             let response = ui.interact(rect, ui.id().with(("hero_banner", hero.app_id)), Sense::click());
-            let hover    = ui.ctx().animate_bool(response.id, response.hovered());
-            let painter  = ui.painter().with_clip_rect(rect);
+            let hover = ui.ctx().animate_bool(response.id, response.hovered());
+            let painter = ui.painter().with_clip_rect(rect);
 
             // Left-to-right deep dark vignette (for maximum text contrast on the left side)
             let vignette_w = total_w * 0.65;
             for i in 0..36usize {
                 let t = i as f32 / 35.0;
                 let alpha = (235.0 * (1.0 - t).powf(1.4)) as u8;
-                if alpha == 0 { continue; }
+                if alpha == 0 {
+                    continue;
+                }
                 let x0 = rect.left() + vignette_w * (i as f32 / 36.0);
                 let x1 = rect.left() + vignette_w * ((i + 1) as f32 / 36.0);
-                let rnd = if i == 0 { egui::CornerRadius { nw: 16, sw: 16, ne: 0, se: 0 } } else { egui::CornerRadius::ZERO };
+                let rnd = if i == 0 {
+                    egui::CornerRadius {
+                        nw: 16,
+                        sw: 16,
+                        ne: 0,
+                        se: 0,
+                    }
+                } else {
+                    egui::CornerRadius::ZERO
+                };
                 painter.rect_filled(
                     egui::Rect::from_min_max(egui::pos2(x0, rect.top()), egui::pos2(x1, rect.bottom())),
-                    rnd, Color32::from_rgba_unmultiplied(6, 12, 20, alpha),
+                    rnd,
+                    Color32::from_rgba_unmultiplied(6, 12, 20, alpha),
                 );
             }
 
@@ -922,19 +977,34 @@ impl DrydockApp {
             for i in 0..32usize {
                 let t = i as f32 / 31.0;
                 let alpha = (210.0 * (1.0 - t).powf(1.2)) as u8;
-                if alpha == 0 { continue; }
+                if alpha == 0 {
+                    continue;
+                }
                 let y0 = rect.bottom() - grad_h * ((i + 1) as f32 / 32.0);
                 let y1 = rect.bottom() - grad_h * (i as f32 / 32.0);
-                let rnd = if i == 31 { egui::CornerRadius { sw: 16, se: 16, nw: 0, ne: 0 } } else { egui::CornerRadius::ZERO };
+                let rnd = if i == 31 {
+                    egui::CornerRadius {
+                        sw: 16,
+                        se: 16,
+                        nw: 0,
+                        ne: 0,
+                    }
+                } else {
+                    egui::CornerRadius::ZERO
+                };
                 painter.rect_filled(
                     egui::Rect::from_min_max(egui::pos2(rect.left(), y0), egui::pos2(rect.right(), y1)),
-                    rnd, Color32::from_rgba_unmultiplied(6, 12, 20, alpha),
+                    rnd,
+                    Color32::from_rgba_unmultiplied(6, 12, 20, alpha),
                 );
             }
 
-            painter.rect_stroke(rect, corner,
+            painter.rect_stroke(
+                rect,
+                corner,
                 Stroke::new(1.5, lerp_color(BORDER, ACCENT, hover * 0.8)),
-                egui::StrokeKind::Inside);
+                egui::StrokeKind::Inside,
+            );
 
             // Left content starts at rect.left() + 56.0 — COMPLETELY CLEARS THE LEFT ARROW BUTTON!
             let left = rect.left() + 56.0;
@@ -946,37 +1016,71 @@ impl DrydockApp {
             // 1. Top seller chip
             let chip_w = 175.0;
             let chip_rect = egui::Rect::from_min_size(egui::pos2(chip_x, chip_y), Vec2::new(chip_w, 28.0));
-            painter.rect_filled(chip_rect, egui::CornerRadius::same(6), Color32::from_rgba_unmultiplied(245, 158, 11, 35));
-            painter.rect_stroke(chip_rect, egui::CornerRadius::same(6), Stroke::new(1.0, Color32::from_rgba_unmultiplied(245, 158, 11, 100)), egui::StrokeKind::Inside);
-            painter.text(chip_rect.center(), egui::Align2::CENTER_CENTER,
+            painter.rect_filled(
+                chip_rect,
+                egui::CornerRadius::same(6),
+                Color32::from_rgba_unmultiplied(245, 158, 11, 35),
+            );
+            painter.rect_stroke(
+                chip_rect,
+                egui::CornerRadius::same(6),
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(245, 158, 11, 100)),
+                egui::StrokeKind::Inside,
+            );
+            painter.text(
+                chip_rect.center(),
+                egui::Align2::CENTER_CENTER,
                 format!("{}  #{} TOP SELLER", icons::FLAME, current_index + 1),
-                FontId::monospace(14.0), AMBER);
+                FontId::monospace(14.0),
+                AMBER,
+            );
 
             // Title
             let title_y = rect.top() + 74.0;
-            painter.text(egui::pos2(left, title_y),
-                egui::Align2::LEFT_TOP, &hero.name,
-                FontId::proportional(32.0), Color32::WHITE);
+            painter.text(
+                egui::pos2(left, title_y),
+                egui::Align2::LEFT_TOP,
+                &hero.name,
+                FontId::proportional(32.0),
+                Color32::WHITE,
+            );
 
             // Price / Discount Row
             let price_y = title_y + 44.0;
             let mut price_x = left;
             if hero.discount_percent > 0 {
-                let disc_rect = egui::Rect::from_min_size(egui::pos2(price_x, price_y), Vec2::new(54.0, 24.0));
+                let disc_rect =
+                    egui::Rect::from_min_size(egui::pos2(price_x, price_y), Vec2::new(54.0, 24.0));
                 painter.rect_filled(disc_rect, egui::CornerRadius::same(4), VERDIGRIS);
-                painter.text(disc_rect.center(), egui::Align2::CENTER_CENTER,
-                    format!("-{}%", hero.discount_percent), FontId::proportional(14.0), Color32::WHITE);
+                painter.text(
+                    disc_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    format!("-{}%", hero.discount_percent),
+                    FontId::proportional(14.0),
+                    Color32::WHITE,
+                );
                 price_x += 62.0;
             }
             if !hero.price.is_empty() {
-                painter.text(egui::pos2(price_x, price_y + 12.0), egui::Align2::LEFT_CENTER,
-                    &hero.price, FontId::proportional(16.0), TEXT);
+                painter.text(
+                    egui::pos2(price_x, price_y + 12.0),
+                    egui::Align2::LEFT_CENTER,
+                    &hero.price,
+                    FontId::proportional(16.0),
+                    TEXT,
+                );
             }
 
             // Action buttons bottom-left
             let btn_y = rect.bottom() - 56.0;
             let explore_rect = egui::Rect::from_min_size(egui::pos2(left, btn_y), Vec2::new(170.0, 38.0));
-            if ui.put(explore_rect, primary_button(&format!("{}  EXPLORE GAME", icons::STORE)).min_size(Vec2::new(170.0, 38.0))).clicked()
+            if ui
+                .put(
+                    explore_rect,
+                    primary_button(&format!("{}  EXPLORE GAME", icons::STORE))
+                        .min_size(Vec2::new(170.0, 38.0)),
+                )
+                .clicked()
                 || response.clicked()
             {
                 action = Some(StoreAction::Details(hero.app_id));
@@ -993,20 +1097,58 @@ impl DrydockApp {
             let lh = ui.ctx().animate_bool(la.id, la.hovered());
             let rh = ui.ctx().animate_bool(ra.id, ra.hovered());
 
-            let la_fill = lerp_color(Color32::from_rgba_unmultiplied(6, 14, 24, 180), Color32::from_rgba_unmultiplied(0, 225, 250, 45), lh);
-            let ra_fill = lerp_color(Color32::from_rgba_unmultiplied(6, 14, 24, 180), Color32::from_rgba_unmultiplied(0, 225, 250, 45), rh);
+            let la_fill = lerp_color(
+                Color32::from_rgba_unmultiplied(6, 14, 24, 180),
+                Color32::from_rgba_unmultiplied(0, 225, 250, 45),
+                lh,
+            );
+            let ra_fill = lerp_color(
+                Color32::from_rgba_unmultiplied(6, 14, 24, 180),
+                Color32::from_rgba_unmultiplied(0, 225, 250, 45),
+                rh,
+            );
             let la_stroke = Stroke::new(1.0, lerp_color(BORDER, ACCENT, lh));
             let ra_stroke = Stroke::new(1.0, lerp_color(BORDER, ACCENT, rh));
 
-            painter.rect(la_rect, egui::CornerRadius::same(19), la_fill, la_stroke, egui::StrokeKind::Inside);
-            painter.rect(ra_rect, egui::CornerRadius::same(19), ra_fill, ra_stroke, egui::StrokeKind::Inside);
+            painter.rect(
+                la_rect,
+                egui::CornerRadius::same(19),
+                la_fill,
+                la_stroke,
+                egui::StrokeKind::Inside,
+            );
+            painter.rect(
+                ra_rect,
+                egui::CornerRadius::same(19),
+                ra_fill,
+                ra_stroke,
+                egui::StrokeKind::Inside,
+            );
 
-            painter.text(la_rect.center(), egui::Align2::CENTER_CENTER, icons::CHEVRON_LEFT, FontId::proportional(20.0), lerp_color(MUTED, TEXT, lh));
-            painter.text(ra_rect.center(), egui::Align2::CENTER_CENTER, icons::CHEVRON_RIGHT, FontId::proportional(20.0), lerp_color(MUTED, TEXT, rh));
+            painter.text(
+                la_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                icons::CHEVRON_LEFT,
+                FontId::proportional(20.0),
+                lerp_color(MUTED, TEXT, lh),
+            );
+            painter.text(
+                ra_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                icons::CHEVRON_RIGHT,
+                FontId::proportional(20.0),
+                lerp_color(MUTED, TEXT, rh),
+            );
 
-            if la.hovered() || ra.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
+            if la.hovered() || ra.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
             if la.clicked() {
-                self.hero_carousel_index = if self.hero_carousel_index == 0 { available.len() - 1 } else { self.hero_carousel_index - 1 };
+                self.hero_carousel_index = if self.hero_carousel_index == 0 {
+                    available.len() - 1
+                } else {
+                    self.hero_carousel_index - 1
+                };
                 self.hero_last_scroll = Some(std::time::Instant::now());
             }
             if ra.clicked() {
@@ -1037,11 +1179,18 @@ impl DrydockApp {
             for i in start_idx..end_idx {
                 let is_cur = i == current_index;
                 let is_edge = total_items > max_visible
-                    && ((i == start_idx && start_idx > 0)
-                        || (i == end_idx - 1 && end_idx < total_items));
-                let pill_w = if is_cur { 24.0 } else if is_edge { 4.0 } else { 7.0 };
+                    && ((i == start_idx && start_idx > 0) || (i == end_idx - 1 && end_idx < total_items));
+                let pill_w = if is_cur {
+                    24.0
+                } else if is_edge {
+                    4.0
+                } else {
+                    7.0
+                };
                 total_dock_w += pill_w;
-                if i + 1 < end_idx { total_dock_w += 7.0; }
+                if i + 1 < end_idx {
+                    total_dock_w += 7.0;
+                }
             }
 
             let dock_x0 = rect.center().x - total_dock_w / 2.0;
@@ -1051,14 +1200,26 @@ impl DrydockApp {
             for i in start_idx..end_idx {
                 let is_cur = i == current_index;
                 let is_edge = total_items > max_visible
-                    && ((i == start_idx && start_idx > 0)
-                        || (i == end_idx - 1 && end_idx < total_items));
-                let pill_w = if is_cur { 24.0 } else if is_edge { 4.0 } else { 7.0 };
+                    && ((i == start_idx && start_idx > 0) || (i == end_idx - 1 && end_idx < total_items));
+                let pill_w = if is_cur {
+                    24.0
+                } else if is_edge {
+                    4.0
+                } else {
+                    7.0
+                };
                 let pill_rect = egui::Rect::from_min_size(
-                    egui::pos2(cur_x, dock_y + (pill_h - if is_edge { 4.0 } else { pill_h }) / 2.0),
+                    egui::pos2(
+                        cur_x,
+                        dock_y + (pill_h - if is_edge { 4.0 } else { pill_h }) / 2.0,
+                    ),
                     Vec2::new(pill_w, if is_edge { 4.0 } else { pill_h }),
                 );
-                let p_resp = ui.interact(pill_rect.expand(4.0), ui.id().with(("hero_dot", i)), Sense::click());
+                let p_resp = ui.interact(
+                    pill_rect.expand(4.0),
+                    ui.id().with(("hero_dot", i)),
+                    Sense::click(),
+                );
                 let p_hov = ui.ctx().animate_bool(p_resp.id, p_resp.hovered());
 
                 let col = if is_cur {
@@ -1066,10 +1227,16 @@ impl DrydockApp {
                 } else if is_edge {
                     Color32::from_rgba_unmultiplied(180, 200, 220, 50)
                 } else {
-                    lerp_color(Color32::from_rgba_unmultiplied(200, 220, 240, 70), ACCENT_SOFT, p_hov)
+                    lerp_color(
+                        Color32::from_rgba_unmultiplied(200, 220, 240, 70),
+                        ACCENT_SOFT,
+                        p_hov,
+                    )
                 };
                 painter.rect_filled(pill_rect, egui::CornerRadius::same(3), col);
-                if p_resp.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
+                if p_resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
                 if p_resp.clicked() {
                     self.hero_carousel_index = i;
                     self.hero_last_scroll = Some(std::time::Instant::now());
@@ -1077,14 +1244,18 @@ impl DrydockApp {
                 cur_x += pill_w + 7.0;
             }
 
-            if response.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
+            if response.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
         }
 
         ui.add_space(16.0);
 
         // ── Thumbnail poster strip below hero ────────────────────────────────────────────
         {
-            let ratings = ["9.8", "9.5", "9.2", "9.6", "9.0", "9.4", "8.9", "9.3", "8.7", "9.1"];
+            let ratings = [
+                "9.8", "9.5", "9.2", "9.6", "9.0", "9.4", "8.9", "9.3", "8.7", "9.1",
+            ];
             egui::ScrollArea::horizontal()
                 .id_salt("featured_strip")
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
@@ -1098,7 +1269,7 @@ impl DrydockApp {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 14.0;
                         for (idx, capsule) in available.iter().enumerate() {
-                            let rating    = ratings[idx % ratings.len()];
+                            let rating = ratings[idx % ratings.len()];
                             let is_active = idx == current_index;
                             if store_poster_card_v2(ui, capsule, 160.0, rating, is_active) {
                                 self.hero_carousel_index = idx;
@@ -1116,7 +1287,12 @@ impl DrydockApp {
         // ════════════════════════════════════════════════════════════════════════════════
         // SECTION 2 – TOP PICKS FOR YOU
         // ════════════════════════════════════════════════════════════════════════════════
-        if section_header(ui, "Top Picks For You", Some("Discover games curated only for you"), true) {
+        if section_header(
+            ui,
+            "Top Picks For You",
+            Some("Discover games curated only for you"),
+            true,
+        ) {
             self.open_see_all(SeeAllSection::TopPicks);
         }
         ui.add_space(14.0);
@@ -1133,7 +1309,9 @@ impl DrydockApp {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 14.0;
-                    let pick_ratings = ["9.7", "9.1", "8.0", "7.7", "9.5", "9.3", "8.9", "9.2", "8.6", "9.4"];
+                    let pick_ratings = [
+                        "9.7", "9.1", "8.0", "7.7", "9.5", "9.3", "8.9", "9.2", "8.6", "9.4",
+                    ];
                     for (idx, capsule) in available.iter().enumerate() {
                         let rating = pick_ratings[idx % pick_ratings.len()];
                         if store_poster_card_v2(ui, capsule, 172.0, rating, false) {
@@ -1156,7 +1334,12 @@ impl DrydockApp {
             .collect();
 
         if !new_releases.is_empty() {
-            if section_header(ui, "New Releases", Some("Fresh from the Steam top sellers feed"), true) {
+            if section_header(
+                ui,
+                "New Releases",
+                Some("Fresh from the Steam top sellers feed"),
+                true,
+            ) {
                 self.open_see_all(SeeAllSection::NewReleases);
             }
             ui.add_space(14.0);
@@ -1173,7 +1356,9 @@ impl DrydockApp {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 14.0;
-                        let nr_ratings = ["8.8", "9.3", "9.0", "8.5", "9.2", "9.6", "8.7", "9.1", "8.4", "9.4"];
+                        let nr_ratings = [
+                            "8.8", "9.3", "9.0", "8.5", "9.2", "9.6", "8.7", "9.1", "8.4", "9.4",
+                        ];
                         for (idx, capsule) in new_releases.iter().enumerate() {
                             let rating = nr_ratings[idx % nr_ratings.len()];
                             if store_poster_card_v2(ui, capsule, 172.0, rating, false) {
@@ -1191,8 +1376,8 @@ impl DrydockApp {
         // SECTION 4 – REPACKS & DENUVO WATCH
         // ════════════════════════════════════════════════════════════════════════════════
         {
-            let rc  = self.repackers_by_app.len();
-            let dc  = self.denuvo_appids.len();
+            let rc = self.repackers_by_app.len();
+            let dc = self.denuvo_appids.len();
             let sub = format!("{rc} repacks · {dc} with Denuvo");
             section_header(ui, "Repacks & Denuvo Watch", Some(sub.as_str()), false);
             ui.add_space(14.0);
@@ -1268,7 +1453,11 @@ impl DrydockApp {
             ui.horizontal(|ui| {
                 ui.add(egui::Spinner::new().size(16.0).color(ACCENT));
                 ui.add_space(8.0);
-                ui.label(RichText::new("Loading the Denuvo watch list…").size(14.0).color(MUTED));
+                ui.label(
+                    RichText::new("Loading the Denuvo watch list…")
+                        .size(14.0)
+                        .color(MUTED),
+                );
             });
             return None;
         }
@@ -1359,9 +1548,9 @@ impl DrydockApp {
         let query = self.search.trim().to_lowercase();
         let open = {
             let repack_filter = self.repack_filter.clone();
-            let fix_filter    = self.fix_filter;
-            let repackers     = &self.repackers_by_app;
-            let fix_flags     = &self.fix_flags_by_app;
+            let fix_filter = self.fix_filter;
+            let repackers = &self.repackers_by_app;
+            let fix_flags = &self.fix_flags_by_app;
             let matches: Vec<&CatalogApp> = self
                 .catalog
                 .iter()
@@ -1415,8 +1604,11 @@ impl DrydockApp {
             ui.spacing_mut().item_spacing.x = 12.0;
 
             filter_dropdown(
-                ui, "home_repack_filter", "REPACKS",
-                &self.repack_filter.label(), 168.0,
+                ui,
+                "home_repack_filter",
+                "REPACKS",
+                &self.repack_filter.label(),
+                168.0,
                 |ui| {
                     ui.selectable_value(&mut self.repack_filter, RepackFilter::Any, "Any");
                     ui.selectable_value(&mut self.repack_filter, RepackFilter::AnyRepack, "All repacks");
@@ -1430,8 +1622,11 @@ impl DrydockApp {
             );
 
             filter_dropdown(
-                ui, "home_fix_filter", "FIXES",
-                self.fix_filter.label(), 148.0,
+                ui,
+                "home_fix_filter",
+                "FIXES",
+                self.fix_filter.label(),
+                148.0,
                 |ui| {
                     ui.selectable_value(&mut self.fix_filter, FixFilter::Any, "Any");
                     ui.selectable_value(&mut self.fix_filter, FixFilter::Denuvo, "Denuvo");
@@ -1442,11 +1637,18 @@ impl DrydockApp {
                 ui.vertical(|ui| {
                     ui.add_space(17.0);
                     if ui
-                        .add(egui::Button::new(RichText::new(format!("{}  Clear", icons::CLOSE)).size(14.0).color(ACCENT)).frame(false))
+                        .add(
+                            egui::Button::new(
+                                RichText::new(format!("{}  Clear", icons::CLOSE))
+                                    .size(14.0)
+                                    .color(ACCENT),
+                            )
+                            .frame(false),
+                        )
                         .clicked()
                     {
                         self.repack_filter = RepackFilter::Any;
-                        self.fix_filter    = FixFilter::Any;
+                        self.fix_filter = FixFilter::Any;
                     }
                 });
             }
@@ -1517,7 +1719,11 @@ impl DrydockApp {
             });
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                for s in [SeeAllSection::NewReleases, SeeAllSection::TopPicks, SeeAllSection::Featured] {
+                for s in [
+                    SeeAllSection::NewReleases,
+                    SeeAllSection::TopPicks,
+                    SeeAllSection::Featured,
+                ] {
                     let is_current = s == section;
                     if store_subtab(ui, s.title(), is_current).clicked() {
                         self.see_all_section = Some(s);
@@ -1530,14 +1736,18 @@ impl DrydockApp {
         ui.add_space(24.0);
 
         let mut action = None;
-        let ratings = ["9.8", "9.5", "9.2", "9.6", "9.0", "9.4", "8.9", "9.3", "8.7", "9.1"];
+        let ratings = [
+            "9.8", "9.5", "9.2", "9.6", "9.0", "9.4", "8.9", "9.3", "8.7", "9.1",
+        ];
 
         // ── Full Grid of All Games ───────────────────────────────────────────────────
         let card_w = 160.0;
         let spacing_x = 14.0;
         let spacing_y = 16.0;
         let total_avail = ui.available_width();
-        let cols = ((total_avail + spacing_x) / (card_w + spacing_x)).floor().max(1.0) as usize;
+        let cols = ((total_avail + spacing_x) / (card_w + spacing_x))
+            .floor()
+            .max(1.0) as usize;
 
         for chunk in games.chunks(cols) {
             ui.horizontal(|ui| {
@@ -1561,4 +1771,3 @@ impl DrydockApp {
         }
     }
 }
-

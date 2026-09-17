@@ -1,11 +1,11 @@
 use egui::Color32;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant};
 
-use drydock_core::*;
 use crate::ui::theme::*;
+use drydock_core::*;
 
 pub use crate::ui::components::header_resolver::HeaderResolver;
 
@@ -79,9 +79,9 @@ pub enum SeeAllSection {
 impl SeeAllSection {
     pub fn title(self) -> &'static str {
         match self {
-            Self::Featured     => "Featured Games",
-            Self::TopPicks     => "Top Picks For You",
-            Self::NewReleases  => "New Releases",
+            Self::Featured => "Featured Games",
+            Self::TopPicks => "Top Picks For You",
+            Self::NewReleases => "New Releases",
         }
     }
 }
@@ -163,7 +163,6 @@ impl FixFilter {
         }
     }
 }
-
 
 pub struct DrydockApp {
     pub page: Page,
@@ -341,16 +340,14 @@ pub struct DrydockApp {
     pub started: Instant,
 }
 
-
 #[allow(unused_imports)]
 pub use crate::downloads::{
-    depot_install_root, installed_directory, run_depot_job, DownloadJob, DownloadKind,
-    DownloadUpdate, JobLimits,
+    DownloadJob, DownloadKind, DownloadUpdate, JobLimits, depot_install_root, installed_directory,
+    run_depot_job,
 };
 #[allow(unused_imports)]
 pub use crate::unlocks::{
-    install_own_unlock, pick_unlock_files, update_unlocks, CurrentUnlock, UnlockUpdateSweep,
-    UnlockWrites,
+    CurrentUnlock, UnlockUpdateSweep, UnlockWrites, install_own_unlock, pick_unlock_files, update_unlocks,
 };
 
 /// Outcome of the pre-activation folder check: the verified install root, and whether crack/HV
@@ -455,7 +452,6 @@ pub enum StoreAction {
     Activate(u32),
 }
 
-
 pub struct AddGameOutcome {
     pub app_id: u32,
     pub name: String,
@@ -528,7 +524,6 @@ pub enum LibraryAction {
     OpenFolder(PathBuf),
 }
 
-
 pub enum EmuOutput {
     /// Deploy the files into this game install folder (root).
     Deploy(PathBuf),
@@ -544,11 +539,6 @@ pub enum EmuArch {
     X64,
     X86,
 }
-
-/// Guesses the architecture from a depot's file layout: a Windows exe/dll under a `win64`/`bin64`/
-/// `x64` path means x64, `win32`/`x86` means x86. Used as an account-free fallback when Steam
-
-
 
 /// A compact bottom-left status card: a coloured accent dot with a title and optional detail.
 pub struct Notification {
@@ -601,7 +591,6 @@ pub struct DepotButtons {
     /// A download/verify job is currently running (buttons disabled).
     pub busy: bool,
 }
-
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[allow(dead_code)]
@@ -665,4 +654,3 @@ pub struct DetailsState {
     /// A Steam Service background operation is in progress.
     pub busy: bool,
 }
-

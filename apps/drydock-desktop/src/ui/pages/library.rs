@@ -5,10 +5,10 @@ use std::sync::mpsc::{self, TryRecvError};
 use drydock_core::*;
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke, Vec2};
 
+use crate::ui::helpers::*;
 use crate::ui::theme::*;
 use crate::ui::types::*;
 use crate::ui::widgets::*;
-use crate::ui::helpers::*;
 
 /// Dimensions for portrait library poster cards (matching Steam's 600x900 aspect ratio).
 pub const POSTER_CARD_W: f32 = 176.0;
@@ -19,23 +19,35 @@ pub fn library_poster_card(ui: &mut egui::Ui, entry: &LibraryEntry) -> bool {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(POSTER_CARD_W, POSTER_CARD_H), Sense::click());
     let hover = ui.ctx().animate_bool(resp.id, resp.hovered());
 
-    let stroke = Stroke::new(
-        1.5,
-        lerp_color(BORDER, ACCENT, hover),
-    );
+    let stroke = Stroke::new(1.5, lerp_color(BORDER, ACCENT, hover));
     let fill = lerp_color(SURFACE, SURFACE_RAISED, hover);
 
     // Card background with rounded corners
-    ui.painter().rect(rect, egui::CornerRadius::same(12), fill, stroke, egui::StrokeKind::Inside);
+    ui.painter().rect(
+        rect,
+        egui::CornerRadius::same(12),
+        fill,
+        stroke,
+        egui::StrokeKind::Inside,
+    );
 
     // Artwork area (top part of the card)
     let art_h = POSTER_CARD_H - 54.0;
     let art_rect = egui::Rect::from_min_size(rect.min, Vec2::new(POSTER_CARD_W, art_h));
 
     let urls = [
-        format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{}/library_600x900.jpg", entry.app_id),
-        format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{}/library_hero.jpg", entry.app_id),
-        format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{}/header.jpg", entry.app_id),
+        format!(
+            "https://cdn.cloudflare.steamstatic.com/steam/apps/{}/library_600x900.jpg",
+            entry.app_id
+        ),
+        format!(
+            "https://cdn.cloudflare.steamstatic.com/steam/apps/{}/library_hero.jpg",
+            entry.app_id
+        ),
+        format!(
+            "https://cdn.cloudflare.steamstatic.com/steam/apps/{}/header.jpg",
+            entry.app_id
+        ),
     ];
     let refs: Vec<&str> = urls.iter().map(String::as_str).collect();
     paint_remote_image_cover_multi(
@@ -71,7 +83,8 @@ pub fn library_poster_card(ui: &mut egui::Ui, entry: &LibraryEntry) -> bool {
 
     // Sleek dot indicator with dark backing circle
     let dot_center = egui::pos2(rect.right() - 14.0, rect.top() + 14.0);
-    ui.painter().circle_filled(dot_center, 6.0, Color32::from_rgba_unmultiplied(6, 12, 20, 210));
+    ui.painter()
+        .circle_filled(dot_center, 6.0, Color32::from_rgba_unmultiplied(6, 12, 20, 210));
     ui.painter().circle_filled(dot_center, 4.0, status_color);
 
     // Title area at bottom of card
@@ -98,9 +111,17 @@ pub fn library_poster_card(ui: &mut egui::Ui, entry: &LibraryEntry) -> bool {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         resp.on_hover_ui(|ui| {
             ui.label(RichText::new(&entry.name).size(14.0).strong().color(TEXT));
-            ui.label(RichText::new(format!("● {status_text}")).size(14.0).color(status_color));
+            ui.label(
+                RichText::new(format!("● {status_text}"))
+                    .size(14.0)
+                    .color(status_color),
+            );
             if let Some(size) = entry.size_on_disk {
-                ui.label(RichText::new(format!("Size: {}", human_bytes(size))).size(14.0).color(MUTED));
+                ui.label(
+                    RichText::new(format!("Size: {}", human_bytes(size)))
+                        .size(14.0)
+                        .color(MUTED),
+                );
             }
         });
     }
@@ -124,12 +145,9 @@ pub fn library_overview(
     // ── Hero banner ──────────────────────────────────────────────────────────
     // Build rect from the window's actual inner content origin.
     let cursor_origin = ui.cursor().min;
-    let inner_left    = ui.max_rect().left();
-    let inner_top     = cursor_origin.y;
-    let hero = egui::Rect::from_min_size(
-        egui::pos2(inner_left, inner_top),
-        Vec2::new(modal_w, hero_h),
-    );
+    let inner_left = ui.max_rect().left();
+    let inner_top = cursor_origin.y;
+    let hero = egui::Rect::from_min_size(egui::pos2(inner_left, inner_top), Vec2::new(modal_w, hero_h));
 
     // Claim layout space so subsequent widgets render below.
     ui.allocate_rect(
@@ -139,11 +157,22 @@ pub fn library_overview(
 
     // Background image
     let urls = [
-        format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{}/library_hero.jpg", entry.app_id),
-        format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{}/header.jpg", entry.app_id),
+        format!(
+            "https://cdn.cloudflare.steamstatic.com/steam/apps/{}/library_hero.jpg",
+            entry.app_id
+        ),
+        format!(
+            "https://cdn.cloudflare.steamstatic.com/steam/apps/{}/header.jpg",
+            entry.app_id
+        ),
     ];
     let refs: Vec<&str> = urls.iter().map(String::as_str).collect();
-    let corner = egui::CornerRadius { nw: 16, ne: 16, sw: 0, se: 0 };
+    let corner = egui::CornerRadius {
+        nw: 16,
+        ne: 16,
+        sw: 0,
+        se: 0,
+    };
     let hero_clip = ui.max_rect().union(hero);
     let layer_painter = ui.ctx().layer_painter(ui.layer_id()).with_clip_rect(hero_clip);
     layer_painter.rect_filled(hero, corner, SURFACE);
@@ -154,14 +183,14 @@ pub fn library_overview(
 
     // Deep gradient: covers bottom 60% of banner → fades to SURFACE
     let painter = ui.painter().with_clip_rect(hero_clip);
-    let steps   = 18;
-    let fade_h  = hero_h * 0.65;
+    let steps = 18;
+    let fade_h = hero_h * 0.65;
     for i in 0..steps {
         let t0 = i as f32 / steps as f32;
         let t1 = (i + 1) as f32 / steps as f32;
         let y0 = hero.bottom() - fade_h * (1.0 - t0);
         let y1 = hero.bottom() - fade_h * (1.0 - t1);
-        let a  = (t1.powf(1.6) * 248.0) as u8;
+        let a = (t1.powf(1.6) * 248.0) as u8;
         painter.rect_filled(
             egui::Rect::from_min_max(egui::pos2(hero.left(), y0), egui::pos2(hero.right(), y1)),
             0,
@@ -176,7 +205,9 @@ pub fn library_overview(
     // Status dot + text
     let (status_label, status_color) = match entry.source {
         LibrarySource::SteamInstalled => ("Installed via Steam", VERDIGRIS),
-        LibrarySource::DrydockInstalled if entry.launch_path.is_some() => ("Installed via Drydock · Ready", ACCENT_SOFT),
+        LibrarySource::DrydockInstalled if entry.launch_path.is_some() => {
+            ("Installed via Drydock · Ready", ACCENT_SOFT)
+        }
         LibrarySource::DrydockInstalled => ("Installed · No launcher linked", AMBER),
         LibrarySource::Available => ("Unlock Active · Ready to Install", AMBER),
     };
@@ -206,25 +237,51 @@ pub fn library_overview(
         egui::pos2(hero.left() + 14.0, hero.top() + 14.0),
         Vec2::new(78.0, 22.0),
     );
-    painter.rect_filled(badge_rect, egui::CornerRadius::same(5), Color32::from_black_alpha(160));
-    painter.rect_stroke(badge_rect, egui::CornerRadius::same(5), Stroke::new(1.0, Color32::from_white_alpha(30)), egui::StrokeKind::Middle);
-    painter.text(badge_rect.center(), egui::Align2::CENTER_CENTER, format!("APP {}", entry.app_id), egui::FontId::proportional(11.0), Color32::from_white_alpha(140));
+    painter.rect_filled(
+        badge_rect,
+        egui::CornerRadius::same(5),
+        Color32::from_black_alpha(160),
+    );
+    painter.rect_stroke(
+        badge_rect,
+        egui::CornerRadius::same(5),
+        Stroke::new(1.0, Color32::from_white_alpha(30)),
+        egui::StrokeKind::Middle,
+    );
+    painter.text(
+        badge_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        format!("APP {}", entry.app_id),
+        egui::FontId::proportional(11.0),
+        Color32::from_white_alpha(140),
+    );
 
     // Close button (top-right)
-    let cb_r  = 14.0;
-    let cb_c  = egui::pos2(hero.right() - cb_r - 14.0, hero.top() + cb_r + 12.0);
+    let cb_r = 14.0;
+    let cb_c = egui::pos2(hero.right() - cb_r - 14.0, hero.top() + cb_r + 12.0);
     let cb_id = ui.id().with("hero_close");
     let cb_rect = egui::Rect::from_center_size(cb_c, Vec2::splat(cb_r * 2.0));
     let cb_resp = ui.interact(cb_rect, cb_id, Sense::click());
     let (cb_fill, cb_stroke_col) = if cb_resp.hovered() {
-        (Color32::from_rgba_unmultiplied(210, 40, 40, 230), Color32::from_white_alpha(230))
+        (
+            Color32::from_rgba_unmultiplied(210, 40, 40, 230),
+            Color32::from_white_alpha(230),
+        )
     } else {
         (Color32::from_black_alpha(170), Color32::from_white_alpha(60))
     };
     painter.circle_filled(cb_c, cb_r, cb_fill);
     painter.circle_stroke(cb_c, cb_r, Stroke::new(1.0, cb_stroke_col));
-    painter.text(cb_c, egui::Align2::CENTER_CENTER, icons::CLOSE, egui::FontId::proportional(12.0), Color32::WHITE);
-    if cb_resp.clicked() { *close_requested = true; }
+    painter.text(
+        cb_c,
+        egui::Align2::CENTER_CENTER,
+        icons::CLOSE,
+        egui::FontId::proportional(12.0),
+        Color32::WHITE,
+    );
+    if cb_resp.clicked() {
+        *close_requested = true;
+    }
 
     // ── Body (scrollable) ────────────────────────────────────────────────────
     let body_w = modal_w - 32.0;
@@ -234,21 +291,27 @@ pub fn library_overview(
         .auto_shrink([false, false])
         .show(ui, |ui| {
             egui::Frame::new()
-                .inner_margin(egui::Margin { left: 16, right: 16, top: 16, bottom: 14 })
+                .inner_margin(egui::Margin {
+                    left: 16,
+                    right: 16,
+                    top: 16,
+                    bottom: 14,
+                })
                 .show(ui, |ui| {
                     ui.set_width(body_w);
 
                     // ── Genre tags ───────────────────────────────────────────
-                    if let Some(cat) = catalog.iter().find(|c| c.app_id == entry.app_id) {
-                        if !cat.tags.is_empty() {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
-                                for tag in cat.tags.iter().take(5) {
-                                    status_pill(ui, tag, MUTED);
-                                }
-                            });
-                            ui.add_space(14.0);
-                        }
+                    if let Some(cat) = catalog
+                        .iter()
+                        .find(|c| c.app_id == entry.app_id && !c.tags.is_empty())
+                    {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+                            for tag in cat.tags.iter().take(5) {
+                                status_pill(ui, tag, MUTED);
+                            }
+                        });
+                        ui.add_space(14.0);
                     }
 
                     // ── Action buttons ───────────────────────────────────────
@@ -264,87 +327,186 @@ pub fn library_overview(
 
                                 match entry.source {
                                     LibrarySource::Available => {
-                                        if ui.add(primary_button(&format!("{}  INSTALL", icons::DOWNLOAD)).compact()).clicked() {
+                                        if ui
+                                            .add(
+                                                primary_button(&format!("{}  INSTALL", icons::DOWNLOAD))
+                                                    .compact(),
+                                            )
+                                            .clicked()
+                                        {
                                             click(LibraryAction::InstallSteam(entry.app_id));
                                         }
-                                        if ui.add(ghost_button(&format!("{}  UPDATE LUA", icons::UPDATES)).compact())
-                                            .on_hover_text("Re-fetch and re-install the unlock Lua").clicked() {
+                                        if ui
+                                            .add(
+                                                ghost_button(&format!("{}  UPDATE LUA", icons::UPDATES))
+                                                    .compact(),
+                                            )
+                                            .on_hover_text("Re-fetch and re-install the unlock Lua")
+                                            .clicked()
+                                        {
                                             click(LibraryAction::UpdateLua(entry.app_id));
                                         }
-                                        if ui.add(ghost_button(&format!("{}  STORE", icons::STORE)).compact()).clicked() {
+                                        if ui
+                                            .add(ghost_button(&format!("{}  STORE", icons::STORE)).compact())
+                                            .clicked()
+                                        {
                                             click(LibraryAction::Details(entry.app_id));
                                         }
-                                        if ui.add(ghost_button(&format!("{}  REMOVE LUA", icons::CLOSE)).compact())
-                                            .on_hover_text("Delete the unlock Lua from Steam").clicked() {
+                                        if ui
+                                            .add(
+                                                ghost_button(&format!("{}  REMOVE LUA", icons::CLOSE))
+                                                    .compact(),
+                                            )
+                                            .on_hover_text("Delete the unlock Lua from Steam")
+                                            .clicked()
+                                        {
                                             click(LibraryAction::RemoveLua(entry.app_id));
                                         }
                                     }
                                     LibrarySource::SteamInstalled => {
-                                        if ui.add(success_button(&format!("{}  PLAY", icons::PLAY)).compact()).clicked() {
+                                        if ui
+                                            .add(success_button(&format!("{}  PLAY", icons::PLAY)).compact())
+                                            .clicked()
+                                        {
                                             click(LibraryAction::Launch(entry.app_id));
                                         }
                                         if let Some(dir) = &entry.install_dir {
-                                            if ui.add(ghost_button(&format!("{}  BROWSE", icons::FOLDER)).compact())
-                                                .on_hover_text("Open installation folder").clicked() {
+                                            let clicked = ui
+                                                .add(
+                                                    ghost_button(&format!("{}  BROWSE", icons::FOLDER))
+                                                        .compact(),
+                                                )
+                                                .on_hover_text("Open installation folder")
+                                                .clicked();
+                                            if clicked {
                                                 click(LibraryAction::OpenFolder(dir.clone()));
                                             }
                                         }
-                                        if ui.add(ghost_button(&format!("{}  STORE", icons::STORE)).compact())
-                                            .on_hover_text("Open Steam Store page").clicked() {
+                                        if ui
+                                            .add(ghost_button(&format!("{}  STORE", icons::STORE)).compact())
+                                            .on_hover_text("Open Steam Store page")
+                                            .clicked()
+                                        {
                                             click(LibraryAction::Details(entry.app_id));
                                         }
-                                        if ui.add(ghost_button(&format!("{}  UPDATE LUA", icons::UPDATES)).compact())
-                                            .on_hover_text("Re-fetch and re-install the unlock Lua").clicked() {
+                                        if ui
+                                            .add(
+                                                ghost_button(&format!("{}  UPDATE LUA", icons::UPDATES))
+                                                    .compact(),
+                                            )
+                                            .on_hover_text("Re-fetch and re-install the unlock Lua")
+                                            .clicked()
+                                        {
                                             click(LibraryAction::UpdateLua(entry.app_id));
                                         }
-                                        if ui.add(ghost_button("REMOVE LUA").compact())
-                                            .on_hover_text("Delete the unlock Lua from Steam").clicked() {
+                                        if ui
+                                            .add(ghost_button("REMOVE LUA").compact())
+                                            .on_hover_text("Delete the unlock Lua from Steam")
+                                            .clicked()
+                                        {
                                             click(LibraryAction::RemoveLua(entry.app_id));
                                         }
-                                        if ui.add(ghost_button(&format!("{}  UNINSTALL", icons::CLOSE)).compact())
-                                            .on_hover_text("Ask Steam to uninstall the game").clicked() {
+                                        if ui
+                                            .add(
+                                                ghost_button(&format!("{}  UNINSTALL", icons::CLOSE))
+                                                    .compact(),
+                                            )
+                                            .on_hover_text("Ask Steam to uninstall the game")
+                                            .clicked()
+                                        {
                                             click(LibraryAction::UninstallSteam(entry.app_id));
                                         }
                                     }
                                     LibrarySource::DrydockInstalled => {
                                         if entry.launch_path.is_some() {
-                                            if ui.add(success_button(&format!("{}  PLAY", icons::PLAY)).compact()).clicked() {
+                                            let clicked = ui
+                                                .add(
+                                                    success_button(&format!("{}  PLAY", icons::PLAY))
+                                                        .compact(),
+                                                )
+                                                .clicked();
+                                            if clicked {
                                                 click(LibraryAction::Launch(entry.app_id));
                                             }
-                                        } else if ui.add(primary_button(&format!("{}  SET .EXE", icons::SETTINGS)).compact())
-                                            .on_hover_text("Link the game's .exe so PLAY can launch it").clicked() {
+                                        } else if ui
+                                            .add(
+                                                primary_button(&format!("{}  SET .EXE", icons::SETTINGS))
+                                                    .compact(),
+                                            )
+                                            .on_hover_text("Link the game's .exe so PLAY can launch it")
+                                            .clicked()
+                                        {
                                             click(LibraryAction::SetExe(entry.app_id));
                                         }
                                         if let Some(dir) = &entry.install_dir {
-                                            if ui.add(ghost_button(&format!("{}  BROWSE", icons::FOLDER)).compact())
-                                                .on_hover_text("Open installation folder").clicked() {
+                                            let clicked = ui
+                                                .add(
+                                                    ghost_button(&format!("{}  BROWSE", icons::FOLDER))
+                                                        .compact(),
+                                                )
+                                                .on_hover_text("Open installation folder")
+                                                .clicked();
+                                            if clicked {
                                                 click(LibraryAction::OpenFolder(dir.clone()));
                                             }
                                         }
-                                        if ui.add(ghost_button(&format!("{}  STORE", icons::STORE)).compact())
-                                            .on_hover_text("Open Store page in browser").clicked() {
+                                        if ui
+                                            .add(ghost_button(&format!("{}  STORE", icons::STORE)).compact())
+                                            .on_hover_text("Open Store page in browser")
+                                            .clicked()
+                                        {
                                             click(LibraryAction::Details(entry.app_id));
                                         }
-                                        if ui.add(ghost_button(&format!("{}  VERIFY", icons::CHECK)).compact())
-                                            .on_hover_text("Verify downloaded files").clicked() {
+                                        if ui
+                                            .add(ghost_button(&format!("{}  VERIFY", icons::CHECK)).compact())
+                                            .on_hover_text("Verify downloaded files")
+                                            .clicked()
+                                        {
                                             click(LibraryAction::VerifyDrydock(entry.app_id));
                                         }
-                                        if ui.add(ghost_button(&format!("{}  UPDATE", icons::UPDATES)).compact())
-                                            .on_hover_text("Check for updated files").clicked() {
+                                        if ui
+                                            .add(
+                                                ghost_button(&format!("{}  UPDATE", icons::UPDATES))
+                                                    .compact(),
+                                            )
+                                            .on_hover_text("Check for updated files")
+                                            .clicked()
+                                        {
                                             click(LibraryAction::UpdateDrydock(entry.app_id));
                                         }
-                                        if ui.add(ghost_button(&format!("{}  CRACK", icons::SPARKLES)).compact())
-                                            .on_hover_text("Deploy emu crack into game folder").clicked() {
+                                        if ui
+                                            .add(
+                                                ghost_button(&format!("{}  CRACK", icons::SPARKLES))
+                                                    .compact(),
+                                            )
+                                            .on_hover_text("Deploy emu crack into game folder")
+                                            .clicked()
+                                        {
                                             click(LibraryAction::CrackDrydock(entry.app_id));
                                         }
                                         if entry.launch_path.is_some() {
-                                            if ui.add(ghost_button(&format!("{}  CHANGE .EXE", icons::SETTINGS)).compact())
-                                                .on_hover_text("Choose a different launch executable").clicked() {
+                                            let clicked = ui
+                                                .add(
+                                                    ghost_button(&format!(
+                                                        "{}  CHANGE .EXE",
+                                                        icons::SETTINGS
+                                                    ))
+                                                    .compact(),
+                                                )
+                                                .on_hover_text("Choose a different launch executable")
+                                                .clicked();
+                                            if clicked {
                                                 click(LibraryAction::SetExe(entry.app_id));
                                             }
                                         }
-                                        if ui.add(ghost_button(&format!("{}  UNINSTALL", icons::CLOSE)).compact())
-                                            .on_hover_text("Delete the downloaded game folder").clicked() {
+                                        if ui
+                                            .add(
+                                                ghost_button(&format!("{}  UNINSTALL", icons::CLOSE))
+                                                    .compact(),
+                                            )
+                                            .on_hover_text("Delete the downloaded game folder")
+                                            .clicked()
+                                        {
                                             click(LibraryAction::UninstallDrydock(entry.app_id));
                                         }
                                     }
@@ -356,8 +518,10 @@ pub fn library_overview(
 
                     // ── Info divider ─────────────────────────────────────────
                     ui.painter().line_segment(
-                        [egui::pos2(ui.min_rect().left(), ui.cursor().min.y),
-                         egui::pos2(ui.min_rect().left() + body_w, ui.cursor().min.y)],
+                        [
+                            egui::pos2(ui.min_rect().left(), ui.cursor().min.y),
+                            egui::pos2(ui.min_rect().left() + body_w, ui.cursor().min.y),
+                        ],
                         Stroke::new(1.0, BORDER),
                     );
                     ui.add_space(12.0);
@@ -365,7 +529,7 @@ pub fn library_overview(
                     // ── Key-value info rows ──────────────────────────────────
                     let label_color = MUTED;
                     let value_color = TEXT;
-                    let row_font    = egui::FontId::proportional(13.5);
+                    let row_font = egui::FontId::proportional(13.5);
 
                     let info_row = |ui: &mut egui::Ui, label: &str, value: &str, vcolor: Color32| {
                         ui.horizontal(|ui| {
@@ -382,13 +546,27 @@ pub fn library_overview(
                     // Executable
                     if let Some(path) = &entry.launch_path {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("Executable:  ").font(row_font.clone()).color(label_color));
-                            ui.add(egui::Label::new(RichText::new(path).font(row_font.clone()).color(value_color)).truncate())
-                                .on_hover_text(path);
+                            ui.label(
+                                RichText::new("Executable:  ")
+                                    .font(row_font.clone())
+                                    .color(label_color),
+                            );
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(path).font(row_font.clone()).color(value_color),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(path);
                         });
                         ui.add_space(5.0);
                     } else if entry.source == LibrarySource::SteamInstalled {
-                        info_row(ui, "Executable:  ", &format!("steam://run/{}", entry.app_id), value_color);
+                        info_row(
+                            ui,
+                            "Executable:  ",
+                            &format!("steam://run/{}", entry.app_id),
+                            value_color,
+                        );
                     } else {
                         info_row(ui, "Executable:  ", "No launcher linked", AMBER);
                     }
@@ -402,13 +580,25 @@ pub fn library_overview(
                     if let Some(dir) = &entry.install_dir {
                         let dir_str = dir.display().to_string();
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("Location:  ").font(row_font.clone()).color(label_color));
-                            ui.add(egui::Label::new(RichText::new(&dir_str).font(row_font.clone()).color(value_color)).truncate())
-                                .on_hover_text(&dir_str);
+                            ui.label(
+                                RichText::new("Location:  ")
+                                    .font(row_font.clone())
+                                    .color(label_color),
+                            );
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&dir_str).font(row_font.clone()).color(value_color),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(&dir_str);
                         });
                         ui.add_space(5.0);
                         ui.add_space(4.0);
-                        if ui.add(ghost_button(&format!("{}  Open Folder", icons::FOLDER)).compact()).clicked() {
+                        if ui
+                            .add(ghost_button(&format!("{}  Open Folder", icons::FOLDER)).compact())
+                            .clicked()
+                        {
                             action = Some(LibraryAction::OpenFolder(dir.clone()));
                         }
                     } else {
@@ -543,11 +733,11 @@ impl DrydockApp {
                         );
 
                         ui.add_space(10.0);
-                        ui.label(
-                            RichText::new(icons::SEARCH)
-                                .size(14.0)
-                                .color(if is_focused { ACCENT } else { MUTED }),
-                        );
+                        ui.label(RichText::new(icons::SEARCH).size(14.0).color(if is_focused {
+                            ACCENT
+                        } else {
+                            MUTED
+                        }));
                         ui.add_space(4.0);
                         let text_edit = egui::TextEdit::singleline(&mut self.library_search)
                             .id(search_id)
@@ -555,18 +745,15 @@ impl DrydockApp {
                             .frame(egui::Frame::NONE)
                             .desired_width(search_w - 56.0);
                         ui.add(text_edit);
-                        if !self.library_search.is_empty() {
-                            if ui
+                        if !self.library_search.is_empty()
+                            && ui
                                 .add(
-                                    egui::Button::new(
-                                        RichText::new(icons::CLOSE).size(12.0).color(MUTED),
-                                    )
-                                    .frame(false),
+                                    egui::Button::new(RichText::new(icons::CLOSE).size(12.0).color(MUTED))
+                                        .frame(false),
                                 )
                                 .clicked()
-                            {
-                                self.library_search.clear();
-                            }
+                        {
+                            self.library_search.clear();
                         }
                     },
                 );
@@ -588,16 +775,11 @@ impl DrydockApp {
                         (SURFACE_RAISED, Stroke::new(1.0, BORDER), MUTED)
                     };
 
-                    let btn = egui::Button::new(
-                        RichText::new(label)
-                            .size(13.5)
-                            .strong()
-                            .color(text_color),
-                    )
-                    .fill(bg)
-                    .stroke(stroke)
-                    .corner_radius(8)
-                    .min_size(Vec2::new(0.0, toolbar_h));
+                    let btn = egui::Button::new(RichText::new(label).size(13.5).strong().color(text_color))
+                        .fill(bg)
+                        .stroke(stroke)
+                        .corner_radius(8)
+                        .min_size(Vec2::new(0.0, toolbar_h));
 
                     if ui.add(btn).clicked() {
                         self.library_filter = filter;
@@ -637,20 +819,39 @@ impl DrydockApp {
                         ui.add_space(16.0);
                         ui.label(RichText::new(icons::LIBRARY).size(36.0).color(ACCENT));
                         ui.add_space(12.0);
-                        ui.label(RichText::new("Your Library is Empty").size(20.0).strong().color(TEXT));
+                        ui.label(
+                            RichText::new("Your Library is Empty")
+                                .size(20.0)
+                                .strong()
+                                .color(TEXT),
+                        );
                         ui.add_space(6.0);
                         ui.label(
-                            RichText::new("Games installed through Steam or activated in Drydock will appear here.")
-                                .size(14.0)
-                                .color(MUTED),
+                            RichText::new(
+                                "Games installed through Steam or activated in Drydock will appear here.",
+                            )
+                            .size(14.0)
+                            .color(MUTED),
                         );
                         ui.add_space(20.0);
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing = Vec2::new(12.0, 0.0);
-                            if ui.add(primary_button(&format!("{}  BROWSE STORE", icons::STORE)).min_size(Vec2::new(160.0, 42.0))).clicked() {
+                            if ui
+                                .add(
+                                    primary_button(&format!("{}  BROWSE STORE", icons::STORE))
+                                        .min_size(Vec2::new(160.0, 42.0)),
+                                )
+                                .clicked()
+                            {
                                 self.page = Page::Home;
                             }
-                            if ui.add(ghost_button(&format!("{}  ADD LOCAL GAME", icons::FOLDER)).min_size(Vec2::new(160.0, 42.0))).clicked() {
+                            if ui
+                                .add(
+                                    ghost_button(&format!("{}  ADD LOCAL GAME", icons::FOLDER))
+                                        .min_size(Vec2::new(160.0, 42.0)),
+                                )
+                                .clicked()
+                            {
                                 add_game_requested = true;
                             }
                         });
@@ -662,7 +863,6 @@ impl DrydockApp {
             }
             return;
         }
-
 
         // Filter games based on current filter & search query
         let search_term = self.library_search.trim().to_lowercase();
@@ -687,7 +887,11 @@ impl DrydockApp {
         if filtered.is_empty() {
             ui.add_space(36.0);
             ui.vertical_centered(|ui| {
-                ui.label(RichText::new("No games match your search or filter.").size(16.0).color(MUTED));
+                ui.label(
+                    RichText::new("No games match your search or filter.")
+                        .size(16.0)
+                        .color(MUTED),
+                );
                 ui.add_space(10.0);
                 if ui.add(ghost_button("Clear filters")).clicked() {
                     self.library_search.clear();
@@ -726,11 +930,8 @@ impl DrydockApp {
                     .interactable(true)
                     .show(ui.ctx(), |ui| {
                         let (rect, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
-                        ui.painter().rect_filled(
-                            rect,
-                            0.0,
-                            Color32::from_rgba_unmultiplied(0, 0, 0, 185),
-                        );
+                        ui.painter()
+                            .rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 185));
                         if resp.clicked() {
                             close_requested = true;
                         }
@@ -1207,11 +1408,19 @@ impl DrydockApp {
                     .inner_margin(16)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(format!("{}  STEP 1: SELECTED GAME DIRECTORY", icons::FOLDER)).size(14.0).strong().color(ACCENT));
+                            ui.label(
+                                RichText::new(format!("{}  STEP 1: SELECTED GAME DIRECTORY", icons::FOLDER))
+                                    .size(14.0)
+                                    .strong()
+                                    .color(ACCENT),
+                            );
                         });
                         ui.add_space(6.0);
                         ui.add(
-                            egui::Label::new(RichText::new(folder.display().to_string()).size(14.0).color(TEXT)).wrap(),
+                            egui::Label::new(
+                                RichText::new(folder.display().to_string()).size(14.0).color(TEXT),
+                            )
+                            .wrap(),
                         );
                     });
 
@@ -1225,7 +1434,12 @@ impl DrydockApp {
                     .inner_margin(16)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(format!("{}  STEP 2: IDENTIFY GAME IN CATALOG", icons::SEARCH)).size(14.0).strong().color(ACCENT));
+                            ui.label(
+                                RichText::new(format!("{}  STEP 2: IDENTIFY GAME IN CATALOG", icons::SEARCH))
+                                    .size(14.0)
+                                    .strong()
+                                    .color(ACCENT),
+                            );
                         });
                         ui.add_space(6.0);
 
@@ -1241,9 +1455,11 @@ impl DrydockApp {
                             });
                         } else {
                             ui.label(
-                                RichText::new("Type the game's name to link its Steam App ID and launch manifests:")
-                                    .size(14.0)
-                                    .color(MUTED),
+                                RichText::new(
+                                    "Type the game's name to link its Steam App ID and launch manifests:",
+                                )
+                                .size(14.0)
+                                .color(MUTED),
                             );
                             ui.add_space(8.0);
                             let width = ui.available_width();
@@ -1278,4 +1494,3 @@ impl DrydockApp {
         }
     }
 }
-

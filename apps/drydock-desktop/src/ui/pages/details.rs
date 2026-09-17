@@ -3,10 +3,10 @@ use std::sync::mpsc::{self, TryRecvError};
 use drydock_core::*;
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke, Vec2};
 
+use crate::ui::helpers::*;
 use crate::ui::theme::*;
 use crate::ui::types::*;
 use crate::ui::widgets::*;
-use crate::ui::helpers::*;
 
 pub fn screenshot_gallery(ui: &mut egui::Ui, screenshots: &[String], index: usize) -> usize {
     let count = screenshots.len();
@@ -143,8 +143,7 @@ pub fn overlay_arrow(ui: &mut egui::Ui, center: egui::Pos2, radius: f32, forward
     response.clicked()
 }
 
-/// Visual weight of a [`PillButton`].
-
+/// Renders a label and value pair in the details view.
 pub fn detail_field(ui: &mut egui::Ui, label: &str, value: String) {
     ui.label(RichText::new(label).size(14.0).strong().color(ACCENT));
     ui.add(egui::Label::new(RichText::new(value).size(14.0).color(TEXT)).wrap());
@@ -154,8 +153,6 @@ pub fn detail_field(ui: &mut egui::Ui, label: &str, value: String) {
 /// Renders the whole details body inside a fixed-width column. Returns whether the Steam
 /// action was clicked and the (possibly advanced) screenshot index. Kept free of `self` so
 /// it can run inside the centring layout closures without borrow conflicts.
-/// Native-depot-download button state for the details sidebar.
-
 #[allow(clippy::too_many_arguments)]
 pub fn details_body(
     ui: &mut egui::Ui,
@@ -451,9 +448,6 @@ pub fn details_features(ui: &mut egui::Ui, details: &SteamStoreDetails, activati
     });
 }
 
-/// A button the user pressed on an app's details page.
-
-
 /// Renders the details-page action buttons (the hub for a game) and returns the one that was
 /// clicked: add the latest or cracked unlock, apply the Denuvo fix, download a repack, or jump
 /// to Activation.
@@ -621,7 +615,6 @@ pub fn requirement_column(ui: &mut egui::Ui, heading: &str, value: &str) {
             .color(if value.is_empty() { MUTED } else { TEXT }),
     );
 }
-
 
 impl DrydockApp {
     pub fn open_details(&mut self, app_id: u32) {
@@ -882,6 +875,4 @@ impl DrydockApp {
         let name = details.name.clone();
         self.perform_details_action(details.app_id, &name, action);
     }
-
 }
-

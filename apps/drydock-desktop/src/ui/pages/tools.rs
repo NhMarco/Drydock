@@ -4,10 +4,10 @@ use std::sync::mpsc::{self, TryRecvError};
 use drydock_core::*;
 use eframe::egui::{self, Color32, FontId, RichText, Sense, Stroke, Vec2};
 
+use crate::ui::helpers::*;
 use crate::ui::theme::*;
 use crate::ui::types::*;
 use crate::ui::widgets::*;
-use crate::ui::helpers::*;
 
 pub fn build_emu_crack(
     app_id: u32,
@@ -218,15 +218,17 @@ fn tool_segment(ui: &mut egui::Ui, label: &str, active: bool, width: f32) -> boo
         egui::Align2::CENTER_CENTER,
         label,
         FontId::proportional(13.0),
-        if active { Color32::from_rgb(4, 14, 24) } else { TEXT },
+        if active {
+            Color32::from_rgb(4, 14, 24)
+        } else {
+            TEXT
+        },
     );
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     response.clicked()
 }
-
-#[allow(clippy::too_many_arguments)]
 
 impl DrydockApp {
     pub fn load_language_from(&mut self, directory: PathBuf) {
@@ -332,7 +334,12 @@ impl DrydockApp {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(icons::SETTINGS).size(18.0).color(ACCENT));
                     ui.add_space(4.0);
-                    ui.label(RichText::new("GAME LANGUAGE MANAGER").size(14.0).strong().color(TEXT));
+                    ui.label(
+                        RichText::new("GAME LANGUAGE MANAGER")
+                            .size(14.0)
+                            .strong()
+                            .color(TEXT),
+                    );
                 });
                 ui.add_space(6.0);
                 ui.label(
@@ -362,10 +369,7 @@ impl DrydockApp {
                         self.load_language_from(PathBuf::from(self.tools_language_path.trim()));
                     }
                     if ui
-                        .add_sized(
-                            [116.0, 40.0],
-                            ghost_button(&format!("{}  SCAN", icons::SEARCH)),
-                        )
+                        .add_sized([116.0, 40.0], ghost_button(&format!("{}  SCAN", icons::SEARCH)))
                         .on_hover_text("Search this folder (and its subfolders) for language files")
                         .clicked()
                     {
@@ -378,7 +382,12 @@ impl DrydockApp {
                     ui.separator();
                     ui.add_space(14.0);
 
-                    ui.label(RichText::new("SELECT TARGET LANGUAGE").size(12.5).strong().color(ACCENT));
+                    ui.label(
+                        RichText::new("SELECT TARGET LANGUAGE")
+                            .size(12.5)
+                            .strong()
+                            .color(ACCENT),
+                    );
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         egui::ComboBox::from_id_salt("tools_language_selection")
@@ -395,7 +404,10 @@ impl DrydockApp {
                             });
                         ui.add_space(8.0);
                         if ui
-                            .add(primary_button(&format!("{}  APPLY LANGUAGE", icons::CHECK)).min_size(Vec2::new(170.0, 38.0)))
+                            .add(
+                                primary_button(&format!("{}  APPLY LANGUAGE", icons::CHECK))
+                                    .min_size(Vec2::new(170.0, 38.0)),
+                            )
                             .on_hover_text("Write the selected language configuration to this game")
                             .clicked()
                         {
@@ -424,7 +436,12 @@ impl DrydockApp {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(icons::SPARKLES).size(18.0).color(ACCENT));
                     ui.add_space(4.0);
-                    ui.label(RichText::new("STEAM EMU CRACKER (LOCAL)").size(14.0).strong().color(TEXT));
+                    ui.label(
+                        RichText::new("STEAM EMU CRACKER (LOCAL)")
+                            .size(14.0)
+                            .strong()
+                            .color(TEXT),
+                    );
                 });
                 ui.add_space(6.0);
                 ui.label(
@@ -438,7 +455,12 @@ impl DrydockApp {
                 );
                 ui.add_space(18.0);
 
-                ui.label(RichText::new("TARGET STEAM APP ID").size(12.0).strong().color(ACCENT));
+                ui.label(
+                    RichText::new("TARGET STEAM APP ID")
+                        .size(12.0)
+                        .strong()
+                        .color(ACCENT),
+                );
                 ui.add_space(6.0);
 
                 let busy = self.emu_receiver.is_some();
@@ -496,7 +518,9 @@ impl DrydockApp {
 
                 ui.checkbox(
                     &mut self.emu_reframework,
-                    RichText::new("Include REFramework (latest nightly dinput8.dll)").size(13.5).color(TEXT),
+                    RichText::new("Include REFramework (latest nightly dinput8.dll)")
+                        .size(13.5)
+                        .color(TEXT),
                 )
                 .on_hover_text(
                     "Adds praydog's REFramework next to the exe — needed by some RE-Engine / \
@@ -511,9 +535,12 @@ impl DrydockApp {
                     if ui
                         .add_enabled(
                             valid && !busy,
-                            success_button(&format!("{}  CRACK INTO GAME…", icons::CHECK)).min_size(Vec2::new(210.0, 40.0)),
+                            success_button(&format!("{}  CRACK INTO GAME…", icons::CHECK))
+                                .min_size(Vec2::new(210.0, 40.0)),
                         )
-                        .on_hover_text("Pick the game's install folder — the crack is deployed directly into it")
+                        .on_hover_text(
+                            "Pick the game's install folder — the crack is deployed directly into it",
+                        )
                         .clicked()
                         && let Some(folder) = rfd::FileDialog::new()
                             .set_title("Pick the game's install folder")
@@ -525,7 +552,8 @@ impl DrydockApp {
                     if ui
                         .add_enabled(
                             valid && !busy,
-                            primary_button(&format!("{}  EXPORT AS ZIP…", icons::DOWNLOAD)).min_size(Vec2::new(190.0, 40.0)),
+                            primary_button(&format!("{}  EXPORT AS ZIP…", icons::DOWNLOAD))
+                                .min_size(Vec2::new(190.0, 40.0)),
                         )
                         .on_hover_text("Save the crack files and structure as a portable ZIP archive")
                         .clicked()
@@ -540,7 +568,8 @@ impl DrydockApp {
                     if ui
                         .add_enabled(
                             !busy,
-                            ghost_button(&format!("{}  RE-DOWNLOAD EMU", icons::UPDATES)).min_size(Vec2::new(170.0, 40.0)),
+                            ghost_button(&format!("{}  RE-DOWNLOAD EMU", icons::UPDATES))
+                                .min_size(Vec2::new(170.0, 40.0)),
                         )
                         .on_hover_text("Force a fresh download of the Cold Client Loader / gbe_fork binaries")
                         .clicked()
@@ -656,4 +685,3 @@ impl DrydockApp {
         }
     }
 }
-

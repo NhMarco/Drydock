@@ -1,20 +1,17 @@
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, TryRecvError};
-use std::sync::Arc;
 use std::time::Instant;
 
 use drydock_core::*;
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke, Vec2};
 
+use crate::ui::helpers::*;
 use crate::ui::theme::*;
 use crate::ui::types::*;
 use crate::ui::widgets::*;
-use crate::ui::helpers::*;
 
-
-
-/// Formats a byte-per-second rate as a compact human string (e.g. `9.9 MB/s`).
-
+/// Renders a small metric stat item with a caption and value.
 pub fn download_mini_stat(ui: &mut egui::Ui, caption: &str, value: &str, accent: Color32) {
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 3.0;
@@ -22,8 +19,6 @@ pub fn download_mini_stat(ui: &mut egui::Ui, caption: &str, value: &str, accent:
         ui.label(RichText::new(value).size(15.0).strong().color(TEXT));
     });
 }
-
-/// Keeps only the last `max` characters of `text`, prefixing an ellipsis when it was truncated.
 
 impl DrydockApp {
     pub fn download_running(&self) -> bool {
@@ -361,11 +356,8 @@ fn modern_progress_bar(ui: &mut egui::Ui, fraction: f32, width: f32, height: f32
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
     let corner = egui::CornerRadius::same((height / 2.0) as u8);
     // Background track
-    ui.painter().rect_filled(
-        rect,
-        corner,
-        Color32::from_rgba_unmultiplied(6, 14, 24, 220),
-    );
+    ui.painter()
+        .rect_filled(rect, corner, Color32::from_rgba_unmultiplied(6, 14, 24, 220));
     ui.painter().rect_stroke(
         rect,
         corner,
@@ -376,21 +368,14 @@ fn modern_progress_bar(ui: &mut egui::Ui, fraction: f32, width: f32, height: f32
     let fill_w = (rect.width() * fraction.clamp(0.0, 1.0)).max(0.0);
     if fill_w > 0.0 {
         let fill_rect = egui::Rect::from_min_size(rect.min, Vec2::new(fill_w, height));
-        ui.painter().rect_filled(
-            fill_rect,
-            corner,
-            ACCENT,
-        );
+        ui.painter().rect_filled(fill_rect, corner, ACCENT);
         if fill_w > 8.0 {
             let glow_rect = egui::Rect::from_min_size(
                 egui::pos2(fill_rect.right() - 5.0, fill_rect.top()),
                 Vec2::new(5.0, height),
             );
-            ui.painter().rect_filled(
-                glow_rect,
-                corner,
-                Color32::from_white_alpha(140),
-            );
+            ui.painter()
+                .rect_filled(glow_rect, corner, Color32::from_white_alpha(140));
         }
     }
 }
@@ -408,10 +393,12 @@ impl DrydockApp {
                 if queue_len > 0 {
                     status_pill(ui, &format!("{} IN QUEUE", queue_len), MUTED);
                 }
-                if let Some(job) = self.download_job.as_ref().filter(|j| j.finished.is_none()) {
-                    if job.speed_bps > 0.0 {
-                        status_pill(ui, &format!("⚡ {}", human_bps(job.speed_bps)), ACCENT);
-                    }
+                if let Some(job) = self
+                    .download_job
+                    .as_ref()
+                    .filter(|j| j.finished.is_none() && j.speed_bps > 0.0)
+                {
+                    status_pill(ui, &format!("⚡ {}", human_bps(job.speed_bps)), ACCENT);
                 }
             });
         });
@@ -516,7 +503,8 @@ impl DrydockApp {
 
         // Background container
         ui.painter().rect_filled(rect, corner, SURFACE);
-        ui.painter().rect_stroke(rect, corner, Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
+        ui.painter()
+            .rect_stroke(rect, corner, Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
 
         // Left Cover Art with smooth gradient fade into SURFACE
         let art_w = (width * 0.36).clamp(240.0, 360.0);
@@ -550,10 +538,8 @@ impl DrydockApp {
                 let x0 = fade_start + fade_w * (i as f32 / strips as f32);
                 let x1 = fade_start + fade_w * t;
                 let a = (t.powf(1.5) * 255.0) as u8;
-                let band = egui::Rect::from_min_max(
-                    egui::pos2(x0, rect.top()),
-                    egui::pos2(x1, rect.bottom()),
-                );
+                let band =
+                    egui::Rect::from_min_max(egui::pos2(x0, rect.top()), egui::pos2(x1, rect.bottom()));
                 painter.rect_filled(band, 0, Color32::from_rgba_unmultiplied(13, 27, 40, a));
             }
         }
@@ -567,8 +553,17 @@ impl DrydockApp {
                 egui::pos2(rect.left() + 16.0, rect.top() + 16.0),
                 Vec2::new(76.0, 22.0),
             );
-            painter.rect_filled(app_badge_rect, egui::CornerRadius::same(5), Color32::from_black_alpha(170));
-            painter.rect_stroke(app_badge_rect, egui::CornerRadius::same(5), Stroke::new(1.0, Color32::from_white_alpha(35)), egui::StrokeKind::Inside);
+            painter.rect_filled(
+                app_badge_rect,
+                egui::CornerRadius::same(5),
+                Color32::from_black_alpha(170),
+            );
+            painter.rect_stroke(
+                app_badge_rect,
+                egui::CornerRadius::same(5),
+                Stroke::new(1.0, Color32::from_white_alpha(35)),
+                egui::StrokeKind::Inside,
+            );
             painter.text(
                 app_badge_rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -586,7 +581,16 @@ impl DrydockApp {
                 let a = (t.powf(1.6) * 230.0) as u8;
                 painter.rect_filled(
                     egui::Rect::from_min_max(egui::pos2(rect.left(), y0), egui::pos2(art_rect.right(), y1)),
-                    if i == 15 { egui::CornerRadius { sw: 16, nw: 0, ne: 0, se: 0 } } else { egui::CornerRadius::ZERO },
+                    if i == 15 {
+                        egui::CornerRadius {
+                            sw: 16,
+                            nw: 0,
+                            ne: 0,
+                            se: 0,
+                        }
+                    } else {
+                        egui::CornerRadius::ZERO
+                    },
                     Color32::from_rgba_unmultiplied(6, 14, 24, a),
                 );
             }
@@ -648,8 +652,16 @@ impl DrydockApp {
                     "Paused".to_string()
                 };
 
-                let speed_str = if running { human_bps(speed) } else { "0 B/s".to_string() };
-                let peak_str = if peak > 0.0 { human_bps(peak) } else { "—".to_string() };
+                let speed_str = if running {
+                    human_bps(speed)
+                } else {
+                    "0 B/s".to_string()
+                };
+                let peak_str = if peak > 0.0 {
+                    human_bps(peak)
+                } else {
+                    "—".to_string()
+                };
                 let progress_str = if total > 0 {
                     format!("{} / {}", human_bytes(done), human_bytes(total))
                 } else {
@@ -713,13 +725,19 @@ impl DrydockApp {
                             ui.label(RichText::new(message).size(13.0).color(DANGER));
                         }
                         None => {
-                            if ui.add(ghost_button(&format!("{}  CANCEL", icons::CLOSE)).compact()).clicked() {
+                            if ui
+                                .add(ghost_button(&format!("{}  CANCEL", icons::CLOSE)).compact())
+                                .clicked()
+                            {
                                 cancel_clicked = true;
                             }
                         }
                     }
                 } else if running {
-                    if ui.add(ghost_button(&format!("{}  PAUSE", icons::CLOSE)).compact()).clicked() {
+                    if ui
+                        .add(ghost_button(&format!("{}  PAUSE", icons::CLOSE)).compact())
+                        .clicked()
+                    {
                         pause_clicked = true;
                     }
                     if queue_len > 1
@@ -731,10 +749,16 @@ impl DrydockApp {
                         demote_clicked = true;
                     }
                 } else {
-                    if ui.add(ghost_button(&format!("{}  REMOVE", icons::CLOSE)).compact()).clicked() {
+                    if ui
+                        .add(ghost_button(&format!("{}  REMOVE", icons::CLOSE)).compact())
+                        .clicked()
+                    {
                         remove_clicked = true;
                     }
-                    if ui.add(success_button(&format!("{}  RESUME", icons::PLAY)).compact()).clicked() {
+                    if ui
+                        .add(success_button(&format!("{}  RESUME", icons::PLAY)).compact())
+                        .clicked()
+                    {
                         resume_clicked = true;
                     }
                     if let Some(message) = &error {
@@ -754,7 +778,11 @@ impl DrydockApp {
             section_label(ui, &format!("UP NEXT ({})", upcoming.len()));
             if !upcoming.is_empty() {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new("Downloads start automatically in order").size(12.5).color(MUTED));
+                    ui.label(
+                        RichText::new("Downloads start automatically in order")
+                            .size(12.5)
+                            .color(MUTED),
+                    );
                 });
             }
         });
@@ -770,7 +798,11 @@ impl DrydockApp {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(icons::CHECK).size(16.0).color(MUTED));
                         ui.add_space(6.0);
-                        ui.label(RichText::new("No other downloads are queued.").size(14.0).color(MUTED));
+                        ui.label(
+                            RichText::new("No other downloads are queued.")
+                                .size(14.0)
+                                .color(MUTED),
+                        );
                     });
                 });
         } else {
@@ -787,8 +819,14 @@ impl DrydockApp {
                             // 1. Order badge (#1, #2...)
                             let badge_size = Vec2::new(32.0, 32.0);
                             let (badge_rect, _) = ui.allocate_exact_size(badge_size, Sense::hover());
-                            ui.painter().rect_filled(badge_rect, egui::CornerRadius::same(6), SURFACE_RAISED);
-                            ui.painter().rect_stroke(badge_rect, egui::CornerRadius::same(6), Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
+                            ui.painter()
+                                .rect_filled(badge_rect, egui::CornerRadius::same(6), SURFACE_RAISED);
+                            ui.painter().rect_stroke(
+                                badge_rect,
+                                egui::CornerRadius::same(6),
+                                Stroke::new(1.0, BORDER),
+                                egui::StrokeKind::Inside,
+                            );
                             ui.painter().text(
                                 badge_rect.center(),
                                 egui::Align2::CENTER_CENTER,
@@ -801,11 +839,22 @@ impl DrydockApp {
                             let thumb_size = Vec2::new(86.0, 40.0);
                             let (thumb_rect, _) = ui.allocate_exact_size(thumb_size, Sense::hover());
                             let thumb_urls = [
-                                format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{}/header.jpg", item.app_id),
-                                format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{}/capsule_231x87.jpg", item.app_id),
+                                format!(
+                                    "https://cdn.cloudflare.steamstatic.com/steam/apps/{}/header.jpg",
+                                    item.app_id
+                                ),
+                                format!(
+                                    "https://cdn.cloudflare.steamstatic.com/steam/apps/{}/capsule_231x87.jpg",
+                                    item.app_id
+                                ),
                             ];
                             let thumb_refs: Vec<&str> = thumb_urls.iter().map(String::as_str).collect();
-                            paint_remote_image_cover_multi(ui, thumb_rect, &thumb_refs, egui::CornerRadius::same(6));
+                            paint_remote_image_cover_multi(
+                                ui,
+                                thumb_rect,
+                                &thumb_refs,
+                                egui::CornerRadius::same(6),
+                            );
 
                             // 3. Info (Title + Subtitle)
                             ui.vertical(|ui| {
@@ -813,7 +862,11 @@ impl DrydockApp {
                                 ui.label(RichText::new(&item.name).size(15.0).strong().color(TEXT));
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 6.0;
-                                    ui.label(RichText::new(format!("APP {}", item.app_id)).size(12.0).color(MUTED));
+                                    ui.label(
+                                        RichText::new(format!("APP {}", item.app_id))
+                                            .size(12.0)
+                                            .color(MUTED),
+                                    );
                                     ui.label(RichText::new("·").size(12.0).color(MUTED));
                                     ui.label(RichText::new("Waiting in queue").size(12.0).color(AMBER));
                                 });
@@ -830,7 +883,10 @@ impl DrydockApp {
                                     remove_queued = Some(item.app_id);
                                 }
                                 if ui
-                                    .add(primary_button(&format!("{}  DOWNLOAD NOW", icons::DOWNLOAD)).compact())
+                                    .add(
+                                        primary_button(&format!("{}  DOWNLOAD NOW", icons::DOWNLOAD))
+                                            .compact(),
+                                    )
                                     .on_hover_text("Start downloading this game immediately (moves to front)")
                                     .clicked()
                                 {

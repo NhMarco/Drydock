@@ -4,17 +4,21 @@ use std::sync::mpsc::{self, TryRecvError};
 use drydock_core::*;
 use eframe::egui::{self, Color32, FontId, RichText, Sense, Stroke, Vec2};
 
+use crate::ui::helpers::*;
 use crate::ui::theme::*;
 use crate::ui::types::*;
 use crate::ui::widgets::*;
-use crate::ui::helpers::*;
-
-
 
 fn step_pill(ui: &mut egui::Ui, step: &str) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::hover());
-    ui.painter().rect_filled(rect, egui::CornerRadius::same(6), ACCENT_DEEP);
-    ui.painter().rect_stroke(rect, egui::CornerRadius::same(6), Stroke::new(1.0, ACCENT), egui::StrokeKind::Inside);
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::same(6), ACCENT_DEEP);
+    ui.painter().rect_stroke(
+        rect,
+        egui::CornerRadius::same(6),
+        Stroke::new(1.0, ACCENT),
+        egui::StrokeKind::Inside,
+    );
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
@@ -49,7 +53,11 @@ pub fn activation_segment(ui: &mut egui::Ui, label: &str, active: bool) -> bool 
         egui::Align2::CENTER_CENTER,
         label,
         FontId::proportional(13.5),
-        if active { Color32::from_rgb(4, 14, 24) } else { TEXT },
+        if active {
+            Color32::from_rgb(4, 14, 24)
+        } else {
+            TEXT
+        },
     );
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -69,7 +77,12 @@ pub fn activation_ea_body(ui: &mut egui::Ui) {
                 ui.add_space(8.0);
                 ui.label(RichText::new(icons::SHIELD).size(40.0).color(AMBER));
                 ui.add_space(14.0);
-                ui.label(RichText::new("EA Activation Coming Soon").size(20.0).strong().color(TEXT));
+                ui.label(
+                    RichText::new("EA Activation Coming Soon")
+                        .size(20.0)
+                        .strong()
+                        .color(TEXT),
+                );
                 ui.add_space(6.0);
                 ui.label(
                     RichText::new("EA Desktop / Origin entitlement support is currently in development.")
@@ -136,7 +149,8 @@ pub fn response_code_fields(ui: &mut egui::Ui, characters: &mut [String; 8]) {
                         .text_color(if has_val { ACCENT } else { TEXT })
                         .horizontal_align(egui::Align::Center);
                     ui.add(te)
-                }).inner;
+                })
+                .inner;
 
             if response.changed() {
                 characters[index] = normalize_response_fragment(&characters[index])
@@ -169,7 +183,6 @@ pub fn response_code_fields(ui: &mut egui::Ui, characters: &mut [String; 8]) {
         }
     });
 }
-
 
 impl DrydockApp {
     pub fn poll_activation_request(&mut self) {
@@ -283,7 +296,12 @@ impl DrydockApp {
                 ui.horizontal(|ui| {
                     step_pill(ui, "1");
                     ui.add_space(8.0);
-                    ui.label(RichText::new("SELECT GAME TO ACTIVATE").size(13.0).strong().color(ACCENT));
+                    ui.label(
+                        RichText::new("SELECT GAME TO ACTIVATE")
+                            .size(13.0)
+                            .strong()
+                            .color(ACCENT),
+                    );
                 });
                 ui.add_space(10.0);
 
@@ -310,7 +328,12 @@ impl DrydockApp {
                     ui.horizontal(|ui| {
                         step_pill(ui, "2");
                         ui.add_space(8.0);
-                        ui.label(RichText::new("LOCATE GAME INSTALLATION FOLDER").size(13.0).strong().color(ACCENT));
+                        ui.label(
+                            RichText::new("LOCATE GAME INSTALLATION FOLDER")
+                                .size(13.0)
+                                .strong()
+                                .color(ACCENT),
+                        );
                     });
                     ui.add_space(10.0);
 
@@ -512,7 +535,12 @@ impl DrydockApp {
                 ui.horizontal(|ui| {
                     step_pill(ui, "1");
                     ui.add_space(8.0);
-                    ui.label(RichText::new("SELECT GAME TO ACTIVATE").size(13.0).strong().color(ACCENT));
+                    ui.label(
+                        RichText::new("SELECT GAME TO ACTIVATE")
+                            .size(13.0)
+                            .strong()
+                            .color(ACCENT),
+                    );
                 });
                 ui.add_space(10.0);
 
@@ -539,7 +567,12 @@ impl DrydockApp {
                     ui.horizontal(|ui| {
                         step_pill(ui, "2");
                         ui.add_space(8.0);
-                        ui.label(RichText::new("LOCATE GAME FOLDER & PREPARE").size(13.0).strong().color(ACCENT));
+                        ui.label(
+                            RichText::new("LOCATE GAME FOLDER & PREPARE")
+                                .size(13.0)
+                                .strong()
+                                .color(ACCENT),
+                        );
                     });
                     ui.add_space(10.0);
 
@@ -581,7 +614,9 @@ impl DrydockApp {
                                 primary_button(&format!("{}  PREPARE & LAUNCH GAME", icons::PLAY))
                                     .min_size(Vec2::new(240.0, 40.0)),
                             )
-                            .on_hover_text("Install magicfiles, launch the game, and capture its token request")
+                            .on_hover_text(
+                                "Install magicfiles, launch the game, and capture its token request",
+                            )
                             .clicked()
                         {
                             self.start_ubisoft_prepare(app_id, PathBuf::from(self.activation_path.trim()));
@@ -608,7 +643,12 @@ impl DrydockApp {
                     ui.horizontal(|ui| {
                         step_pill(ui, "3");
                         ui.add_space(8.0);
-                        ui.label(RichText::new("SUBMIT CODE & INSTALL TOKEN").size(13.0).strong().color(ACCENT));
+                        ui.label(
+                            RichText::new("SUBMIT CODE & INSTALL TOKEN")
+                                .size(13.0)
+                                .strong()
+                                .color(ACCENT),
+                        );
                     });
                     ui.add_space(14.0);
 
@@ -619,7 +659,12 @@ impl DrydockApp {
                         .inner_margin(16)
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("UBISOFT ACTIVATION CODE").size(11.5).strong().color(MUTED));
+                                ui.label(
+                                    RichText::new("UBISOFT ACTIVATION CODE")
+                                        .size(11.5)
+                                        .strong()
+                                        .color(MUTED),
+                                );
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     if ui
                                         .add(ghost_button("COPY CODE").compact())
@@ -653,7 +698,12 @@ impl DrydockApp {
                     ui.separator();
                     ui.add_space(16.0);
 
-                    ui.label(RichText::new("ENTER 8-DIGIT RESPONSE CODE FROM BOT").size(12.5).strong().color(TEXT));
+                    ui.label(
+                        RichText::new("ENTER 8-DIGIT RESPONSE CODE FROM BOT")
+                            .size(12.5)
+                            .strong()
+                            .color(TEXT),
+                    );
                     ui.add_space(8.0);
                     response_code_fields(ui, &mut self.response_code);
 
@@ -692,7 +742,11 @@ impl DrydockApp {
                             .inner_margin(12)
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    ui.label(RichText::new(icons::CHECK).size(16.0).color(Color32::from_rgb(34, 197, 94)));
+                                    ui.label(
+                                        RichText::new(icons::CHECK)
+                                            .size(16.0)
+                                            .color(Color32::from_rgb(34, 197, 94)),
+                                    );
                                     ui.label(
                                         RichText::new(format!(
                                             "TOKEN INSTALLED · {} bytes · Valid until {}",
@@ -781,6 +835,4 @@ impl DrydockApp {
             let _ = sender.send(result);
         });
     }
-
 }
-
