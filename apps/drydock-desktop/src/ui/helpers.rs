@@ -351,11 +351,12 @@ pub fn restore_payload_into_steam(
 /// Renders the note shown after an add/update, folding in how the depot-manifest copy went.
 pub fn added_note(name: &str, manifests: &Result<usize, String>) -> String {
     match manifests {
-        Ok(0) => format!("\"{name}\" added to Steam."),
+        Ok(0) => format!("\"{name}\" added to Steam. No depot manifests were packaged for it."),
         Ok(count) => format!("\"{name}\" added to Steam with {count} depot manifest(s)."),
         Err(error) => {
             format!(
-                "\"{name}\" added to Steam. Manifests could not be installed ({error}) — Steam may not see \
+                "\"{name}\" added to Steam. The depot package was unavailable ({error}), so the \
+                 Lua came from the Lua API and is not pinned to a build — Steam may not see \
                  game files."
             )
         }

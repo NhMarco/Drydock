@@ -223,8 +223,6 @@ pub struct DrydockApp {
     pub repackers_by_app: std::collections::HashMap<u32, Vec<String>>,
     /// The set of apps that have a Denuvo fix available, for fix-filter matching.
     pub fix_flags_by_app: std::collections::HashSet<u32>,
-    // App whose Steam updates should be blocked once the running Apply Fix succeeds.
-    pub pending_fix_block: Option<u32>,
     pub catalog_limiter: RateLimiter,
     pub download_limiter: RateLimiter,
     pub search: String,

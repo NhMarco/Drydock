@@ -161,7 +161,6 @@ impl DrydockApp {
             available_repackers: Vec::new(),
             repackers_by_app: std::collections::HashMap::new(),
             fix_flags_by_app: std::collections::HashSet::new(),
-            pending_fix_block: None,
             // At most one full game-list refresh per 5 minutes, and one unlock download per
             // minute, so a single user cannot hammer the Ryuu API.
             catalog_limiter: RateLimiter::new(1, Duration::from_secs(5 * 60)),
@@ -579,8 +578,6 @@ impl DrydockApp {
         let Some(denuvo) = self.fix_for(app_id).and_then(|fix| fix.denuvo.clone()) else {
             return;
         };
-        // A build-locked fix breaks on a Steam update, so block updates once it is applied.
-        self.pending_fix_block = Some(app_id);
         self.status = "Downloading and applying the Denuvo fix…".into();
         self.status_error = false;
         self.busy_label = Some("Applying the fix (this can take a while for large fixes)…".into());
@@ -875,7 +872,7 @@ impl DrydockApp {
                         self.verified_entitlement = Some(entitlement);
                     }
                     Err(error) => {
-                        self.status = error;
+                        self.status = format!("Activation failed: {error}");
                         self.status_error = true;
                     }
                 }
@@ -960,7 +957,6 @@ impl DrydockApp {
             Ok(result) => {
                 self.background_action = None;
                 self.busy_label = None;
-                self.pending_fix_block = None;
                 match result {
                     Ok(status) => {
                         self.status = status;
@@ -975,7 +971,6 @@ impl DrydockApp {
             Err(TryRecvError::Disconnected) => {
                 self.background_action = None;
                 self.busy_label = None;
-                self.pending_fix_block = None;
                 self.status = "The background action ended unexpectedly".into();
                 self.status_error = true;
             }
@@ -1294,7 +1289,6 @@ impl DrydockApp {
         });
     }
 
-    /// Opens the Activation tab with `app_id` preselected (from the details ACTIVATE button).
     pub fn remove_app_from_steam(&mut self, app_id: u32) {
         let Some(root) = self.steam_root_or_error("Steam was not found. Select its folder in Settings.")
         else {
@@ -1319,6 +1313,7 @@ impl DrydockApp {
         {
             names.push(conventional);
         }
+        self.busy_label = Some(format!("Removing \"{name}\" from Steam…"));
         let (sender, receiver) = mpsc::channel();
         self.service_receiver = Some(receiver);
         let writes = Arc::clone(&self.unlock_writes);

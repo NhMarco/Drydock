@@ -247,6 +247,7 @@ impl DrydockApp {
             .find(|manifest| manifest.app_id == app_id)
             .map(|manifest| manifest.install_dir().display().to_string())
             .unwrap_or_default();
+        self.activation_verify = None;
     }
 
     /// Loads in-game language options from an arbitrary folder (searching its subfolders for the
