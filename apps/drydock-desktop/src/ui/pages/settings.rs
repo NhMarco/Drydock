@@ -33,8 +33,15 @@ impl DrydockApp {
         result
     }
 
+    /// The configured games folder, if one is set — where a fresh Drydock download installs. `None`
+    /// falls back to Steam's `steamapps\common`.
+    pub fn games_directory(&self) -> Option<std::path::PathBuf> {
+        path_if_present(&self.settings.games_directory).map(Path::to_path_buf)
+    }
+
     pub fn save_settings(&mut self) -> bool {
         self.settings.steam_directory = self.steam_directory_draft.trim().to_owned();
+        self.settings.games_directory = self.games_directory_draft.trim().to_owned();
         match self.write_settings() {
             Ok(()) => {
                 self.status = "Settings saved".into();
@@ -110,6 +117,12 @@ impl DrydockApp {
                     status_pill(ui, "● Steam Linked", VERDIGRIS);
                 } else {
                     status_pill(ui, "○ Steam Unset", MUTED);
+                }
+                ui.add_space(6.0);
+                if self.games_directory_draft.trim().is_empty() {
+                    status_pill(ui, "Library: Steam Default", ACCENT_SOFT);
+                } else {
+                    status_pill(ui, "Library: Custom Folder", VERDIGRIS);
                 }
             });
         });
@@ -239,7 +252,125 @@ impl DrydockApp {
 
         ui.add_space(16.0);
 
-        // Card 2: Steam Service Integration
+        // Card 2: Games Installation Folder
+        egui::Frame::new()
+            .fill(SURFACE)
+            .stroke(Stroke::new(1.0, BORDER))
+            .corner_radius(16)
+            .inner_margin(24)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(icons::FOLDER).size(18.0).color(ACCENT));
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("GAMES INSTALLATION FOLDER").size(14.0).strong().color(TEXT));
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self.games_directory_draft.trim().is_empty() {
+                            status_pill(ui, "Steam Library Default", ACCENT_SOFT);
+                        } else {
+                            status_pill(ui, "Custom Folder", VERDIGRIS);
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(
+                        "Where Drydock installs the games it downloads itself. Leaving this empty keeps the default \
+                         behavior (Steam's own library), so an existing setup is unaffected until you pick a folder.",
+                    )
+                    .size(13.0)
+                    .color(MUTED),
+                );
+                ui.add_space(14.0);
+
+                ui.add_sized(
+                    [ui.available_width(), 40.0],
+                    egui::TextEdit::singleline(&mut self.games_directory_draft)
+                        .hint_text("Install folder for games downloaded in Drydock (empty = Steam library)")
+                        .font(FontId::monospace(13.0))
+                        .margin(egui::Margin::symmetric(12, 10)),
+                );
+                ui.add_space(8.0);
+
+                let draft = self.games_directory_draft.trim().to_owned();
+                ui.horizontal(|ui| {
+                    if draft.is_empty() {
+                        let fallback = self.steam.root.as_ref().map_or_else(
+                            || "Steam folder not set — pick a games folder here".to_owned(),
+                            |root| root.join("steamapps").join("common").display().to_string(),
+                        );
+                        ui.label(
+                            RichText::new(format!("Using Steam's library: {fallback}"))
+                                .size(12.5)
+                                .color(MUTED),
+                        );
+                    } else if Path::new(&draft).is_dir() {
+                        ui.label(
+                            RichText::new(format!("{}  Folder exists and ready", icons::CHECK))
+                                .size(12.5)
+                                .color(VERDIGRIS),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new(format!("{}  Folder does not exist yet — it will be created on first download", icons::SHIELD))
+                                .size(12.5)
+                                .color(AMBER),
+                        );
+                    }
+                });
+                ui.add_space(14.0);
+
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(primary_button(&format!("{}  SAVE", icons::CHECK)).compact())
+                        .on_hover_text("Save the folder new downloads install into")
+                        .clicked()
+                    {
+                        self.save_settings();
+                    }
+                    ui.add_space(8.0);
+                    if ui
+                        .add(ghost_button(&format!("{}  BROWSE", icons::FOLDER)).compact())
+                        .on_hover_text("Open a file picker to select the games folder")
+                        .clicked()
+                    {
+                        let mut dialog = rfd::FileDialog::new().set_title("Select games folder");
+                        let current = Path::new(self.games_directory_draft.trim());
+                        if current.is_dir() {
+                            dialog = dialog.set_directory(current);
+                        }
+                        if let Some(folder) = dialog.pick_folder() {
+                            self.games_directory_draft = folder.display().to_string();
+                            self.status = "Games folder selected. Save to apply it.".into();
+                            self.status_error = false;
+                        }
+                    }
+                    if !self.games_directory_draft.trim().is_empty() {
+                        ui.add_space(8.0);
+                        if ui
+                            .add(ghost_button(&format!("{}  USE STEAM LIBRARY", icons::UPDATES)).compact())
+                            .on_hover_text("Clear custom folder and install into Steam's library again")
+                            .clicked()
+                        {
+                            self.games_directory_draft.clear();
+                            self.save_settings();
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(
+                        "Only applies to new downloads. A game Steam already has installed is always \
+                         updated where it is.",
+                    )
+                    .size(11.5)
+                    .color(MUTED),
+                );
+            });
+
+        ui.add_space(16.0);
+
+        // Card 3: Steam Service Integration
         egui::Frame::new()
             .fill(SURFACE)
             .stroke(Stroke::new(1.0, BORDER))

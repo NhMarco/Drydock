@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{self, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -52,10 +53,15 @@ impl DrydockApp {
                 &paths.cache_dir(),
             )));
         egui_extras::install_image_loaders(&context.egui_ctx);
+        context
+            .egui_ctx
+            .options_mut(|options| options.reduce_texture_memory = true);
+        let image_textures = Arc::new(crate::image_cache::VisibleTextureLoader::default());
+        context.egui_ctx.add_texture_loader(image_textures.clone());
         // Recovering load: a corrupt/half-written settings file falls back to the `.bak` copy, and a
         // file that cannot be salvaged is moved aside rather than silently replaced by defaults —
         // otherwise the next save would wipe `added_apps` / `installed_games` / `launch_paths`.
-        let (mut settings, load_outcome) = Settings::load_recovering(&paths.settings_file());
+        let (settings, load_outcome) = Settings::load_recovering(&paths.settings_file());
         let settings_read_only = !load_outcome.save_is_safe();
         // Push the self-hosting overrides into the config layer before anything builds a
         // `ProxyClient`, so a user-supplied proxy address is in effect from the very first request.
@@ -96,20 +102,11 @@ impl DrydockApp {
                 Vec::new()
             }
         };
-        for manifest in &manifests {
-            if let Some(enabled) = settings.steam_updates_enabled.get(&manifest.app_id).copied() {
-                if let Err(error) = set_manifest_updates_enabled(&manifest.manifest_path, enabled) {
-                    status = format!("A saved game update policy could not be applied: {error}");
-                    status_error = true;
-                }
-            } else if let Ok(enabled) = updates_enabled(&manifest.manifest_path) {
-                settings.steam_updates_enabled.insert(manifest.app_id, enabled);
-            }
-        }
         let steam_directory_draft = steam.root.as_ref().map_or_else(
             || settings.steam_directory.clone(),
             |path| path.display().to_string(),
         );
+        let games_directory_draft = settings.games_directory.clone();
         let conflicts = detect_conflicting_software(steam.root.as_deref());
         // Prefer the cached Ryuu game list; otherwise show the small embedded catalog instantly
         // while the full list is fetched in the background.
@@ -171,6 +168,11 @@ impl DrydockApp {
             download_limiter: RateLimiter::new(1, Duration::from_secs(60)),
             search: String::new(),
             steam_directory_draft,
+            games_directory_draft,
+            last_unlock_update_check: None,
+            image_textures,
+            unlock_writes: Arc::default(),
+            unlock_update_receiver: None,
             validated_steam_path: None,
             selected_app: None,
             library_selected: None,
@@ -243,6 +245,7 @@ impl DrydockApp {
             download_switch_pending: false,
             started: Instant::now(),
         };
+        app.release_old_update_blocks();
         if app.settings.auto_update_drydock && AppUpdater::can_self_update() {
             app.start_update_check(true);
         }
@@ -794,34 +797,24 @@ impl DrydockApp {
                 self.busy_label = None;
                 match result {
                     Ok(entitlement) => {
-                        match self.protect_activated_manifest(entitlement.app_id) {
-                            Ok(()) => {
-                                self.entitlement_success_app = Some(
-                                    self.catalog
-                                        .iter()
-                                        .find(|app| app.app_id == entitlement.app_id)
-                                        .map_or_else(
-                                            || format!("App {}", entitlement.app_id),
-                                            |app| app.name.clone(),
-                                        ),
-                                );
-                                self.status = format!(
-                                    "Activation applied for App {} — game files installed and Steam updates blocked.",
-                                    entitlement.app_id
-                                );
-                                self.status_error = false;
-                            }
-                            Err(error) => {
-                                self.status = format!(
-                                    "Activation was verified, but Steam updates could not be blocked: {error}"
-                                );
-                                self.status_error = true;
-                            }
-                        }
+                        self.entitlement_success_app = Some(
+                            self.catalog
+                                .iter()
+                                .find(|app| app.app_id == entitlement.app_id)
+                                .map_or_else(
+                                    || format!("App {}", entitlement.app_id),
+                                    |app| app.name.clone(),
+                                ),
+                        );
+                        self.status = format!(
+                            "Activation applied for App {} — game files installed.",
+                            entitlement.app_id
+                        );
+                        self.status_error = false;
                         self.verified_entitlement = Some(entitlement);
                     }
                     Err(error) => {
-                        self.status = format!("Activation failed: {error}");
+                        self.status = error;
                         self.status_error = true;
                     }
                 }
@@ -834,19 +827,6 @@ impl DrydockApp {
             }
             Err(TryRecvError::Empty) => {}
         }
-    }
-
-    pub fn protect_activated_manifest(&mut self, app_id: u32) -> Result<(), String> {
-        let manifest = self
-            .manifests
-            .iter()
-            .find(|manifest| manifest.app_id == app_id)
-            .ok_or_else(|| "the Steam manifest is no longer available".to_owned())?;
-        set_manifest_updates_enabled(&manifest.manifest_path, false).map_err(|error| error.to_string())?;
-        self.settings.steam_updates_enabled.insert(app_id, false);
-        self.settings
-            .save(&self.paths.settings_file())
-            .map_err(|error| error.to_string())
     }
 
     pub fn start_featured(&mut self) {
@@ -919,21 +899,11 @@ impl DrydockApp {
             Ok(result) => {
                 self.background_action = None;
                 self.busy_label = None;
-                let fix_block = self.pending_fix_block.take();
+                self.pending_fix_block = None;
                 match result {
                     Ok(status) => {
                         self.status = status;
                         self.status_error = false;
-                        // Applying a fix succeeded — block Steam updates so the build-locked
-                        // fix is not overwritten by a game update.
-                        if let Some(app_id) = fix_block {
-                            self.status = match self.protect_activated_manifest(app_id) {
-                                Ok(()) => format!("{} Steam updates disabled for this game.", self.status),
-                                Err(error) => {
-                                    format!("{} (Updates could not be disabled: {error})", self.status)
-                                }
-                            };
-                        }
                     }
                     Err(error) => {
                         self.status = error;
@@ -1096,6 +1066,7 @@ impl DrydockApp {
                     app_id,
                     files: installed_names,
                     note: added_note(&name, &manifests),
+                    source: UnlockSource::Latest,
                 })
             })();
             let _ = sender.send(result);
@@ -1125,7 +1096,7 @@ impl DrydockApp {
             );
             self.status_error = true;
             return;
-        }
+        };
         let name = self.app_display_name(app_id);
         let (sender, receiver) = mpsc::channel();
         self.service_receiver = Some(receiver);
@@ -1169,6 +1140,56 @@ impl DrydockApp {
                             Ok(count) => format!(" with {count} depot manifest(s)"),
                         }
                     ),
+                    source: UnlockSource::Cracked,
+                })
+            })();
+            let _ = sender.send(result);
+        });
+    }
+
+    /// Adds a Lua and/or depot manifests the user picks from disk. `app_id` is the game whose page this
+    /// was started from; from the library, the game is taken from the Lua.
+    pub fn add_own_unlock(&mut self, app_id: Option<u32>) {
+        let Some(root) = self.steam_root_or_error("Steam was not found. Select its folder in Settings.")
+        else {
+            return;
+        };
+        if self.service_receiver.is_some() {
+            return;
+        }
+        let Some(files) = crate::unlocks::pick_unlock_files() else {
+            return;
+        };
+        let unlock = match read_own_unlock(&files, app_id) {
+            Ok(unlock) => unlock,
+            Err(error) => {
+                self.status = error.to_string();
+                self.status_error = true;
+                return;
+            }
+        };
+        let app_id = unlock.app_id;
+        let name = self.app_display_name(app_id);
+        let (sender, receiver) = mpsc::channel();
+        self.service_receiver = Some(receiver);
+        self.busy_label = Some(format!("Adding your files for {name} to Steam…"));
+        let store = self.payload_store.clone();
+        let writes = Arc::clone(&self.unlock_writes);
+        writes.touch(app_id);
+        std::thread::spawn(move || {
+            let result = (|| {
+                let manifest = OpenSteamTool::new()
+                    .and_then(|ost| ost.manifest())
+                    .map_err(|error| error.to_string())?;
+                if service_status(&root, &manifest).state != SteamServiceState::Current {
+                    return Err("Install or update the Steam Service before adding an app.".to_owned());
+                }
+                let note = crate::unlocks::install_own_unlock(&root, &store, &unlock, &writes, &name)?;
+                Ok(ServiceOutcome::Added {
+                    app_id,
+                    files: unlock.lua.iter().map(|_| unlock.lua_file_name()).collect(),
+                    note,
+                    source: UnlockSource::Own,
                 })
             })();
             let _ = sender.send(result);
@@ -1251,8 +1272,21 @@ impl DrydockApp {
                         }
                         self.service_status = Some(status);
                     }
-                    Ok(ServiceOutcome::Added { app_id, files, note }) => {
-                        let mut state = AddedAppState::default();
+                    Ok(ServiceOutcome::Added {
+                        app_id,
+                        files,
+                        note,
+                        source,
+                    }) => {
+                        let mut state = AddedAppState {
+                            source: Some(source),
+                            ..AddedAppState::default()
+                        };
+                        if files.is_empty()
+                            && let Some(previous) = self.settings.added_apps.get(&app_id)
+                        {
+                            state.files.clone_from(&previous.files);
+                        }
                         for file in files {
                             state.files.insert(file, String::new());
                         }
@@ -1346,6 +1380,37 @@ impl DrydockApp {
         }
     }
 
+    pub fn release_old_update_blocks(&mut self) {
+        let lua_apps = self
+            .steam
+            .root
+            .as_deref()
+            .map(installed_app_luas)
+            .unwrap_or_default();
+        let recorded_before = self.settings.legacy_update_blocks.len();
+        let release = release_update_blocks(
+            &self.manifests,
+            &lua_apps,
+            &mut self.settings.legacy_update_blocks,
+        );
+        if self.settings.legacy_update_blocks.len() != recorded_before {
+            let _ = self.write_settings();
+        }
+        if let Some((app_id, error)) = release.failed.first() {
+            self.status = format!(
+                "The old Steam update block of {} game(s) could not be lifted (App {app_id}: {error}). \
+                 Drydock tries again at the next start.",
+                release.failed.len()
+            );
+            self.status_error = true;
+        } else if !release.released.is_empty() && !self.status_error {
+            self.status = format!(
+                "Steam can update {} game(s) again: the update block older Drydock versions set was lifted.",
+                release.released.len()
+            );
+        }
+    }
+
     pub fn refresh_steam(&mut self) {
         self.steam = discover_steam(path_if_present(&self.steam_directory_draft));
         self.conflicts = detect_conflicting_software(self.steam.root.as_deref());
@@ -1358,20 +1423,7 @@ impl DrydockApp {
                     "Steam was not found. Select its folder in Settings.".into()
                 };
                 self.status_error = self.steam.root.is_none();
-                for manifest in &self.manifests {
-                    if let Some(enabled) = self.settings.steam_updates_enabled.get(&manifest.app_id).copied()
-                    {
-                        if let Err(error) = set_manifest_updates_enabled(&manifest.manifest_path, enabled) {
-                            self.status = format!("A saved game update policy could not be applied: {error}");
-                            self.status_error = true;
-                            break;
-                        }
-                    } else if let Ok(enabled) = updates_enabled(&manifest.manifest_path) {
-                        self.settings
-                            .steam_updates_enabled
-                            .insert(manifest.app_id, enabled);
-                    }
-                }
+                self.release_old_update_blocks();
                 if self
                     .selected_app
                     .is_some_and(|app_id| !self.manifests.iter().any(|manifest| manifest.app_id == app_id))
@@ -1472,6 +1524,8 @@ impl DrydockApp {
                 let (sender, receiver) = mpsc::channel::<DownloadUpdate>();
                 std::mem::forget(sender);
                 self.download_job = Some(DownloadJob {
+                    install_root: None,
+                    verified: None,
                     app_id: 3_751_260,
                     name: "The Blood of Dawnwalker".into(),
                     kind: DownloadKind::Download,
@@ -1494,10 +1548,134 @@ impl DrydockApp {
             _ => self.page = Page::Home,
         }
     }
+
+    pub fn apps_following_latest(&self) -> Vec<u32> {
+        let root = self.steam.root.as_deref();
+        self.settings
+            .added_apps
+            .iter()
+            .filter(|(app_id, state)| match state.source {
+                Some(UnlockSource::Latest) => true,
+                Some(UnlockSource::Cracked | UnlockSource::Own) => false,
+                None => {
+                    self.fixes_loaded
+                        && !self
+                            .fix_for(**app_id)
+                            .and_then(|fix| fix.denuvo.as_ref())
+                            .zip(root)
+                            .is_some_and(|(denuvo, root)| fix_status(root, denuvo) == FixStatus::Applied)
+                }
+            })
+            .map(|(app_id, _)| *app_id)
+            .collect()
+    }
+
+    pub fn maybe_update_unlocks(&mut self) {
+        if !self.settings.auto_update_unlocks || self.unlock_update_receiver.is_some() {
+            return;
+        }
+        if self
+            .last_unlock_update_check
+            .is_some_and(|at| at.elapsed() < UNLOCK_UPDATE_POLL)
+        {
+            return;
+        }
+        self.last_unlock_update_check = Some(Instant::now());
+        let Some(root) = self.steam.root.clone() else {
+            return;
+        };
+        if self
+            .service_status
+            .as_ref()
+            .is_none_or(|status| status.state != SteamServiceState::Current)
+        {
+            return;
+        }
+        let apps = self.apps_following_latest();
+        let marker = self.paths.cache_dir().join("unlock-update.marker");
+        if apps.is_empty() || refresh_marker_is_current(&marker, "v1", UNLOCK_UPDATE_INTERVAL) {
+            return;
+        }
+        if let Some(parent) = marker.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&marker, "v1");
+        let store = self.payload_store.clone();
+        let writes = Arc::clone(&self.unlock_writes);
+        let (sender, receiver) = mpsc::channel();
+        self.unlock_update_receiver = Some(receiver);
+        std::thread::spawn(move || {
+            let sweep = match ProxyClient::new() {
+                Ok(client) => crate::unlocks::update_unlocks(
+                    &root,
+                    &store,
+                    &apps,
+                    &writes,
+                    UNLOCK_UPDATE_SPACING,
+                    |app_id| match DepotData::fetch(&client, app_id) {
+                        Ok(data) => Ok(data.lua.map(|(_, lua)| (lua, data.raw_manifests))),
+                        Err(error) => Err(error.to_string()),
+                    },
+                ),
+                Err(_) => crate::unlocks::UnlockUpdateSweep {
+                    updated: Vec::new(),
+                    failed: apps.len(),
+                },
+            };
+            let _ = sender.send(sweep);
+        });
+    }
+
+    pub fn poll_unlock_updates(&mut self) {
+        let Some(receiver) = self.unlock_update_receiver.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(sweep) => {
+                self.unlock_update_receiver = None;
+                if sweep.updated.is_empty() {
+                    return;
+                }
+                let mut recorded = false;
+                for app_id in &sweep.updated {
+                    if let Some(state) = self.settings.added_apps.get_mut(app_id)
+                        && state.source.is_none()
+                    {
+                        state.source = Some(UnlockSource::Latest);
+                        recorded = true;
+                    }
+                }
+                if recorded {
+                    let _ = self.persist_settings();
+                }
+                self.refresh_plugin_luas();
+                let names: Vec<String> = sweep
+                    .updated
+                    .iter()
+                    .take(3)
+                    .map(|app_id| self.app_display_name(*app_id))
+                    .collect();
+                let more = sweep.updated.len().saturating_sub(names.len());
+                self.status = format!(
+                    "Updated the Lua and manifests of {}{} to the latest version.",
+                    names.join(", "),
+                    if more > 0 {
+                        format!(" and {more} more")
+                    } else {
+                        String::new()
+                    }
+                );
+                self.status_error = false;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => self.unlock_update_receiver = None,
+        }
+    }
 }
 
 impl eframe::App for DrydockApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.image_textures.forget_retired(ui.ctx());
         self.poll_background_action();
         self.poll_catalog_refresh();
         self.poll_denuvo_refresh();
@@ -1518,6 +1696,8 @@ impl eframe::App for DrydockApp {
         self.poll_download_install();
         self.poll_cloud_download();
         self.poll_cloud_oauth();
+        self.poll_unlock_updates();
+        self.maybe_update_unlocks();
         // Entering a new page re-checks installed games and the Service status, so the
         // library, the activatable list, and the per-app buttons stay current without a restart.
         if self.page != self.last_page {
@@ -1553,6 +1733,7 @@ impl eframe::App for DrydockApp {
             || self.download_install_receiver.is_some()
             || self.cloud_download_receiver.is_some()
             || self.cloud_oauth_receiver.is_some()
+            || self.unlock_update_receiver.is_some()
             || self
                 .download_job
                 .as_ref()

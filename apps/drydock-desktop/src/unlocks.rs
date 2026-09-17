@@ -13,18 +13,18 @@ use drydock_core::{AppPayloadStore, OwnUnlock, add_app_files, install_depot_mani
 /// app the user changes; an update sweep leaves those alone, so it never replaces a choice the user
 /// made while the sweep was running (adding the cracked version, say).
 #[derive(Default)]
-pub(crate) struct UnlockWrites {
+pub struct UnlockWrites {
     writes: Mutex<()>,
     touched: Mutex<HashSet<u32>>,
 }
 
 impl UnlockWrites {
-    pub(crate) fn write(&self) -> MutexGuard<'_, ()> {
+    pub fn write(&self) -> MutexGuard<'_, ()> {
         self.writes.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Records that the user is changing `app_id`'s unlock.
-    pub(crate) fn touch(&self, app_id: u32) {
+    pub fn touch(&self, app_id: u32) {
         self.touched_apps().insert(app_id);
     }
 
@@ -35,15 +35,15 @@ impl UnlockWrites {
 
 /// What an update sweep did.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct UnlockUpdateSweep {
+pub struct UnlockUpdateSweep {
     /// Apps whose Lua or manifests were replaced with the provider's current ones.
-    pub(crate) updated: Vec<u32>,
+    pub updated: Vec<u32>,
     /// Apps that could not be checked or written.
-    pub(crate) failed: usize,
+    pub failed: usize,
 }
 
 /// The provider's current unlock for one app: the Lua and the manifests keyed by `depotcache` name.
-pub(crate) type CurrentUnlock = (Vec<u8>, BTreeMap<String, Vec<u8>>);
+pub type CurrentUnlock = (Vec<u8>, BTreeMap<String, Vec<u8>>);
 
 /// Brings the unlock of each of `apps` to the provider's current one, where it changed.
 ///
@@ -51,7 +51,7 @@ pub(crate) type CurrentUnlock = (Vec<u8>, BTreeMap<String, Vec<u8>>);
 /// leaves the app alone rather than downgrading it to an unpinned one). Apps are handled one at a
 /// time, `spacing` apart, because each fetch can make the provider build a package. An app whose Lua
 /// is no longer in Steam was removed outside Drydock and is not brought back.
-pub(crate) fn update_unlocks(
+pub fn update_unlocks(
     steam_root: &Path,
     store: &AppPayloadStore,
     apps: &[u32],
@@ -99,7 +99,7 @@ pub(crate) fn update_unlocks(
 ///
 /// The store copy is merged with what was stored before: adding a few manifests keeps the Lua, and
 /// a new Lua keeps the manifests.
-pub(crate) fn install_own_unlock(
+pub fn install_own_unlock(
     steam_root: &Path,
     store: &AppPayloadStore,
     unlock: &OwnUnlock,
@@ -143,7 +143,7 @@ pub(crate) fn install_own_unlock(
 }
 
 /// The picked files as paths, in the order the dialog returned them.
-pub(crate) fn pick_unlock_files() -> Option<Vec<PathBuf>> {
+pub fn pick_unlock_files() -> Option<Vec<PathBuf>> {
     rfd::FileDialog::new()
         .set_title("Select a Lua and/or depot manifests")
         .add_filter("Unlock files", &["lua", "manifest"])

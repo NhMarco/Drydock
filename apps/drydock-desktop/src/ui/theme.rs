@@ -43,6 +43,12 @@ pub const UPDATE_CHECK_COOLDOWN: Duration = Duration::from_secs(15 * 60);
 /// Shortest gap between network-backed Steam Service status checks triggered by page
 /// switches, so rapidly flipping tabs does not hammer the payload repository.
 pub const SERVICE_RECHECK_COOLDOWN: Duration = Duration::from_secs(30);
+/// How often the unlocks of apps added with the latest version are compared with the provider's.
+pub const UNLOCK_UPDATE_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
+/// How often the UI looks at whether an unlock update sweep is due.
+pub const UNLOCK_UPDATE_POLL: Duration = Duration::from_secs(5 * 60);
+/// The pause between two apps in a sweep: each fetch may make the provider build a package.
+pub const UNLOCK_UPDATE_SPACING: Duration = Duration::from_secs(2);
 
 /// Lucide Vector Icons Unicode mappings (Private Use Area glyphs from lucide.ttf).
 #[allow(dead_code)]

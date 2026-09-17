@@ -2,7 +2,7 @@ use std::fs;
 use std::sync::mpsc::{self, TryRecvError};
 
 use drydock_core::*;
-use eframe::egui::{self, Color32, FontId, RichText, Stroke, Vec2};
+use eframe::egui::{self, Color32, RichText, Stroke};
 
 use crate::ui::theme::*;
 use crate::ui::types::*;
@@ -84,24 +84,16 @@ impl DrydockApp {
             page_heading(ui, &format!("{}  Updates", icons::UPDATES));
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let protected_count = self
-                    .manifests
-                    .iter()
-                    .filter(|m| {
-                        let pref = self
-                            .settings
-                            .steam_updates_enabled
-                            .get(&m.app_id)
-                            .copied()
-                            .or_else(|| updates_enabled(&m.manifest_path).ok())
-                            .unwrap_or(true);
-                        !pref
-                    })
-                    .count();
-                if protected_count > 0 {
-                    status_pill(ui, &format!("🛡 {protected_count} Protected Games"), DANGER);
+                let active_count = (self.settings.auto_update_drydock as usize)
+                    + (self.settings.auto_update_unlocks as usize);
+                if !self.settings.legacy_update_blocks.is_empty() {
+                    status_pill(ui, &format!("⚠ {} Legacy Blocks", self.settings.legacy_update_blocks.len()), AMBER);
+                } else if active_count == 2 {
+                    status_pill(ui, "● All Auto-Updates Active", VERDIGRIS);
+                } else if active_count == 1 {
+                    status_pill(ui, "◐ Partial Auto-Updates", ACCENT_SOFT);
                 } else {
-                    status_pill(ui, "● All Updates Allowed", ACCENT_SOFT);
+                    status_pill(ui, "○ Updates Manual", MUTED);
                 }
             });
         });
@@ -137,9 +129,9 @@ impl DrydockApp {
                     let toggle_changed = toggle_switch(ui, &mut self.settings.auto_update_drydock, ACCENT_SOFT).changed();
                     ui.add_space(8.0);
                     if self.settings.auto_update_drydock {
-                        ui.label(RichText::new("Automatic updates enabled on launch").size(13.0).color(TEXT));
+                        ui.label(RichText::new("Automatic client updates enabled on launch").size(13.0).color(TEXT));
                     } else {
-                        ui.label(RichText::new("Automatic updates disabled").size(13.0).color(MUTED));
+                        ui.label(RichText::new("Automatic client updates disabled").size(13.0).color(MUTED));
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -190,173 +182,132 @@ impl DrydockApp {
 
         ui.add_space(16.0);
 
-        // Caution Banner for Steam Updates
+        // Card 2: Lua & Manifest Auto-Update
+        let previous_unlock_updates = self.settings.auto_update_unlocks;
+        let mut unlock_updates_changed = false;
+
         egui::Frame::new()
-            .fill(Color32::from_rgb(26, 20, 10))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(180, 110, 20)))
-            .corner_radius(12)
-            .inner_margin(16)
+            .fill(SURFACE)
+            .stroke(Stroke::new(1.0, BORDER))
+            .corner_radius(16)
+            .inner_margin(24)
             .show(ui, |ui| {
-                let avail_w = ui.available_width();
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(icons::SHIELD).size(18.0).color(AMBER));
+                    ui.label(RichText::new(icons::SPARKLES).size(18.0).color(ACCENT));
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("LUA & MANIFEST AUTO-UPDATE").size(14.0).strong().color(TEXT));
                     ui.add_space(8.0);
-                    let text_w = (avail_w - 40.0).max(100.0);
-                    ui.add_sized(
-                        [text_w, 0.0],
-                        egui::Label::new(
-                            RichText::new(
-                                "STEAM UPDATE PROTECTION · Automatic Steam updates can overwrite game executables, \
-                                 reverting custom fixes, DLC unlocks, and offline activations. \
-                                 Toggle updates to 'BLOCKED' on any modified title to preserve your files.",
-                            )
-                            .size(12.5)
-                            .strong()
-                            .color(AMBER),
-                        )
-                        .wrap(),
-                    );
+                    status_pill(ui, "Twice Daily", ACCENT_SOFT);
+                });
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(
+                        "Games added with the latest version get new Lua scripts and depot manifests twice a day. \
+                         Cracked versions and your own custom files are left alone.",
+                    )
+                    .size(13.0)
+                    .color(MUTED),
+                );
+                ui.add_space(16.0);
+
+                ui.horizontal(|ui| {
+                    let toggle_changed = toggle_switch(ui, &mut self.settings.auto_update_unlocks, ACCENT_SOFT).changed();
+                    ui.add_space(8.0);
+                    if self.settings.auto_update_unlocks {
+                        ui.label(RichText::new("Automatic Lua and manifest sync active (every 12 hours)").size(13.0).color(TEXT));
+                    } else {
+                        ui.label(RichText::new("Automatic unlock updates disabled").size(13.0).color(MUTED));
+                    }
+
+                    if toggle_changed {
+                        unlock_updates_changed = true;
+                    }
                 });
             });
 
-        ui.add_space(16.0);
-
-        // Section header for game manifests
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(icons::FOLDER).size(16.0).color(ACCENT));
-            ui.add_space(4.0);
-            ui.label(RichText::new("STEAM GAME MANIFESTS").size(13.0).strong().color(TEXT));
-            ui.add_space(6.0);
-            status_pill(ui, &format!("{} games found", self.manifests.len()), MUTED);
-        });
-        ui.add_space(10.0);
-
-        let mut pending_change = None;
-
-        if self.manifests.is_empty() {
-            egui::Frame::new()
-                .fill(SURFACE)
-                .stroke(Stroke::new(1.0, BORDER))
-                .corner_radius(16)
-                .inner_margin(32)
-                .show(ui, |ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.label(RichText::new(icons::FOLDER).size(32.0).color(MUTED));
-                        ui.add_space(8.0);
-                        ui.label(RichText::new("No Steam game manifests detected").size(15.0).strong().color(TEXT));
-                        ui.add_space(4.0);
-                        ui.label(
-                            RichText::new("Verify that your Steam installation directory is set correctly in Settings.")
-                                .size(13.0)
-                                .color(MUTED),
-                        );
-                    });
-                });
-        }
-
-        for manifest in &self.manifests {
-            let current = self
-                .settings
-                .steam_updates_enabled
-                .get(&manifest.app_id)
-                .copied()
-                .or_else(|| updates_enabled(&manifest.manifest_path).ok())
-                .unwrap_or(true);
-            let mut preference = current;
-
-            egui::Frame::new()
-                .fill(SURFACE)
-                .stroke(Stroke::new(
-                    1.0,
-                    if !preference {
-                        Color32::from_rgb(180, 60, 60)
-                    } else {
-                        BORDER
-                    },
-                ))
-                .corner_radius(14)
-                .inner_margin(18)
-                .show(ui, |ui| {
-                    let avail_w = ui.available_width();
-                    let right_w = 230.0;
-                    let left_w = (avail_w - right_w - 16.0).max(120.0);
-
-                    ui.horizontal(|ui| {
-                        ui.allocate_ui_with_layout(Vec2::new(left_w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(&manifest.name).size(15.0).strong().color(TEXT));
-                                ui.add_space(6.0);
-                                status_pill(ui, &format!("APP {}", manifest.app_id), ACCENT_SOFT);
-                            });
-                            ui.add_space(3.0);
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(manifest.manifest_path.display().to_string())
-                                        .size(12.0)
-                                        .font(FontId::monospace(11.5))
-                                        .color(MUTED),
-                                )
-                                .truncate(),
-                            );
-                        });
-
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let accent = if preference { ACCENT_SOFT } else { DANGER };
-                            if toggle_switch(ui, &mut preference, accent).changed() {
-                                pending_change = Some((
-                                    manifest.app_id,
-                                    manifest.manifest_path.clone(),
-                                    current,
-                                    preference,
-                                ));
-                            }
-                            ui.add_space(10.0);
-                            if preference {
-                                status_pill(ui, "UPDATES ALLOWED", ACCENT_SOFT);
-                            } else {
-                                status_pill(ui, "🛡 UPDATES BLOCKED", DANGER);
-                            }
-                        });
-                    });
-                });
-            ui.add_space(8.0);
-        }
-
-        if let Some((app_id, path, previous, enabled)) = pending_change {
-            match set_manifest_updates_enabled(&path, enabled) {
+        if unlock_updates_changed {
+            match self.persist_settings() {
                 Ok(()) => {
-                    self.settings.steam_updates_enabled.insert(app_id, enabled);
-                    match self.persist_settings() {
-                        Ok(()) => {
-                            self.status = if enabled {
-                                format!("Updates enabled for App {app_id}")
-                            } else {
-                                format!("Updates blocked for App {app_id}")
-                            };
-                            self.status_error = false;
-                        }
-                        Err(error) => {
-                            let rollback = set_manifest_updates_enabled(&path, previous);
-                            self.settings.steam_updates_enabled.insert(app_id, previous);
-                            self.status = match rollback {
-                                Ok(()) => {
-                                    format!("Update preference was not saved and was rolled back: {error}")
-                                }
-                                Err(rollback_error) => {
-                                    format!("Update preference was not saved and rollback failed: {error}; {rollback_error}")
-                                }
-                            };
-                            self.status_error = true;
-                        }
-                    }
+                    // Turning it on checks at the next opportunity instead of in a few minutes.
+                    self.last_unlock_update_check = None;
+                    self.status = if self.settings.auto_update_unlocks {
+                        "Lua and manifest auto update enabled".into()
+                    } else {
+                        "Lua and manifest auto update disabled".into()
+                    };
+                    self.status_error = false;
                 }
                 Err(error) => {
-                    self.status = error.to_string();
+                    self.settings.auto_update_unlocks = previous_unlock_updates;
+                    self.status = format!("Auto-update setting could not be saved: {error}");
                     self.status_error = true;
                 }
             }
         }
+
+        ui.add_space(16.0);
+
+        // Card 3: Steam Update Architecture / Legacy Blocks Cleanup
+        if !self.settings.legacy_update_blocks.is_empty() {
+            let legacy_count = self.settings.legacy_update_blocks.len();
+            egui::Frame::new()
+                .fill(Color32::from_rgb(26, 20, 10))
+                .stroke(Stroke::new(1.0, Color32::from_rgb(180, 110, 20)))
+                .corner_radius(16)
+                .inner_margin(24)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(icons::SHIELD).size(18.0).color(AMBER));
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("LEGACY STEAM UPDATE BLOCKS").size(14.0).strong().color(AMBER));
+                        ui.add_space(8.0);
+                        status_pill(ui, &format!("{legacy_count} Locked Manifests"), AMBER);
+                    });
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(
+                            "Previous versions of Drydock locked Steam .acf manifests to prevent updates. \
+                             This fragile practice caused Steam write errors and is no longer needed: \
+                             Drydock now uses dedicated install directories and on-demand depot verification. \
+                             Click below to lift all legacy read-only locks and restore standard permissions.",
+                        )
+                        .size(13.0)
+                        .color(MUTED),
+                    );
+                    ui.add_space(16.0);
+                    if ui
+                        .add(primary_button(&format!("{}  LIFT ALL BLOCKS NOW", icons::CHECK)).compact())
+                        .on_hover_text("Remove read-only attributes from all previously locked Steam manifests")
+                        .clicked()
+                    {
+                        self.release_old_update_blocks();
+                    }
+                });
+        } else {
+            egui::Frame::new()
+                .fill(SURFACE)
+                .stroke(Stroke::new(1.0, BORDER))
+                .corner_radius(16)
+                .inner_margin(24)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(icons::CHECK).size(18.0).color(VERDIGRIS));
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("STEAM MANIFEST ARCHITECTURE").size(14.0).strong().color(TEXT));
+                        ui.add_space(8.0);
+                        status_pill(ui, "● Clean & Unlocked", VERDIGRIS);
+                    });
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(
+                            "All Steam manifests are fully unlocked. Drydock protects your games non-intrusively \
+                             via isolated directories and custom depot verification, guaranteeing zero Steam client \
+                             lock-file conflicts.",
+                        )
+                        .size(13.0)
+                        .color(MUTED),
+                    );
+                });
+        }
     }
-
 }
-

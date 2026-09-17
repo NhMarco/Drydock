@@ -3,13 +3,13 @@ use drydock_core::{CdnClient, DepotData, DownloadProgress, ProxyClient, depot, f
 
 /// How hard a depot job may push the network and the disk, from Settings.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct JobLimits {
+pub struct JobLimits {
     /// Parallel CDN connections for a download.
-    pub(crate) connections: usize,
+    pub connections: usize,
     /// Aggregate download cap in bytes per second.
-    pub(crate) max_bps: Option<u64>,
+    pub max_bps: Option<u64>,
     /// The verify thread setting; `0` lets the engine choose for the drive.
-    pub(crate) verify_threads: u32,
+    pub verify_threads: u32,
 }
 use std::{
     path::PathBuf,
@@ -21,7 +21,7 @@ use std::{
     time::Instant,
 };
 
-pub(crate) fn installed_directory(
+pub fn installed_directory(
     settings: &drydock_core::Settings,
     manifests: &[drydock_core::SteamManifest],
     app_id: u32,
@@ -38,32 +38,32 @@ pub(crate) fn installed_directory(
         })
 }
 /// A running (or just-finished) depot download or verify, driven by a background thread.
-pub(crate) struct DownloadJob {
-    pub(crate) install_root: Option<PathBuf>,
+pub struct DownloadJob {
+    pub install_root: Option<PathBuf>,
     /// For a verify: whether every file and chunk checked out, once the job has said so.
-    pub(crate) verified: Option<bool>,
-    pub(crate) app_id: u32,
-    pub(crate) name: String,
-    pub(crate) kind: DownloadKind,
-    pub(crate) cancel: Arc<AtomicBool>,
-    pub(crate) receiver: Receiver<DownloadUpdate>,
-    pub(crate) progress: Option<DownloadProgress>,
+    pub verified: Option<bool>,
+    pub app_id: u32,
+    pub name: String,
+    pub kind: DownloadKind,
+    pub cancel: Arc<AtomicBool>,
+    pub receiver: Receiver<DownloadUpdate>,
+    pub progress: Option<DownloadProgress>,
     /// Smoothed download speed in bytes/sec, its running peak, plus the last (time, done_bytes)
     /// sample the estimate came from.
-    pub(crate) speed_bps: f64,
-    pub(crate) peak_bps: f64,
-    pub(crate) sample: Option<(Instant, u64)>,
+    pub speed_bps: f64,
+    pub peak_bps: f64,
+    pub sample: Option<(Instant, u64)>,
     /// `Some` once the job ended: `Ok(summary)` or `Err(message)`.
-    pub(crate) finished: Option<Result<String, String>>,
+    pub finished: Option<Result<String, String>>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(crate) enum DownloadKind {
+pub enum DownloadKind {
     Download,
     Verify,
 }
 
-pub(crate) enum DownloadUpdate {
+pub enum DownloadUpdate {
     Installed(PathBuf),
     /// A verify finished; `true` when nothing needs repair.
     Verified(bool),
@@ -78,7 +78,7 @@ pub(crate) enum DownloadUpdate {
 /// than starting a second copy elsewhere. Only a fresh install is free to choose, and then Drydock's
 /// configured games folder takes precedence over Steam's `steamapps\common`. The worker reports the
 /// folder it used back to the UI, which registers exactly that one.
-pub(crate) fn depot_install_root(
+pub fn depot_install_root(
     app_id: u32,
     installed_dir: Option<PathBuf>,
     games_directory: Option<PathBuf>,
@@ -102,7 +102,7 @@ pub(crate) fn depot_install_root(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn run_depot_job(
+pub fn run_depot_job(
     app_id: u32,
     name: &str,
     kind: DownloadKind,
@@ -173,7 +173,7 @@ pub(crate) fn run_depot_job(
     }
 }
 
-pub(crate) fn human_bytes(bytes: u64) -> String {
+pub fn human_bytes(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
     let mut size = bytes as f64;
     let mut unit = 0;

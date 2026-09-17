@@ -737,6 +737,7 @@ impl DrydockApp {
             DetailsAction::None => {}
             DetailsAction::AddToSteam => self.add_app_to_steam(app_id),
             DetailsAction::AddCracked => self.add_cracked_to_steam(app_id),
+            DetailsAction::AddOwn => self.add_own_unlock(Some(app_id)),
             DetailsAction::RemoveFromSteam => self.remove_app_from_steam(app_id),
             DetailsAction::InstallService => self.install_steam_service(),
             DetailsAction::ApplyDenuvoFix => self.apply_denuvo_fix_for(app_id),

@@ -1,7 +1,6 @@
 use egui::Color32;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 use std::sync::mpsc::Receiver;
 
@@ -221,6 +220,11 @@ pub struct DrydockApp {
     pub download_limiter: RateLimiter,
     pub search: String,
     pub steam_directory_draft: String,
+    pub games_directory_draft: String,
+    pub last_unlock_update_check: Option<Instant>,
+    pub image_textures: Arc<crate::image_cache::VisibleTextureLoader>,
+    pub unlock_writes: Arc<crate::unlocks::UnlockWrites>,
+    pub unlock_update_receiver: Option<Receiver<crate::unlocks::UnlockUpdateSweep>>,
     /// Cache of the last validated draft path and its result, to avoid re-checking every frame.
     pub validated_steam_path: Option<(String, SteamDirValidation)>,
     pub selected_app: Option<u32>,
@@ -338,33 +342,16 @@ pub struct DrydockApp {
 }
 
 
-/// A running (or just-finished) depot download or verify, driven by a background thread.
-pub struct DownloadJob {
-    pub app_id: u32,
-    pub name: String,
-    pub kind: DownloadKind,
-    pub cancel: Arc<AtomicBool>,
-    pub receiver: Receiver<DownloadUpdate>,
-    pub progress: Option<DownloadProgress>,
-    /// Smoothed download speed in bytes/sec, its running peak, plus the last (time, done_bytes)
-    /// sample the estimate came from.
-    pub speed_bps: f64,
-    pub peak_bps: f64,
-    pub sample: Option<(Instant, u64)>,
-    /// `Some` once the job ended: `Ok(summary)` or `Err(message)`.
-    pub finished: Option<Result<String, String>>,
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub enum DownloadKind {
-    Download,
-    Verify,
-}
-
-pub enum DownloadUpdate {
-    Progress(DownloadProgress),
-    Finished(Result<String, String>),
-}
+#[allow(unused_imports)]
+pub use crate::downloads::{
+    depot_install_root, installed_directory, run_depot_job, DownloadJob, DownloadKind,
+    DownloadUpdate, JobLimits,
+};
+#[allow(unused_imports)]
+pub use crate::unlocks::{
+    install_own_unlock, pick_unlock_files, update_unlocks, CurrentUnlock, UnlockUpdateSweep,
+    UnlockWrites,
+};
 
 /// Outcome of the pre-activation folder check: the verified install root, and whether crack/HV
 /// artifacts must be removed before a request code is generated.
@@ -457,6 +444,7 @@ pub enum ServiceOutcome {
         app_id: u32,
         files: Vec<String>,
         note: String,
+        source: UnlockSource,
     },
     /// An app's Lua unlock files were removed; drop it from settings.
     Removed { app_id: u32, note: String },
@@ -616,12 +604,15 @@ pub struct DepotButtons {
 
 
 #[derive(Clone, Copy, Eq, PartialEq)]
+#[allow(dead_code)]
 pub enum DetailsAction {
     None,
     /// Add the normal unlock Lua so Steam installs/updates the game to its latest build.
     AddToSteam,
     /// Add the GitHub build-locked "Denuvo fix" Lua so the game is pinned to the cracked build.
     AddCracked,
+    /// Add a Lua and/or depot manifests the user picks from disk.
+    AddOwn,
     RemoveFromSteam,
     /// Install the Steam Service (shown in place of Add to Steam when it is not installed).
     InstallService,

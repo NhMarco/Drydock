@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, TryRecvError};
 use std::sync::Arc;
@@ -12,75 +11,7 @@ use crate::ui::types::*;
 use crate::ui::widgets::*;
 use crate::ui::helpers::*;
 
-pub fn run_depot_job(
-    app_id: u32,
-    name: &str,
-    kind: DownloadKind,
-    steam_root: Option<PathBuf>,
-    installed_dir: Option<PathBuf>,
-    connections: usize,
-    max_bps: Option<u64>,
-    cancel: &AtomicBool,
-    sender: &mpsc::Sender<DownloadUpdate>,
-) -> Result<String, String> {
-    let proxy = ProxyClient::new().map_err(|error| error.to_string())?;
-    let data = DepotData::fetch(&proxy, app_id).map_err(|error| error.to_string())?;
 
-    // Refuse to "succeed" on a package that has no game content. Some upstream builds ship only the
-    // shared redistributables (Visual C++, DirectX, …) with keys for the real content depots but no
-    // manifest for them — downloading that would leave the game unplayable while claiming it
-    // finished. Tell the user to retry once the source has packaged the content.
-    if matches!(kind, DownloadKind::Download) && data.has_no_content() {
-        return Err(format!(
-            "{name} isn't fully available from the source yet: only the shared redistributables were \
-             packaged (no game content depots). The upstream is likely still building the package — \
-             try Download again in a few minutes."
-        ));
-    }
-
-    let install_root = match installed_dir {
-        Some(dir) => dir,
-        None => {
-            let root = steam_root.ok_or_else(|| "Steam folder not found. Set it in Settings.".to_owned())?;
-            let installdir = fetch_install_dir(app_id)
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| "Steam did not report an install folder for this game.".to_owned())?;
-            root.join("steamapps").join("common").join(installdir)
-        }
-    };
-
-    let forward = |progress: DownloadProgress| {
-        let _ = sender.send(DownloadUpdate::Progress(progress));
-    };
-    match kind {
-        DownloadKind::Download => {
-            let cdn = CdnClient::new().map_err(|error| error.to_string())?;
-            let outcome =
-                depot::download::download(&data, &install_root, &cdn, cancel, connections, max_bps, forward)
-                    .map_err(|error| error.to_string())?;
-            Ok(format!(
-                "Downloaded {name} — {} files, {}",
-                outcome.files_written,
-                human_bytes(outcome.bytes_written)
-            ))
-        }
-        DownloadKind::Verify => {
-            let outcome = depot::download::verify(&data, &install_root, cancel, forward)
-                .map_err(|error| error.to_string())?;
-            if outcome.is_complete() {
-                Ok(format!(
-                    "{name} verified — all {} chunks OK",
-                    outcome.total_chunks
-                ))
-            } else {
-                Ok(format!(
-                    "{name}: {} of {} chunks need repair — press Download to fix",
-                    outcome.bad_chunks, outcome.total_chunks
-                ))
-            }
-        }
-    }
-}
 
 /// Formats a byte-per-second rate as a compact human string (e.g. `9.9 MB/s`).
 
@@ -105,19 +36,18 @@ impl DrydockApp {
     /// (queue start / verify) guarantee nothing else is running.
     pub fn spawn_job(&mut self, app_id: u32, name: String, kind: DownloadKind) {
         let steam_root = self.steam.root.clone();
-        let installed_dir = self
-            .manifests
-            .iter()
-            .find(|manifest| manifest.app_id == app_id)
-            .map(SteamManifest::install_dir);
-        // Parallel connections (0 = fall back to the default 8) and an optional MB/s cap, from Settings.
-        let connections = match self.settings.max_download_connections {
-            0 => 8,
-            n => n.clamp(1, 32),
-        } as usize;
-        let max_bps = match self.settings.max_download_mbps {
-            0 => None,
-            mbps => Some(u64::from(mbps) * 1024 * 1024),
+        let installed_dir = installed_directory(&self.settings, &self.manifests, app_id);
+        let games_directory = self.games_directory();
+        let limits = JobLimits {
+            connections: match self.settings.max_download_connections {
+                0 => Settings::DEFAULT_DOWNLOAD_CONNECTIONS,
+                n => n.clamp(1, 32),
+            } as usize,
+            max_bps: match self.settings.max_download_mbps {
+                0 => None,
+                mbps => Some(u64::from(mbps) * 1024 * 1024),
+            },
+            verify_threads: self.settings.verify_threads,
         };
         let cancel = Arc::new(AtomicBool::new(false));
         let thread_cancel = Arc::clone(&cancel);
@@ -130,14 +60,16 @@ impl DrydockApp {
                 kind,
                 steam_root,
                 installed_dir,
-                connections,
-                max_bps,
+                games_directory,
+                limits,
                 &thread_cancel,
                 &sender,
             );
             let _ = sender.send(DownloadUpdate::Finished(result));
         });
         self.download_job = Some(DownloadJob {
+            install_root: None,
+            verified: None,
             app_id,
             name,
             kind,
@@ -304,6 +236,8 @@ impl DrydockApp {
             loop {
                 match job.receiver.try_recv() {
                     Ok(DownloadUpdate::Progress(progress)) => job.progress = Some(progress),
+                    Ok(DownloadUpdate::Installed(root)) => job.install_root = Some(root),
+                    Ok(DownloadUpdate::Verified(complete)) => job.verified = Some(complete),
                     Ok(DownloadUpdate::Finished(result)) => {
                         finished = Some(result);
                         break;
@@ -361,14 +295,23 @@ impl DrydockApp {
                 let finished_game = self
                     .download_job
                     .as_ref()
-                    .map(|job| (job.app_id, job.name.clone()));
+                    .map(|job| (job.app_id, job.name.clone(), job.install_root.clone()));
                 self.download_job = None; // the download thread has ended
                 match result {
                     Ok(_) => {
                         // Completed: drop it from the queue by App ID (robust to reordering), persist,
                         // register it in the Drydock library, and resume the next one.
-                        if let Some((id, name)) = finished_game {
-                            download_queue::remove_completed(&mut self.settings.download_queue, id);
+                        if let Some((id, name, root)) = finished_game {
+                            if let Some(install_root) = root {
+                                drydock_core::download_queue::register_completed(
+                                    &mut self.settings,
+                                    id,
+                                    &name,
+                                    &install_root,
+                                );
+                            } else {
+                                download_queue::remove_completed(&mut self.settings.download_queue, id);
+                            }
                             let _ = self.persist_settings();
                             self.start_download_install_detect(id, name);
                         }

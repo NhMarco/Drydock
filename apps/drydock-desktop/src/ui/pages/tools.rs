@@ -122,7 +122,7 @@ pub fn build_emu_crack(
     if let Some(sound) = overlay_sound_bytes(cache_dir) {
         files.push((format!("{ss}sounds\\overlay_achievement_notification.wav"), sound));
     }
-    for (rel, bytes) in load_dll_files(arch) {
+    for (rel, bytes) in load_dll_files(cache_dir, arch) {
         files.push((format!("{ss}{rel}"), bytes));
     }
     if include_reframework {
