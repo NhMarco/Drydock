@@ -128,6 +128,9 @@ export class GamelistCache {
     const compact = fetchMerged
       ? compactEntries(await fetchMerged(), this.config.filterNsfw)
       : compactGamelist(await this.client.fetchGamelist(), this.config.filterNsfw);
+    // Checked after compaction, which drops rows without a usable name: a provider that renames a
+    // field must not replace a good catalog with an empty one.
+    if (compact.length === 0) throw new Error("The refreshed gamelist contained no usable games.");
     const json = Buffer.from(JSON.stringify({ games: compact }), "utf8");
     const gzipBody = await gzipAsync(json, { level: 6 });
     const etag = `"${createHash("sha256").update(gzipBody).digest("hex").slice(0, 32)}"`;

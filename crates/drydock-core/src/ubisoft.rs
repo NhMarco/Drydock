@@ -15,7 +15,7 @@
 //!
 //! Only steps 1-2 are Ubisoft-specific; the request/response crypto is shared with Steam.
 
-use std::fs::{self, File};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -67,6 +67,7 @@ pub fn install_magicfiles(zip: &[u8], exe_dir: &Path) -> Result<usize, UbisoftEr
         return Err(UbisoftError::ExeMissing);
     }
     let root = std::path::absolute(exe_dir)?;
+    let scope = crate::safe_path::WriteRoot::new(&root)?;
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip))?;
     if archive.len() > MAX_MAGICFILES {
         return Err(UbisoftError::TooManyFiles);
@@ -91,9 +92,9 @@ pub fn install_magicfiles(zip: &[u8], exe_dir: &Path) -> Result<usize, UbisoftEr
             return Err(UbisoftError::UnsafePath(entry.name().to_owned()));
         }
         if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
+            scope.create_dir_all(parent)?;
         }
-        let mut output = File::create(&target)?;
+        let mut output = scope.create(&target)?;
         std::io::copy(&mut entry, &mut output)?;
         written += 1;
     }

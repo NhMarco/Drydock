@@ -2,6 +2,78 @@
 
 All notable Drydock changes are documented here. The project follows semantic versioning.
 
+## 1.1.1 - 2026-09-11
+
+Fixes unlocks that were not pinned to a build and depot manifests that never reached Steam.
+
+- **The unlock Lua now comes from the depot package instead of the separate Lua API.** The two
+  disagreed. The package's Lua is cut from the same build as the manifests shipped beside it, so its
+  `setManifestid` lines are active and pin exactly those manifests. The Lua API answers for the
+  *current* build with every `setManifestid` commented out, and for one observed title it also
+  omitted two DLC ownership lines. Installing that left Steam free to resolve any build — and the
+  manifests cached alongside were then never the ones it asked for, which is why caching them
+  appeared to do nothing. Adding an app is also one request now instead of two, so the Lua API's
+  rate limit no longer applies. **Press Update on games added before this release** to replace the
+  Lua already on disk.
+- When the depot package is unavailable the Lua API is still used so the app can be unlocked, but
+  the status now says so plainly and notes that the unlock is not pinned to a build, instead of
+  reporting success.
+- **Depot packages that failed at add time are retried.** Caching them is best effort, and a failure
+  left the app with its unlock, nothing in `depotcache`, and nothing in Drydock's own store — so the
+  manifest guard could never repair it either, because it only restores what was stored. The guard
+  now picks up those apps: one per sweep and once per session, since packaging a depot upstream can
+  take minutes.
+
+## 1.1.0 - 2026-09-11
+
+Drydock now hosts the emulator binaries itself, and the game pages were cut down to a couple of
+buttons.
+
+### Emulator
+
+- The loader proxy, `coldloader.dll` and the SteamStub loader are served from this repository's
+  `emu/` folder instead of third-party release assets, so a DLL can be replaced by pushing to the
+  repo and no longer depends on someone else's downloads staying put. gbe_fork is unchanged and still
+  comes from its own release. Existing caches re-download once.
+- `steam_settings\load_dlls\` receives the SteamStub loader matching the game's architecture in place
+  of the two generic Steamworks stubs. **32-bit games get a loader there for the first time** — they
+  previously got nothing.
+- Cracking into a game folder no longer destroys anything: every file the crack would overwrite is
+  moved to `<name>.bak` first. Re-cracking leaves an existing `.bak` alone, so the genuine original
+  is never buried under a previous crack's file.
+
+### Steam manifests
+
+- Steam drops an app's depot manifests on an account switch, a cleared cache or an uninstall, and the
+  unlock then quietly stops resolving. Drydock now notices and restores its own stored copies without
+  touching the network. It checks when Steam starts or stops, otherwise every ten minutes, and a
+  check is one `metadata` call per manifest — the manifests themselves are only read when something
+  is actually missing.
+
+### Interface
+
+- The game page's Add/Cracked/Update/Remove buttons and the repack sources are one split button: the
+  main action adds the latest unlock (or updates it once added), everything else sits behind the
+  arrow. The arrow only appears when there is a real choice.
+- Library rows are down to two controls — the prominent action (Play, Install or Set .exe) and a
+  split button holding the rest. Re-linking a game's `.exe` is reachable again, which it was not once
+  one had been picked.
+- Settings has a games folder at the top, for where Drydock installs what it downloads. **This
+  setting existed but did nothing**: downloads always went to Steam's `steamapps\common`. It is now
+  honoured, with that path as the fallback when the field is empty. A game Steam already has
+  installed is still updated where it is, so an update cannot start a second copy elsewhere.
+- Launching a Drydock-downloaded game that has no crack in its folder now asks whether to crack it
+  first, once per game per session, instead of letting it fail silently.
+
+### Fixed
+
+- Exported crack ZIPs could not be fully extracted with Windows Explorer: it failed on
+  `steamclient64.dll` with an unspecified error while extracting every other file, leaving a crack
+  folder that looked complete but was not. The deflate streams the ZIP writer produced were valid but
+  something Explorer's extractor mishandles past roughly 13 MiB of compressible input; the compressor
+  backend was swapped for one whose output it accepts. Archives written by earlier versions still
+  open in 7-Zip or `Expand-Archive`.
+
 ## 1.0.1 - 2026-09-10
 
 Hotfix for unlocks that were installed incomplete.

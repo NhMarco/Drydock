@@ -38,7 +38,7 @@ fn main() {
     );
 
     let cdn = CdnClient::new().expect("cdn client");
-    let servers = cdn.content_servers(0).expect("content servers");
+    let servers = cdn.content_servers(0, 0).expect("content servers");
     println!(
         "resolved {} CDN servers (first: {})",
         servers.len(),

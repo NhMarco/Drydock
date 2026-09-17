@@ -1,17 +1,48 @@
 name: Rust validation
 
-# Manual-only to conserve Actions minutes: this never runs automatically on pushes or pull
-# requests. Release builds (release.yml, on v* tags) still compile and self-test every target,
-# and it can be triggered by hand from the Actions tab when needed.
+# Run manually or as a release prerequisite; ordinary pushes and PRs do not consume minutes.
 on:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
 jobs:
+  # The proxy is deployed on its own and is not part of an app release, so a release does not wait
+  # for it; run this workflow by hand to check proxy changes.
+  proxy:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: proxy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: proxy/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - run: docker build -t drydock-proxy:check .
+
+  msrv:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev libwayland-dev libx11-dev libxkbcommon-dev libxi-dev pkg-config
+      - run: cargo check --workspace --locked
+
   quality:
     runs-on: windows-2025
+    # A test that hangs fails the job instead of holding a release for the six-hour default.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -22,6 +53,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   native-build:
+    if: github.event_name == 'workflow_dispatch'
     name: ${{ matrix.name }}
     strategy:
       fail-fast: false
@@ -44,6 +76,7 @@ jobs:
             artifact: Drydock-linux-arm64
             binary: target/release/Drydock
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

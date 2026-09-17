@@ -39,8 +39,15 @@ pub struct Settings {
     pub games_directory: String,
     pub added_apps: BTreeMap<u32, AddedAppState>,
     pub auto_update_drydock: bool,
-    /// Per-app Steam manifest update locks (App ID → updates enabled), for the Steam integration.
-    pub steam_updates_enabled: BTreeMap<u32, bool>,
+    /// Keeps the Lua and depot manifests of apps added with the latest version up to date.
+    pub auto_update_unlocks: bool,
+    /// Verifies a game's files against its depot manifests before an activation request is made.
+    pub verify_before_activation: bool,
+    /// Per-app Steam update policy from the removed update block (App ID → updates enabled). Only
+    /// read so the blocks it left can be lifted (see [`crate::release_update_blocks`]); it empties
+    /// as that happens and is then no longer written.
+    #[serde(rename = "SteamUpdatesEnabled", skip_serializing_if = "BTreeMap::is_empty")]
+    pub legacy_update_blocks: BTreeMap<u32, bool>,
     /// Games downloaded by Drydock, keyed by App ID — the Library reads this.
     pub installed_games: BTreeMap<u32, InstalledGame>,
     /// Per-app launch executables, so a downloaded game can be started from the Drydock library.
@@ -56,6 +63,9 @@ pub struct Settings {
     pub max_download_connections: u32,
     /// Maximum aggregate download speed in MB/s (`0` = unlimited).
     pub max_download_mbps: u32,
+    /// Threads that read a game back when it is verified (`0` = automatic: one on a hard disk,
+    /// several on an SSD).
+    pub verify_threads: u32,
 
     // --- Self-hosting overrides -------------------------------------------------------------
     // Empty means "use the value this build was compiled with". See `crate::config` for the full
@@ -69,6 +79,11 @@ pub struct Settings {
 }
 
 impl Settings {
+    /// Parallel CDN connections unless the user picks another number. Sixteen fill a fast line
+    /// (measured close to a 500 Mbit/s connection) where eight left a fifth of it unused, without
+    /// crowding a slower one noticeably.
+    pub const DEFAULT_DOWNLOAD_CONNECTIONS: u32 = 16;
+
     /// The self-hosting overrides in the shape [`crate::config`] wants.
     #[must_use]
     pub fn config_overrides(&self) -> crate::config::UserOverrides {
@@ -87,7 +102,7 @@ impl Settings {
 }
 
 fn default_max_connections() -> u32 {
-    8
+    Settings::DEFAULT_DOWNLOAD_CONNECTIONS
 }
 
 impl Default for Settings {
@@ -97,13 +112,16 @@ impl Default for Settings {
             games_directory: String::new(),
             added_apps: BTreeMap::new(),
             auto_update_drydock: true,
-            steam_updates_enabled: BTreeMap::new(),
+            auto_update_unlocks: true,
+            verify_before_activation: false,
+            legacy_update_blocks: BTreeMap::new(),
             installed_games: BTreeMap::new(),
             launch_paths: BTreeMap::new(),
             emu_skeleton_path: String::new(),
             download_queue: Vec::new(),
-            max_download_connections: 8,
+            max_download_connections: Self::DEFAULT_DOWNLOAD_CONNECTIONS,
             max_download_mbps: 0,
+            verify_threads: 0,
             proxy_base_url: String::new(),
             proxy_hmac_secret: String::new(),
             update_repository: String::new(),
@@ -384,6 +402,25 @@ mod tests {
         assert!(!settings.auto_update_drydock);
         assert!(settings.added_apps.contains_key(&111_300));
         assert_eq!(settings.games_directory, "D:/Games");
+    }
+
+    #[test]
+    fn old_update_blocks_are_read_and_dropped_once_lifted() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("settings.json");
+        fs::write(&path, r#"{ "SteamUpdatesEnabled": { "10": false, "20": true } }"#)
+            .expect("write settings");
+
+        let mut settings = Settings::load(&path).expect("load settings");
+        assert_eq!(
+            settings.legacy_update_blocks,
+            BTreeMap::from([(10, false), (20, true)])
+        );
+
+        settings.legacy_update_blocks.clear();
+        settings.save(&path).expect("save settings");
+        let saved = fs::read_to_string(&path).expect("read settings");
+        assert!(!saved.contains("SteamUpdatesEnabled"), "{saved}");
     }
 
     #[test]

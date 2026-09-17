@@ -264,9 +264,7 @@ pub fn uninstall_service(steam_directory: &Path) -> Result<SteamServiceStatus, S
     );
     let names = dedup_ignore_case(&names);
 
-    let transaction = TempTransaction::new()?;
-    let backup = transaction.subdir("backup")?;
-    let mut removed: Vec<String> = Vec::new();
+    let mut changes = crate::file_transaction::FileTransaction::new(&plugin)?;
     let outcome = (|| -> Result<(), ServiceError> {
         for name in &names {
             let safe = file_name_of(name);
@@ -277,9 +275,7 @@ pub fn uninstall_service(steam_directory: &Path) -> Result<SteamServiceStatus, S
             if !destination.is_file() {
                 continue;
             }
-            fs::copy(&destination, backup.join(safe))?;
-            fs::remove_file(&destination)?;
-            removed.push(safe.to_owned());
+            changes.remove(&destination)?;
             if destination.exists() {
                 return Err(ServiceError::PostDeleteVerification(safe.to_owned()));
             }
@@ -288,9 +284,10 @@ pub fn uninstall_service(steam_directory: &Path) -> Result<SteamServiceStatus, S
     })();
 
     if outcome.is_err() {
-        roll_back(&plugin, &backup, removed.iter());
+        changes.rollback()?;
         outcome?;
     }
+    changes.commit();
 
     // The markers are best-effort: their absence already means "not installed".
     let _ = fs::remove_file(plugin.join(MARKER_NAME));
@@ -359,6 +356,29 @@ pub fn install_depot_manifests(
     Ok(manifests.len())
 }
 
+/// The `expected` manifests that are not sitting correctly in Steam's `depotcache`.
+///
+/// Steam drops an app's manifests on an account switch, a `depotcache` clear or an uninstall, and
+/// puts nothing back — so they have to be watched. Only names and byte sizes are compared, one
+/// `metadata` call per manifest and no file contents, which keeps this cheap enough to run on a
+/// timer. A size mismatch counts as missing too, so a half-written file is replaced rather than
+/// trusted.
+#[must_use]
+pub fn missing_depot_manifests(steam_directory: &Path, expected: &BTreeMap<String, u64>) -> Vec<String> {
+    let target = steam_directory.join(DEPOTCACHE_SUBDIR);
+    expected
+        .iter()
+        .filter(|(name, size)| {
+            let safe = file_name_of(name);
+            if safe.is_empty() || safe != **name {
+                return false; // never chase a name we would refuse to write anyway
+            }
+            !fs::metadata(target.join(name)).is_ok_and(|found| found.is_file() && found.len() == **size)
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
 /// Removes the given Lua unlock file names for an app, with backup and rollback.
 ///
 /// Returns the number of files actually removed.
@@ -383,33 +403,28 @@ pub fn remove_app_files(steam_directory: &Path, lua_names: &[String]) -> Result<
         return Ok(0);
     }
 
-    let transaction = TempTransaction::new()?;
-    let backup = transaction.subdir("backup")?;
-    let mut removed: Vec<String> = Vec::new();
+    let mut changes = crate::file_transaction::FileTransaction::new(&target)?;
     let outcome = (|| -> Result<usize, ServiceError> {
+        let mut removed = 0;
         for name in &names {
             let destination = target.join(name);
             if !destination.is_file() {
                 continue;
             }
-            fs::copy(&destination, backup.join(name))?;
-            fs::remove_file(&destination)?;
-            removed.push(name.clone());
+            changes.remove(&destination)?;
+            removed += 1;
             if destination.exists() {
                 return Err(ServiceError::PostDeleteVerification(name.clone()));
             }
         }
-        Ok(removed.len())
+        Ok(removed)
     })();
 
+    // Restores anything already removed before a failure, and reports a restore that fails.
     if outcome.is_err() {
-        // Restore anything already removed before the failure.
-        for name in removed.iter().rev() {
-            let source = backup.join(name);
-            if source.is_file() {
-                let _ = fs::copy(&source, target.join(name));
-            }
-        }
+        changes.rollback()?;
+    } else {
+        changes.commit();
     }
     outcome
 }
@@ -449,8 +464,11 @@ pub fn installed_app_luas(steam_directory: &Path) -> BTreeSet<u32> {
         let Some(stem) = name
             .len()
             .checked_sub(4)
-            .filter(|_| name[name.len().saturating_sub(4)..].eq_ignore_ascii_case(".lua"))
-            .map(|cut| &name[..cut])
+            .filter(|&cut| {
+                name.get(cut..)
+                    .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".lua"))
+            })
+            .and_then(|cut| name.get(..cut))
         else {
             continue;
         };
@@ -542,9 +560,7 @@ where
 {
     let transaction = TempTransaction::new()?;
     let staged = transaction.subdir("staged")?;
-    let backup = transaction.subdir("backup")?;
-    let mut replaced: Vec<String> = Vec::new();
-    let mut removed: Vec<String> = Vec::new();
+    let mut changes = crate::file_transaction::FileTransaction::new(target_directory)?;
 
     let outcome = (|| -> Result<(), ServiceError> {
         for (name, content) in files {
@@ -557,11 +573,7 @@ where
 
         for (name, content) in files {
             let destination = target_directory.join(name);
-            if destination.exists() {
-                fs::copy(&destination, backup.join(name))?;
-            }
-            fs::copy(staged.join(name), &destination)?;
-            replaced.push(name.clone());
+            changes.replace(&staged.join(name), &destination)?;
             if !destination.is_file() || sha256(&fs::read(&destination)?) != sha256(content) {
                 return Err(ServiceError::PostCopyVerification(name.clone()));
             }
@@ -579,9 +591,7 @@ where
             if !destination.is_file() {
                 continue;
             }
-            fs::copy(&destination, backup.join(safe))?;
-            fs::remove_file(&destination)?;
-            removed.push(safe.to_owned());
+            changes.remove(&destination)?;
         }
 
         if let Some(commit) = commit {
@@ -591,25 +601,11 @@ where
     })();
 
     if outcome.is_err() {
-        roll_back(target_directory, &backup, replaced.iter().chain(removed.iter()));
+        changes.rollback()?;
+    } else {
+        changes.commit();
     }
     outcome
-}
-
-fn roll_back<'a, I>(target_directory: &Path, backup_directory: &Path, names: I)
-where
-    I: Iterator<Item = &'a String>,
-{
-    let names: Vec<&String> = names.collect();
-    for name in names.into_iter().rev() {
-        let destination = target_directory.join(name);
-        let original = backup_directory.join(name);
-        if original.is_file() {
-            let _ = fs::copy(&original, &destination);
-        } else if destination.exists() {
-            let _ = fs::remove_file(&destination);
-        }
-    }
 }
 
 fn read_installed_version(steam_directory: &Path) -> String {
@@ -754,6 +750,44 @@ mod tests {
         fs::write(dir.path().join("steam.exe"), b"MZfake").expect("steam.exe");
         fs::create_dir_all(dir.path().join("steamapps")).expect("steamapps");
         dir
+    }
+
+    #[test]
+    fn missing_manifests_are_found_by_absence_and_by_wrong_size() {
+        let steam = fake_steam_dir();
+        let cache = steam.path().join(DEPOTCACHE_SUBDIR);
+        fs::create_dir_all(&cache).expect("depotcache");
+        fs::write(cache.join("1_ok.manifest"), b"abcde").expect("write");
+        fs::write(cache.join("1_short.manifest"), b"ab").expect("write");
+
+        let expected: BTreeMap<String, u64> = [
+            ("1_ok.manifest".to_owned(), 5),
+            ("1_short.manifest".to_owned(), 5),
+            ("1_gone.manifest".to_owned(), 5),
+        ]
+        .into_iter()
+        .collect();
+
+        let missing = missing_depot_manifests(steam.path(), &expected);
+        assert_eq!(missing, ["1_gone.manifest", "1_short.manifest"]);
+    }
+
+    #[test]
+    fn nothing_is_missing_when_the_depotcache_matches() {
+        let steam = fake_steam_dir();
+        let cache = steam.path().join(DEPOTCACHE_SUBDIR);
+        fs::create_dir_all(&cache).expect("depotcache");
+        fs::write(cache.join("1_ok.manifest"), b"abcde").expect("write");
+        let expected: BTreeMap<String, u64> = [("1_ok.manifest".to_owned(), 5)].into_iter().collect();
+        assert!(missing_depot_manifests(steam.path(), &expected).is_empty());
+    }
+
+    #[test]
+    fn a_traversing_manifest_name_is_never_chased() {
+        // These would be rejected on write, so reporting them missing would mean retrying forever.
+        let steam = fake_steam_dir();
+        let expected: BTreeMap<String, u64> = [("../evil.manifest".to_owned(), 5)].into_iter().collect();
+        assert!(missing_depot_manifests(steam.path(), &expected).is_empty());
     }
 
     fn make_package(version: &str, files: &[(&str, &[u8])]) -> SteamServicePackage {

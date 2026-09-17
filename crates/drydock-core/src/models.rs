@@ -8,6 +8,21 @@ use serde::{Deserialize, Serialize};
 pub struct AddedAppState {
     #[serde(default)]
     pub files: BTreeMap<String, String>,
+    /// Where the unlock came from. `None` for apps added before this was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<UnlockSource>,
+}
+
+/// Where an app's unlock (its Lua and depot manifests) came from. Only [`UnlockSource::Latest`] is
+/// ever replaced by the automatic updater: the other two are a deliberate choice of a specific build.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum UnlockSource {
+    /// The provider's current unlock, which follows new builds of the game.
+    Latest,
+    /// The build-locked Lua of a cracked version, pinned to the build the crack targets.
+    Cracked,
+    /// Files the user supplied themselves.
+    Own,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

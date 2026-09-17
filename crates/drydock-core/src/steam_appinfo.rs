@@ -64,6 +64,9 @@ pub fn windows_executables(json: &serde_json::Value, app_id: u32) -> Vec<String>
             continue;
         }
         let normalized = executable.replace('\\', "/");
+        if crate::safe_path::relative_path(&normalized).is_none() {
+            continue;
+        }
         if !normalized.to_ascii_lowercase().ends_with(".exe") {
             continue; // skip macOS `.app` / Linux `.sh` launch entries
         }
@@ -165,7 +168,7 @@ pub fn fetch_install_dir(app_id: u32) -> Result<Option<String>, SteamAppInfoErro
 pub fn install_dir_name(json: &serde_json::Value, app_id: u32) -> Option<String> {
     let name = json["data"][app_id.to_string()]["config"]["installdir"].as_str()?;
     let trimmed = name.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    crate::safe_path::is_portable_path_segment(trimmed).then(|| trimmed.to_owned())
 }
 
 #[derive(Debug, Error)]

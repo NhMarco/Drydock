@@ -8,7 +8,39 @@ permissions:
   contents: write
 
 jobs:
+  # Nothing is built or published until the tag is shown to be a real release of reviewed code.
+  # `main` is protected by a ruleset (pull request + code-owner review), but a tag is a separate ref:
+  # anyone able to push one could otherwise publish a release from a branch that never passed review.
+  # A tag ruleset keeps non-admins from creating `v*` at all; this is the second half, and it also
+  # catches the honest mistake of tagging a local branch that was never pushed to main.
+  guard:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Refuse a tag that is not on main
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tags must use vMAJOR.MINOR.PATCH, for example v1.2.0"
+            exit 1
+          fi
+          git fetch --no-tags --quiet origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "::error::$GITHUB_REF_NAME points at $GITHUB_SHA, which is not contained in main." \
+                 "Release only from main: merge the work first, then tag the commit on main."
+            exit 1
+          fi
+          echo "$GITHUB_REF_NAME is contained in main."
+
+  validation:
+    needs: guard
+    uses: ./.github/workflows/ci.yml
+
   build:
+    needs: [guard, validation]
     strategy:
       fail-fast: false
       matrix:

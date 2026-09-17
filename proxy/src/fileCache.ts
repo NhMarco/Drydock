@@ -37,6 +37,14 @@ export class FileCache {
   private sweepTimer: NodeJS.Timeout | null = null;
   /** In-flight `put`s by key, so concurrent misses share one upstream fetch. */
   private readonly inFlight = new Map<string, Promise<CacheHit>>();
+  private readonly activeTemps = new Set<string>();
+  private maintenance: Promise<unknown> = Promise.resolve();
+
+  private exclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.maintenance.then(operation, operation);
+    this.maintenance = result.catch(() => {});
+    return result;
+  }
 
   constructor(
     dataDir: string,
@@ -84,31 +92,41 @@ export class FileCache {
     }
     for (const name of names) {
       if (!name.endsWith(".json")) continue; // data files are handled via their sidecar
-      const meta = join(this.dir, name);
-      const data = meta.slice(0, -".json".length);
-      try {
-        const parsed = JSON.parse(await readFile(meta, "utf8")) as Meta;
-        if (Number.isFinite(parsed.storedAt) && parsed.storedAt > cutoff) continue;
-        await rm(data, { force: true });
-        await rm(meta, { force: true });
-        removed += 1;
-        freedBytes += Number.isFinite(parsed.size) ? parsed.size : 0;
-      } catch {
-        // Unreadable sidecar: drop both halves, the entry is unusable anyway.
-        await rm(data, { force: true }).catch(() => {});
-        await rm(meta, { force: true }).catch(() => {});
-        removed += 1;
-      }
+      // One entry at a time under the publish lock: a `put` cannot rename a fresh pair into place
+      // between reading this sidecar and deleting it, and a publish waits for one entry rather than
+      // for the whole sweep.
+      const freed = await this.exclusive(() => this.sweepEntry(join(this.dir, name), cutoff));
+      if (freed === null) continue;
+      removed += 1;
+      freedBytes += freed;
     }
     // Orphaned temp files from a crashed write.
     for (const name of names) {
       if (!name.endsWith(".tmp")) continue;
-      await rm(join(this.dir, name), { force: true }).catch(() => {});
+      const path = join(this.dir, name);
+      if (!this.activeTemps.has(path)) await rm(path, { force: true }).catch(() => {});
     }
     if (removed > 0) {
       this.log.info({ removed, freedBytes }, "File cache sweep removed expired entries.");
     }
     return { removed, freedBytes };
+  }
+
+  /** Deletes one entry if it expired before `cutoff`, returning the bytes freed, or `null` if kept. */
+  private async sweepEntry(meta: string, cutoff: number): Promise<number | null> {
+    const data = meta.slice(0, -".json".length);
+    try {
+      const parsed = JSON.parse(await readFile(meta, "utf8")) as Meta;
+      if (Number.isFinite(parsed.storedAt) && parsed.storedAt > cutoff) return null;
+      await rm(data, { force: true });
+      await rm(meta, { force: true });
+      return Number.isFinite(parsed.size) ? parsed.size : 0;
+    } catch {
+      // Unreadable sidecar: drop both halves, the entry is unusable anyway.
+      await rm(data, { force: true }).catch(() => {});
+      await rm(meta, { force: true }).catch(() => {});
+      return 0;
+    }
   }
 
   /** A fresh cached entry for `key`, or `null` when absent or older than the TTL. */
@@ -135,6 +153,9 @@ export class FileCache {
     const { data, meta } = this.paths(key);
     await mkdir(this.dir, { recursive: true });
     const temporary = `${data}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+    const temporaryMeta = `${temporary}.meta.tmp`;
+    this.activeTemps.add(temporary);
+    this.activeTemps.add(temporaryMeta);
     try {
       await pipeline(source, createWriteStream(temporary));
       const info = await stat(temporary);
@@ -142,15 +163,20 @@ export class FileCache {
       // file described by the previous entry's metadata (which `get` would then reject on the size
       // check, making the key permanently un-cacheable).
       const record: Meta = { contentType, storedAt: Date.now(), size: info.size };
-      await writeFile(`${meta}.tmp`, JSON.stringify(record));
-      await rename(temporary, data);
-      await rename(`${meta}.tmp`, meta);
+      await this.exclusive(async () => {
+        await writeFile(temporaryMeta, JSON.stringify(record));
+        await rename(temporary, data);
+        await rename(temporaryMeta, meta);
+      });
       return { stream: () => createReadStream(data), contentType, contentLength: info.size };
     } catch (error) {
       await rm(temporary, { force: true }).catch(() => {});
-      await rm(`${meta}.tmp`, { force: true }).catch(() => {});
+      await rm(temporaryMeta, { force: true }).catch(() => {});
       this.log.warn({ err: error, key }, "File cache write failed.");
       throw error;
+    } finally {
+      this.activeTemps.delete(temporary);
+      this.activeTemps.delete(temporaryMeta);
     }
   }
 

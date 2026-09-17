@@ -41,7 +41,7 @@ Regenerable caches sit in a `cache/` subfolder and can be deleted at any time.
 
 ## Build from source
 
-Requires Rust 1.88 or newer.
+Requires Rust 1.95 or newer.
 
 ```powershell
 cargo run -p drydock-desktop

@@ -3,14 +3,14 @@
 //! egui's default image loader keeps decoded textures in memory only, so every artwork is
 //! re-downloaded from the Steam CDN on each app launch. This loader adds a disk cache under
 //! `cache/images/`: a successfully fetched image is written there and, on any later frame or launch,
-//! served straight from disk (instant, no spinner). It must be registered **before**
-//! `egui_extras::install_image_loaders` so it wins over the default HTTP loader (egui tries bytes
-//! loaders in registration order). Non-`http(s)` URIs are declined so egui's other loaders
+//! served straight from disk (instant, no spinner). It must be registered **after**
+//! `egui_extras::install_image_loaders` so it wins over the default HTTP loader (egui tries the most
+//! recently added bytes loader first). Non-`http(s)` URIs are declined so egui's other loaders
 //! (`bytes://`, `file://`, `include_image!`) still work.
 //!
 //! Two things keep it bounded, because a catalog of 70k+ games means effectively unbounded artwork:
 //!
-//! * **In memory**, decoded bytes are held in a small LRU (see [`MAXIMUM_MEMORY_BYTES`]). Previously
+//! * **In memory**, compressed bytes are held in a small LRU (see [`MAXIMUM_MEMORY_BYTES`]). Previously
 //!   every image fetched in a session was pinned for the life of the process, so a long scroll
 //!   through the Denuvo or Repacks lists grew RSS monotonically.
 //! * **On disk**, entries are keyed by a *stable* SHA-256 of the URI and swept by age on startup.
@@ -29,7 +29,151 @@ use std::time::{Duration, Instant};
 use eframe::egui::Context;
 use eframe::egui::load::{Bytes, BytesLoadResult, BytesLoader, BytesPoll, LoadError};
 
-/// How much decoded image data to keep resident. Steam headers are ~30–60 KB, so this holds several
+/// How much uploaded artwork may stay resident once it has left the screen.
+///
+/// With `reduce_texture_memory` on, a texture is the only copy of its image, so evicting one means
+/// fetching and decoding it again when it comes back. Below this budget nothing is evicted, so paging
+/// back or scrolling a list back is instant; above it the images off screen longest go first.
+const TEXTURE_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+
+/// Owns the HTTP textures so artwork that has left the screen cannot accumulate without bound in
+/// egui's default texture cache.
+pub struct VisibleTextureLoader {
+    inner: eframe::egui::load::DefaultTextureLoader,
+    budget: usize,
+    usage: Mutex<TextureUsage>,
+    retired: Mutex<Vec<String>>,
+}
+
+#[derive(Default)]
+struct TextureUsage {
+    /// The last pass that ended; a URI loaded during the current pass is stamped with it.
+    pass: u64,
+    /// Per URI: the stamp of the pass it was last loaded in, and whether it has become a texture.
+    uris: HashMap<String, (u64, bool)>,
+}
+
+impl Default for VisibleTextureLoader {
+    fn default() -> Self {
+        Self::with_budget(TEXTURE_BUDGET_BYTES)
+    }
+}
+
+impl VisibleTextureLoader {
+    fn with_budget(budget: usize) -> Self {
+        Self {
+            inner: eframe::egui::load::DefaultTextureLoader::default(),
+            budget,
+            usage: Mutex::default(),
+            retired: Mutex::default(),
+        }
+    }
+
+    /// Called by the UI before loading images, outside egui's loader-registry locks.
+    pub fn forget_retired(&self, ctx: &Context) {
+        let retired = std::mem::take(&mut *self.retired.lock().unwrap_or_else(|error| error.into_inner()));
+        for uri in retired {
+            ctx.forget_image(&uri);
+        }
+    }
+}
+
+impl eframe::egui::load::TextureLoader for VisibleTextureLoader {
+    fn id(&self) -> &'static str {
+        "drydock-visible-textures"
+    }
+
+    fn load(
+        &self,
+        ctx: &Context,
+        uri: &str,
+        options: eframe::egui::TextureOptions,
+        size: eframe::egui::load::SizeHint,
+    ) -> eframe::egui::load::TextureLoadResult {
+        if !uri.starts_with("http://") && !uri.starts_with("https://") {
+            return Err(LoadError::NotSupported);
+        }
+        let result = self.inner.load(ctx, uri, options, size);
+        let mut usage = self.usage.lock().unwrap_or_else(|error| error.into_inner());
+        match &result {
+            // A failure stays with the loaders that remember it, so a dead URL is not requested again
+            // every time its row scrolls back into view.
+            Err(_) => {
+                usage.uris.remove(uri);
+            }
+            Ok(poll) => {
+                let used = (
+                    usage.pass,
+                    matches!(poll, eframe::egui::load::TexturePoll::Ready { .. }),
+                );
+                if let Some(entry) = usage.uris.get_mut(uri) {
+                    *entry = used;
+                } else {
+                    usage.uris.insert(uri.to_owned(), used);
+                }
+            }
+        }
+        result
+    }
+
+    fn end_pass(&self, pass: u64) {
+        self.inner.end_pass(pass);
+        let mut usage = self.usage.lock().unwrap_or_else(|error| error.into_inner());
+        usage.pass = pass;
+        let mut retired = self.retired.lock().unwrap_or_else(|error| error.into_inner());
+        // A load abandoned before it finished holds no texture. Forgetting it right away cancels the
+        // fetch and frees whatever the loaders buffered for an image nobody is looking at.
+        usage.uris.retain(|uri, (last, ready)| {
+            let abandoned = !*ready && last.saturating_add(1) < pass;
+            if abandoned {
+                retired.push(uri.clone());
+            }
+            !abandoned
+        });
+        if self.inner.byte_size() <= self.budget {
+            return;
+        }
+        let mut off_screen: Vec<(u64, String)> = usage
+            .uris
+            .iter()
+            .filter(|(_, (last, _))| last.saturating_add(1) < pass)
+            .map(|(uri, (last, _))| (*last, uri.clone()))
+            .collect();
+        off_screen.sort_unstable();
+        for (_, uri) in off_screen {
+            self.inner.forget(&uri);
+            usage.uris.remove(&uri);
+            retired.push(uri);
+            if self.inner.byte_size() <= self.budget {
+                break;
+            }
+        }
+    }
+
+    fn forget(&self, uri: &str) {
+        self.inner.forget(uri);
+        self.usage
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .uris
+            .remove(uri);
+    }
+
+    fn forget_all(&self) {
+        self.inner.forget_all();
+        self.usage
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .uris
+            .clear();
+    }
+
+    fn byte_size(&self) -> usize {
+        self.inner.byte_size()
+    }
+}
+
+/// How much compressed image data to keep resident. Steam headers are ~30–60 KB, so this holds several
 /// hundred of them — far more than any screenful — while staying a bounded, predictable cost.
 const MAXIMUM_MEMORY_BYTES: usize = 48 * 1024 * 1024;
 
@@ -245,11 +389,12 @@ impl BytesLoader for DiskImageCache {
             match result {
                 Ok(response)
                     if response.ok
+                        && may_be_image(response.content_type())
                         && !response.bytes.is_empty()
                         && response.bytes.len() <= MAXIMUM_IMAGE_BYTES =>
                 {
                     // Best-effort disk cache; a write failure just means it reloads next time.
-                    let _ = std::fs::write(&path, &response.bytes);
+                    let _ = write_atomically(&path, &response.bytes);
                     state.insert_ready(uri_key, Arc::from(response.bytes.into_boxed_slice()));
                 }
                 _ => {
@@ -279,9 +424,120 @@ impl BytesLoader for DiskImageCache {
     }
 }
 
+/// Whether a response may be an image. One that says otherwise — an HTML error or captive-portal page
+/// served with status 200 — must not reach the disk cache, which would serve it on every launch.
+fn may_be_image(content_type: Option<&str>) -> bool {
+    content_type.is_none_or(|kind| {
+        let kind = kind.trim_start().to_ascii_lowercase();
+        kind.starts_with("image/") || kind.starts_with("application/octet-stream")
+    })
+}
+
+/// Writes a cache file under a temporary name first, so a crash mid-write never leaves a truncated
+/// image behind for later launches to serve. Leftover temporary files age out like any other entry.
+fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let serial = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = path.with_extension(format!("{}-{serial}.tmp", std::process::id()));
+    let result = std::fs::write(&temporary, bytes).and_then(|()| std::fs::rename(&temporary, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_image_responses_are_cached() {
+        for kind in [
+            None,
+            Some("image/jpeg"),
+            Some("Image/PNG; charset=binary"),
+            Some("application/octet-stream"),
+        ] {
+            assert!(may_be_image(kind), "{kind:?}");
+        }
+        for kind in [Some("text/html; charset=utf-8"), Some("application/json")] {
+            assert!(!may_be_image(kind), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn cache_files_are_written_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("0123abcd");
+        write_atomically(&path, b"first").unwrap();
+        write_atomically(&path, b"second").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "no temporary file is left"
+        );
+    }
+
+    #[test]
+    fn offscreen_textures_are_released_only_over_budget() {
+        use eframe::egui::load::{ImageLoadResult, ImageLoader, ImagePoll, SizeHint, TextureLoader};
+        use eframe::egui::{Color32, ColorImage, TextureOptions};
+        /// Every URI is a 4×4 image, except `failed` ones, which do not load.
+        struct Fixture;
+        impl ImageLoader for Fixture {
+            fn id(&self) -> &str {
+                "fixture"
+            }
+            fn load(&self, _: &Context, uri: &str, _: SizeHint) -> ImageLoadResult {
+                if uri.contains("failed") {
+                    return Err(LoadError::Loading("404".into()));
+                }
+                Ok(ImagePoll::Ready {
+                    image: Arc::new(ColorImage::filled([4, 4], Color32::WHITE)),
+                })
+            }
+            fn forget(&self, _: &str) {}
+            fn forget_all(&self) {}
+            fn byte_size(&self) -> usize {
+                0
+            }
+        }
+        let ctx = Context::default();
+        ctx.add_image_loader(Arc::new(Fixture));
+        let load = |loader: &VisibleTextureLoader, name: &str| {
+            loader.load(
+                &ctx,
+                &format!("https://fixture/{name}.png"),
+                TextureOptions::default(),
+                SizeHint::default(),
+            )
+        };
+
+        // Within budget nothing is evicted, so artwork scrolled away and back needs no refetch.
+        let roomy = VisibleTextureLoader::with_budget(usize::MAX);
+        for index in 0..100 {
+            load(&roomy, &index.to_string()).unwrap();
+        }
+        roomy.end_pass(1);
+        roomy.end_pass(2);
+        assert_eq!(roomy.byte_size(), 100 * 4 * 4 * 4);
+
+        // Over budget the images off screen go, while the one still drawn stays; a failure is never
+        // retired, so its loaders keep remembering it.
+        let tight = VisibleTextureLoader::with_budget(0);
+        for index in 0..100 {
+            load(&tight, &index.to_string()).unwrap();
+        }
+        assert!(load(&tight, "failed").is_err());
+        tight.end_pass(1);
+        load(&tight, "0").unwrap();
+        tight.end_pass(2);
+        assert_eq!(tight.byte_size(), 4 * 4 * 4);
+        let retired = tight.retired.lock().unwrap();
+        assert_eq!(retired.len(), 99);
+        assert!(!retired.iter().any(|uri| uri.contains("failed")));
+    }
 
     #[test]
     fn declines_non_http_uris() {

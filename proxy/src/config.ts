@@ -25,7 +25,9 @@ function integer(name: string, fallback: number): number {
 function boolean(name: string, fallback: boolean): boolean {
   const raw = process.env[name]?.trim().toLowerCase();
   if (raw === undefined || raw === "") return fallback;
-  return raw === "1" || raw === "true" || raw === "yes";
+  if (["1", "true", "yes"].includes(raw)) return true;
+  if (["0", "false", "no"].includes(raw)) return false;
+  throw new Error(`Invalid boolean for ${name}: ${raw}`);
 }
 
 // The upstreams the depot-package route can draw from. Order in `DEPOT_PACKAGE_SOURCES` is the
@@ -73,6 +75,9 @@ export interface Config {
   gamelistTimeoutMs: number;
   // The depot package (manifests + key) is generated on demand upstream and can take minutes.
   depotPackageTimeoutMs: number;
+  // DepotBox generates a Lua on demand, which can take minutes. The Drydock client waits 180 s for a
+  // whole Lua request, so this plus the other providers' timeouts has to stay below that.
+  depotboxLuaTimeoutMs: number;
   // How long user-facing upstream files (depot packages, magicfiles, emu binaries) are cached on
   // disk before being refetched, to reduce load on the upstream providers.
   fileCacheTtlSeconds: number;
@@ -103,6 +108,9 @@ export interface Config {
   fixesManifestTtlSeconds: number;
   // Repo directory of the per-app Ubisoft "magicfiles" (`{appid}.zip`), relayed to the client.
   magicfilesDirectory: string;
+  // Flat repo directory of the emulator DLLs the cracker deploys into a game folder.
+  emuDirectory: string;
+  emuListingTtlSeconds: number;
   // Repo file listing per-app repacks (`{ "<appid>": [{ repacker, link }] }`) the proxy relays.
   repacksPath: string;
   repacksTtlSeconds: number;
@@ -138,8 +146,15 @@ export function loadConfig(): Config {
   // need, was optional and could be omitted silently.
   const providerSources = depotSourceList("PROVIDER_SOURCES", depotSourceList("DEPOT_PACKAGE_SOURCES", ["ryu"]));
   const activeProvider = (name: DepotPackageSourceName): boolean => providerSources.includes(name);
-  const credential = (name: string, provider: DepotPackageSourceName): string =>
-    activeProvider(provider) ? required(name) : optional(name, "");
+  const credential = (name: string, provider: DepotPackageSourceName): string => {
+    if (!activeProvider(provider)) return optional(name, "");
+    const value = required(name);
+    // A value copied unchanged from .env.example would otherwise only fail on the first request.
+    if (/^(your_|replace_with|stpriv_your|github_pat_your)/i.test(value)) {
+      throw new Error(`${name} still holds the placeholder from .env.example`);
+    }
+    return value;
+  };
 
   return {
     host: optional("HOST", "0.0.0.0"),
@@ -153,6 +168,7 @@ export function loadConfig(): Config {
     upstreamTimeoutMs: integer("UPSTREAM_TIMEOUT_MS", 30_000),
     gamelistTimeoutMs: integer("GAMELIST_TIMEOUT_MS", 120_000),
     depotPackageTimeoutMs: integer("DEPOT_PACKAGE_TIMEOUT_MS", 300_000),
+    depotboxLuaTimeoutMs: integer("DEPOTBOX_LUA_TIMEOUT_MS", 90_000),
     fileCacheTtlSeconds: integer("FILE_CACHE_TTL_SECONDS", 86_400),
 
     depotboxBase: optional("DEPOTBOX_BASE", "https://depotbox.org").replace(/\/+$/, ""),
@@ -172,6 +188,8 @@ export function loadConfig(): Config {
     fixDirectory: optional("FIX_DIRECTORY", "Files/fix").replace(/^\/+|\/+$/g, ""),
     fixesManifestTtlSeconds: integer("FIXES_MANIFEST_TTL_SECONDS", 300),
     magicfilesDirectory: optional("MAGICFILES_DIRECTORY", "Files/magicfiles").replace(/^\/+|\/+$/g, ""),
+    emuDirectory: optional("EMU_DIRECTORY", "Files/dlls").replace(/^\/+|\/+$/g, ""),
+    emuListingTtlSeconds: integer("EMU_LISTING_TTL_SECONDS", 300),
     repacksPath: optional("REPACKS_PATH", "Files/repacks.json").replace(/^\/+/, ""),
     repacksTtlSeconds: integer("REPACKS_TTL_SECONDS", 300),
 
@@ -189,7 +207,7 @@ export function loadConfig(): Config {
     serviceManifestTtlSeconds: integer("SERVICE_MANIFEST_TTL_SECONDS", 300),
 
     luaRateWindowSeconds: integer("LUA_RATE_WINDOW_SECONDS", 60),
-    luaRateMax: integer("LUA_RATE_MAX", 1),
+    luaRateMax: integer("LUA_RATE_MAX", 30),
     globalRateWindowSeconds: integer("GLOBAL_RATE_WINDOW_SECONDS", 60),
     globalRateMax: integer("GLOBAL_RATE_MAX", 120),
 
