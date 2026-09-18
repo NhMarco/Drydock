@@ -68,7 +68,8 @@ pub use emu_toolchain::{
 };
 pub use fixes::{FixError, FixStatus, apply_denuvo_fix, fix_status};
 pub use game_folder::{
-    CRACK_ARTIFACT_NAMES, back_up_before_overwrite, remove_paths, resolve_game_root, scan_crack_files,
+    CRACK_ARTIFACT_NAMES, back_up_before_overwrite, executable_relative_to, launch_executables, remove_paths,
+    resolve_game_root, scan_crack_files,
 };
 pub use harden::harden_dll_search;
 pub use language::{GameLanguageError, GameLanguageOptions, apply_language, read_language_options};

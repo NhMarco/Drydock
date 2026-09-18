@@ -20,14 +20,15 @@ use drydock_core::{
     SteamStoreDetails, SteamUriAction, StoreCapsule, StoreFeatured, UnlockSource, VerifiedEntitlement,
     achievement_image_urls, add_app_files, apply_denuvo_fix, apply_language, back_up_before_overwrite,
     clear_previous_token_files, cloud, detect_conflicting_software, detect_pe_arch, discover_steam,
-    download_queue, ensure_toolchain, fetch_achievement_images, fetch_reframework_dll, fetch_windows_arch,
-    fetch_windows_executables, fix_status, install_depot_manifests, install_magicfiles, install_service,
-    installed_app_luas, is_steam_running, is_valid_steam_directory, load_cached_denuvo_appids,
-    load_catalog_apps, load_dll_files, load_manifests, missing_depot_manifests, open_link, open_steam_uri,
-    overlay_sound_bytes, read_denuvo_appids, read_language_options, read_own_unlock, release_update_blocks,
-    remove_app_files, remove_paths, resolve_game_root, restart_steam, run_and_capture_token_request,
-    save_catalog_apps, save_denuvo_appids, scan_crack_files, service_status, start_steam, stop_steam,
-    toolchain_dlls, uninstall_service,
+    download_queue, ensure_toolchain, executable_relative_to, fetch_achievement_images,
+    fetch_reframework_dll, fetch_windows_arch, fetch_windows_executables, fix_status,
+    install_depot_manifests, install_magicfiles, install_service, installed_app_luas, is_steam_running,
+    is_valid_steam_directory, launch_executables, load_cached_denuvo_appids, load_catalog_apps,
+    load_dll_files, load_manifests, missing_depot_manifests, open_link, open_steam_uri, overlay_sound_bytes,
+    read_denuvo_appids, read_language_options, read_own_unlock, release_update_blocks, remove_app_files,
+    remove_paths, resolve_game_root, restart_steam, run_and_capture_token_request, save_catalog_apps,
+    save_denuvo_appids, scan_crack_files, service_status, start_steam, stop_steam, toolchain_dlls,
+    uninstall_service,
 };
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke, Vec2};
 
@@ -326,7 +327,7 @@ pub struct DrydockApp {
     /// The game-picker query for the "Add game to Drydock" flow.
     add_game_search: String,
     /// Background folder/exe detection for the "Add game to Drydock" flow.
-    add_game_receiver: Option<Receiver<Result<AddGameOutcome, String>>>,
+    add_game_receiver: Option<Receiver<Result<AddGameOutcome, StepError>>>,
     /// Background launch-exe detection for depot downloads already registered in the library.
     download_install_receiver: Vec<Receiver<Result<AddGameOutcome, String>>>,
     language_options: Option<GameLanguageOptions>,
@@ -343,7 +344,11 @@ pub struct DrydockApp {
     /// Also bundle praydog's latest REFramework nightly (`dinput8.dll`) next to the exe (opt-in).
     emu_reframework: bool,
     /// Background job for the local emulator cracker (App ID → depots → files).
-    emu_receiver: Option<Receiver<Result<String, String>>>,
+    emu_receiver: Option<Receiver<Result<String, StepError>>>,
+    /// Which crack the running emu job is, so one that needs the game's executable can run again.
+    emu_retry: Option<PickRetry>,
+    /// A step waiting for the user to pick the game's executable, asked for on the next frame.
+    pending_exe_pick: Option<ExecutablePick>,
     status: String,
     status_error: bool,
     background_action: Option<Receiver<Result<String, String>>>,
@@ -371,7 +376,7 @@ pub struct DrydockApp {
     activation_path: String,
     activation_root: Option<PathBuf>,
     activation_check_app: Option<u32>,
-    activation_check_receiver: Option<Receiver<Result<ActivationCheck, String>>>,
+    activation_check_receiver: Option<Receiver<Result<ActivationCheck, StepError>>>,
     activation_remove_receiver: Option<Receiver<Result<(u32, PathBuf), String>>>,
     /// The game (and folder) whose files are being verified before its activation request is made.
     activation_verify: Option<(u32, PathBuf)>,
@@ -379,7 +384,7 @@ pub struct DrydockApp {
     // Which store's activation is on screen, and the Ubisoft flow's state: the background
     // magicfiles+launch+capture step, the resulting activation code, and where token.ini installs.
     activation_provider: ActivationProvider,
-    ubisoft_prepare_receiver: Option<Receiver<Result<UbisoftPrepared, String>>>,
+    ubisoft_prepare_receiver: Option<Receiver<Result<UbisoftPrepared, StepError>>>,
     ubisoft_activation_code: String,
     ubisoft_exe_dir: Option<PathBuf>,
     update_receiver: Option<Receiver<Result<Option<PreparedUpdate>, String>>>,
@@ -426,6 +431,42 @@ pub struct DrydockApp {
 enum ActivationCheck {
     Ready { root: PathBuf },
     NeedsRemoval { root: PathBuf, files: Vec<PathBuf> },
+}
+
+/// Why a background step that locates a game by its executable stopped.
+enum StepError {
+    /// Steam lists no launch executable for `app_id`, and none the user picked is in `folder`: the
+    /// user is asked to pick the game's `.exe` there, and the step runs again.
+    NeedsExecutable {
+        app_id: u32,
+        folder: PathBuf,
+    },
+    Failed(String),
+}
+
+impl From<String> for StepError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+/// A step waiting for the user to pick the game's executable (see [`StepError::NeedsExecutable`]).
+struct ExecutablePick {
+    app_id: u32,
+    folder: PathBuf,
+    retry: PickRetry,
+}
+
+/// What runs again once the executable is picked.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PickRetry {
+    SteamActivation,
+    UbisoftActivation,
+    AddGame,
+    /// The Tools cracker, deploying into the picked folder.
+    CrackIntoFolder,
+    /// Cracking a game in the Drydock library.
+    CrackLibraryGame,
 }
 
 /// Result of the Ubisoft "prepare" step: the activation code to paste into a ticket, and the exe
@@ -694,6 +735,8 @@ impl DrydockApp {
             emu_arch: EmuArch::Auto,
             emu_reframework: false,
             emu_receiver: None,
+            emu_retry: None,
+            pending_exe_pick: None,
             status,
             status_error,
             background_action: None,
@@ -1126,25 +1169,15 @@ impl DrydockApp {
         self.status_error = false;
         self.busy_label = Some("Verifying the game folder…".into());
         self.activation_check_app = Some(app_id);
+        let picked = self.settings.picked_executables.get(&app_id).cloned();
         let (sender, receiver) = mpsc::channel();
         self.activation_check_receiver = Some(receiver);
         std::thread::spawn(move || {
-            let result = (|| -> Result<ActivationCheck, String> {
+            let result = (|| -> Result<ActivationCheck, StepError> {
                 if !chosen.is_dir() {
-                    return Err("Select the game's folder first.".to_owned());
+                    return Err("Select the game's folder first.".to_owned().into());
                 }
-                let executables = fetch_windows_executables(app_id).map_err(|error| error.to_string())?;
-                if executables.is_empty() {
-                    return Err(
-                        "Steam lists no launch executable for this game to verify against.".to_owned(),
-                    );
-                }
-                let Some(root) = resolve_game_root(&chosen, &executables) else {
-                    return Err(
-                        "These files don't look like the selected game. Pick the correct game folder."
-                            .to_owned(),
-                    );
-                };
+                let (root, _) = locate_game(app_id, &chosen, picked.as_deref())?;
                 let files = scan_crack_files(&root);
                 if files.is_empty() {
                     Ok(ActivationCheck::Ready { root })
@@ -1179,14 +1212,71 @@ impl DrydockApp {
                             self.pending_crack = Some(PendingCrack { app_id, root, files });
                         }
                     }
-                    Err(error) => {
-                        self.status = error;
-                        self.status_error = true;
-                    }
+                    Err(error) => self.step_failed(error, PickRetry::SteamActivation),
                 }
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => self.activation_check_receiver = None,
+        }
+    }
+
+    /// Reports a step that stopped: an error goes to the status line, while a missing executable has
+    /// the user pick one (on the next frame), after which `retry` runs again.
+    fn step_failed(&mut self, error: StepError, retry: PickRetry) {
+        match error {
+            StepError::Failed(message) => {
+                self.status = message;
+                self.status_error = true;
+            }
+            StepError::NeedsExecutable { app_id, folder } => {
+                self.pending_exe_pick = Some(ExecutablePick {
+                    app_id,
+                    folder,
+                    retry,
+                });
+            }
+        }
+    }
+
+    /// Asks for the game's `.exe` when a step found that Steam lists none, remembers it for the app
+    /// (relative to the game folder, like Steam's own list) and runs the step again.
+    fn pick_pending_executable(&mut self) {
+        let Some(pick) = self.pending_exe_pick.take() else {
+            return;
+        };
+        let name = self.app_display_name(pick.app_id);
+        let Some(executable) = rfd::FileDialog::new()
+            .set_title(format!(
+                "Steam lists no executable for {name} — select the game's .exe"
+            ))
+            .set_directory(&pick.folder)
+            .add_filter("Game executable", &["exe"])
+            .pick_file()
+        else {
+            self.status =
+                format!("Steam lists no executable for {name}. Select the game's .exe to continue.");
+            self.status_error = true;
+            return;
+        };
+        let Some(relative) = executable_relative_to(&pick.folder, &executable) else {
+            self.status = format!(
+                "Select the game's .exe inside {} — the folder you chose for the game.",
+                pick.folder.display()
+            );
+            self.status_error = true;
+            return;
+        };
+        self.settings.picked_executables.insert(pick.app_id, relative);
+        // A failed save is reported, but the pick still counts for this session.
+        let _ = self.persist_settings();
+        match pick.retry {
+            PickRetry::SteamActivation => self.start_activation_check(pick.app_id, pick.folder),
+            PickRetry::UbisoftActivation => self.start_ubisoft_prepare(pick.app_id, pick.folder),
+            PickRetry::AddGame => self.start_add_game_detect(pick.app_id, pick.folder),
+            PickRetry::CrackIntoFolder => {
+                self.start_emu_crack_for(pick.app_id, EmuOutput::Deploy(pick.folder));
+            }
+            PickRetry::CrackLibraryGame => self.crack_drydock_game(pick.app_id),
         }
     }
 
@@ -4412,8 +4502,22 @@ impl DrydockApp {
         } else {
             game.name.clone()
         };
+        // An exe picked for the app, else the one its Play button launches: either tells the crack
+        // where the exe sits when Steam lists none.
+        let picked = self
+            .settings
+            .picked_executables
+            .get(&app_id)
+            .cloned()
+            .or_else(|| {
+                self.settings
+                    .launch_paths
+                    .get(&app_id)
+                    .and_then(|exe| executable_relative_to(&root, Path::new(exe)))
+            });
         let (sender, receiver) = mpsc::channel();
         self.emu_receiver = Some(receiver);
+        self.emu_retry = Some(PickRetry::CrackLibraryGame);
         self.status = format!("Cracking {name} — resolving config and emu files…");
         self.status_error = false;
         std::thread::spawn(move || {
@@ -4425,6 +4529,7 @@ impl DrydockApp {
                 reframework,
                 skeleton.as_deref(),
                 &cache_dir,
+                picked.as_deref(),
             ));
         });
     }
@@ -4449,21 +4554,16 @@ impl DrydockApp {
             return;
         }
         let name = self.app_display_name(app_id);
+        let picked = self.settings.picked_executables.get(&app_id).cloned();
         let (sender, receiver) = mpsc::channel();
         self.add_game_receiver = Some(receiver);
         self.busy_label = Some(format!("Detecting {name}…"));
         std::thread::spawn(move || {
-            let result = (|| -> Result<AddGameOutcome, String> {
+            let result = (|| -> Result<AddGameOutcome, StepError> {
                 if !folder.is_dir() {
-                    return Err("Select the game's folder first.".to_owned());
+                    return Err("Select the game's folder first.".to_owned().into());
                 }
-                let executables = fetch_windows_executables(app_id).map_err(|error| error.to_string())?;
-                if executables.is_empty() {
-                    return Err("Steam lists no launch executable for this game.".to_owned());
-                }
-                let root = resolve_game_root(&folder, &executables).ok_or_else(|| {
-                    "These files don't look like the selected game. Pick the correct game folder.".to_owned()
-                })?;
+                let (root, executables) = locate_game(app_id, &folder, picked.as_deref())?;
                 // resolve_game_root guarantees at least one executable exists under the root; use the
                 // first one that does as the Play launcher.
                 let exe = executables
@@ -4517,10 +4617,7 @@ impl DrydockApp {
                         self.add_game_search.clear();
                         self.library_selected = Some(outcome.app_id);
                     }
-                    Err(error) => {
-                        self.status = error;
-                        self.status_error = true;
-                    }
+                    Err(error) => self.step_failed(error, PickRetry::AddGame),
                 }
             }
             Err(TryRecvError::Empty) => {}
@@ -4532,12 +4629,13 @@ impl DrydockApp {
     /// the background (Steam's executable list, checked against the files on disk) so the Play button
     /// under "Installed in Drydock" works.
     fn start_download_install_detect(&mut self, app_id: u32, name: String, root: PathBuf) {
+        let picked = self.settings.picked_executables.get(&app_id).cloned();
         let (sender, receiver) = mpsc::channel();
         self.download_install_receiver.push(receiver);
         std::thread::spawn(move || {
             let result = fetch_windows_executables(app_id)
-                .map(|executables| {
-                    let exe = executables
+                .map(|listed| {
+                    let exe = launch_executables(listed, picked.as_deref())
                         .iter()
                         .map(|path| root.join(path))
                         .find(|path| path.is_file())
@@ -5299,10 +5397,16 @@ impl DrydockApp {
         self.status_error = false;
         self.busy_label = Some("Adding magicfiles and launching the game…".into());
         let settings_directory = self.paths.settings_dir();
+        let picked = self.settings.picked_executables.get(&app_id).cloned();
         let (sender, receiver) = mpsc::channel();
         self.ubisoft_prepare_receiver = Some(receiver);
         std::thread::spawn(move || {
-            let _ = sender.send(prepare_ubisoft(app_id, &chosen, &settings_directory));
+            let _ = sender.send(prepare_ubisoft(
+                app_id,
+                &chosen,
+                picked.as_deref(),
+                &settings_directory,
+            ));
         });
     }
 
@@ -5322,10 +5426,7 @@ impl DrydockApp {
                             "Token request captured. Send the activation code in your Ubisoft ticket.".into();
                         self.status_error = false;
                     }
-                    Err(error) => {
-                        self.status = error;
-                        self.status_error = true;
-                    }
+                    Err(error) => self.step_failed(error, PickRetry::UbisoftActivation),
                 }
             }
             Err(TryRecvError::Empty) => {}
@@ -6540,6 +6641,10 @@ impl DrydockApp {
         let Ok(app_id) = self.emu_appid.trim().parse::<u32>() else {
             return;
         };
+        self.start_emu_crack_for(app_id, output);
+    }
+
+    fn start_emu_crack_for(&mut self, app_id: u32, output: EmuOutput) {
         if self.emu_receiver.is_some() {
             return;
         }
@@ -6555,8 +6660,11 @@ impl DrydockApp {
         let arch = self.emu_arch;
         let reframework = self.emu_reframework;
         let cache_dir = self.paths.cache_dir();
+        let picked = self.settings.picked_executables.get(&app_id).cloned();
         let (sender, receiver) = mpsc::channel();
         self.emu_receiver = Some(receiver);
+        // Only a deploy has a folder to pick the exe in; a ZIP keeps its files at the top level.
+        self.emu_retry = matches!(output, EmuOutput::Deploy(_)).then_some(PickRetry::CrackIntoFolder);
         self.status = "Cracking — resolving config and emu files…".into();
         self.status_error = false;
         std::thread::spawn(move || {
@@ -6568,6 +6676,7 @@ impl DrydockApp {
                 reframework,
                 skeleton.as_deref(),
                 &cache_dir,
+                picked.as_deref(),
             ));
         });
     }
@@ -6580,12 +6689,13 @@ impl DrydockApp {
         let cache_dir = self.paths.cache_dir();
         let (sender, receiver) = mpsc::channel();
         self.emu_receiver = Some(receiver);
+        self.emu_retry = None;
         self.status = "Re-downloading the emu binaries…".into();
         self.status_error = false;
         std::thread::spawn(move || {
             let result = drydock_core::ensure_toolchain(&cache_dir, true)
                 .map(|_| "Emu binaries re-downloaded.".to_owned())
-                .map_err(|error| error.to_string());
+                .map_err(|error| StepError::Failed(error.to_string()));
             let _ = sender.send(result);
         });
     }
@@ -6597,19 +6707,27 @@ impl DrydockApp {
         match receiver.try_recv() {
             Ok(result) => {
                 self.emu_receiver = None;
-                match result {
-                    Ok(message) => {
+                let retry = self.emu_retry.take();
+                match (result, retry) {
+                    (Ok(message), _) => {
                         self.status = message;
                         self.status_error = false;
                     }
-                    Err(error) => {
-                        self.status = error;
+                    (Err(error), Some(retry)) => self.step_failed(error, retry),
+                    (Err(StepError::Failed(message)), None) => {
+                        self.status = message;
+                        self.status_error = true;
+                    }
+                    // Only a deploy asks for the exe, and a deploy always records its retry.
+                    (Err(StepError::NeedsExecutable { .. }), None) => {
+                        self.status = "Steam lists no launch executable for this game.".into();
                         self.status_error = true;
                     }
                 }
             }
             Err(TryRecvError::Disconnected) => {
                 self.emu_receiver = None;
+                self.emu_retry = None;
                 self.status = "The template generator ended unexpectedly".into();
                 self.status_error = true;
             }
@@ -6885,6 +7003,7 @@ impl eframe::App for DrydockApp {
         self.poll_activation_verification();
         self.poll_service_action();
         self.poll_emu_template();
+        self.pick_pending_executable();
         self.poll_update();
         self.poll_download();
         self.poll_add_game();
@@ -8745,6 +8864,10 @@ fn arch_from_depot_paths(data: &DepotData) -> Option<PeArch> {
 /// manifest, DLCs + languages from the store, achievements from the proxy) and the architecture (from
 /// `arch_choice`, else Steam app-info, else the game exe's PE header), ensures the emu toolchain is
 /// cached, then deploys into the game folder or writes a ZIP. Returns a summary or an error message.
+///
+/// `picked` is the executable the user picked for the app (relative to the game folder), used when
+/// Steam lists none.
+#[allow(clippy::too_many_arguments)]
 fn build_emu_crack(
     app_id: u32,
     output: &EmuOutput,
@@ -8753,10 +8876,26 @@ fn build_emu_crack(
     include_reframework: bool,
     skeleton: Option<&Path>,
     cache_dir: &Path,
-) -> Result<String, String> {
+    picked: Option<&str>,
+) -> Result<String, StepError> {
     // The game's Windows exes (relative paths) give the exe sub-folder (`Bin64\`) and the fallback
     // architecture (reading a real exe's PE header when Steam can't say).
-    let exes = fetch_windows_executables(app_id).unwrap_or_default();
+    let listed = fetch_windows_executables(app_id).unwrap_or_default();
+    let steam_lists_some = !listed.is_empty();
+    let exes = launch_executables(listed, picked);
+    // Without an executable a deploy would land in the folder's top level rather than next to the
+    // exe, so the user is asked for it — also when the one picked earlier is not in this folder.
+    if let EmuOutput::Deploy(folder) = output
+        && !steam_lists_some
+        && exes
+            .first()
+            .is_none_or(|exe| !drydock_core::join_within(folder, exe).is_file())
+    {
+        return Err(StepError::NeedsExecutable {
+            app_id,
+            folder: folder.clone(),
+        });
+    }
     let prefix = exes
         .first()
         .and_then(|exe| {
@@ -9002,21 +9141,50 @@ fn group_thousands(value: usize) -> String {
     out
 }
 
+/// Finds the game in `chosen` by its launch executables — Steam's list, or the one the user picked
+/// for the app when Steam lists none — and returns its folder with the executables that locate it.
+///
+/// When Steam lists none and no picked one is in `chosen`, the user is asked to pick the `.exe`
+/// ([`StepError::NeedsExecutable`]); a folder that does not match Steam's list stays an error.
+fn locate_game(
+    app_id: u32,
+    chosen: &Path,
+    picked: Option<&str>,
+) -> Result<(PathBuf, Vec<String>), StepError> {
+    let listed = fetch_windows_executables(app_id).map_err(|error| error.to_string())?;
+    let steam_lists_some = !listed.is_empty();
+    let executables = launch_executables(listed, picked);
+    match resolve_game_root(chosen, &executables) {
+        Some(root) => Ok((root, executables)),
+        None if steam_lists_some => Err(StepError::Failed(
+            "These files don't look like the selected game. Pick the correct game folder.".to_owned(),
+        )),
+        None => Err(StepError::NeedsExecutable {
+            app_id,
+            folder: chosen.to_path_buf(),
+        }),
+    }
+}
+
 /// The blocking Ubisoft prepare sequence (runs on a background thread): resolve the game exe via
 /// Steam, download + install the magicfiles beside it, launch it once, capture the generated
 /// token_req.txt, and mint the machine/App-bound activation code.
-fn prepare_ubisoft(app_id: u32, chosen: &Path, settings_directory: &Path) -> Result<UbisoftPrepared, String> {
+fn prepare_ubisoft(
+    app_id: u32,
+    chosen: &Path,
+    picked: Option<&str>,
+    settings_directory: &Path,
+) -> Result<UbisoftPrepared, StepError> {
     if !chosen.is_dir() {
-        return Err("Select the game's folder first.".to_owned());
+        return Err("Select the game's folder first.".to_owned().into());
     }
-    let executables = fetch_windows_executables(app_id).map_err(|error| error.to_string())?;
-    let Some(exe_relative) = executables.first() else {
-        return Err("Steam lists no launch executable for this game to verify against.".to_owned());
-    };
-    let root = resolve_game_root(chosen, &executables).ok_or_else(|| {
-        "These files don't look like the selected game. Pick the correct game folder.".to_owned()
-    })?;
-    let exe = root.join(exe_relative);
+    let (root, executables) = locate_game(app_id, chosen, picked)?;
+    // The first listed executable that is actually there: the folder may have matched a later one.
+    let exe = executables
+        .iter()
+        .map(|relative| root.join(relative))
+        .find(|path| path.is_file())
+        .ok_or_else(|| "The game executable could not be found in the folder.".to_owned())?;
     let exe_dir = exe
         .parent()
         .ok_or_else(|| "Could not resolve the game executable's folder.".to_owned())?

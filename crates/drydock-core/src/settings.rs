@@ -52,6 +52,9 @@ pub struct Settings {
     pub installed_games: BTreeMap<u32, InstalledGame>,
     /// Per-app launch executables, so a downloaded game can be started from the Drydock library.
     pub launch_paths: BTreeMap<u32, String>,
+    /// Executables the user picked for apps Steam lists no launch executable for, relative to the
+    /// game's folder (`bin64/Game.exe`). Used wherever Steam's own list would be.
+    pub picked_executables: BTreeMap<u32, String>,
     /// Optional path to the Cold Client Loader skeleton ZIP (the shared emu DLLs) merged into
     /// generated emulator templates. Empty means only the config files are written.
     pub emu_skeleton_path: String,
@@ -117,6 +120,7 @@ impl Default for Settings {
             legacy_update_blocks: BTreeMap::new(),
             installed_games: BTreeMap::new(),
             launch_paths: BTreeMap::new(),
+            picked_executables: BTreeMap::new(),
             emu_skeleton_path: String::new(),
             download_queue: Vec::new(),
             max_download_connections: Self::DEFAULT_DOWNLOAD_CONNECTIONS,

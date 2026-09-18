@@ -84,6 +84,42 @@ pub fn resolve_game_root(chosen: &Path, executables: &[String]) -> Option<PathBu
     None
 }
 
+/// The launch executables to find a game's folder by: Steam's own list (`listed`) when it names
+/// any, otherwise the one the user picked for the app (`picked`, relative to the game's folder).
+#[must_use]
+pub fn launch_executables(listed: Vec<String>, picked: Option<&str>) -> Vec<String> {
+    if listed.is_empty() {
+        picked.map(str::to_owned).into_iter().collect()
+    } else {
+        listed
+    }
+}
+
+/// `executable` relative to `root`, with forward slashes like Steam's own list (`bin64/Game.exe`),
+/// when it is an `.exe` inside `root`. This is how an executable the user picked is remembered.
+#[must_use]
+pub fn executable_relative_to(root: &Path, executable: &Path) -> Option<String> {
+    let is_exe = executable
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"));
+    if !is_exe || !executable.is_file() {
+        return None;
+    }
+    // Both are resolved first, so a differently spelt or `..`-laden path still compares equal and
+    // one that only looks inside `root` (through a link, say) does not.
+    let root = fs::canonicalize(root).ok()?;
+    let executable = fs::canonicalize(executable).ok()?;
+    let relative = executable.strip_prefix(&root).ok()?;
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            return None;
+        };
+        parts.push(part.to_str()?.to_owned());
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
 /// Scans `root` and every subfolder for known hypervisor/crack artifacts, returning the paths
 /// found. A matched directory is returned as-is (its contents are not listed separately).
 #[must_use]
@@ -247,6 +283,55 @@ mod tests {
         fs::write(dir.path().join("bin64/Game.exe"), b"exe").expect("exe");
         let resolved = resolve_game_root(&dir.path().join("bin64"), &["bin64/Game.exe".to_owned()]);
         assert_eq!(resolved.as_deref(), Some(dir.path()));
+    }
+
+    #[test]
+    fn a_picked_executable_only_stands_in_when_steam_lists_none() {
+        let listed = vec!["bin64/Game.exe".to_owned()];
+        assert_eq!(launch_executables(listed.clone(), Some("Game.exe")), listed);
+        assert_eq!(launch_executables(Vec::new(), Some("Game.exe")), ["Game.exe"]);
+        assert!(launch_executables(Vec::new(), None).is_empty());
+    }
+
+    #[test]
+    fn a_picked_executable_is_remembered_relative_to_the_game_folder() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let game = dir.path().join("My Game");
+        fs::create_dir_all(game.join("Binaries/Win64")).expect("dirs");
+        let exe = game.join("Binaries/Win64/Game-Win64-Shipping.EXE");
+        fs::write(&exe, b"exe").expect("exe");
+        fs::write(game.join("readme.txt"), b"x").expect("file");
+
+        let relative = executable_relative_to(&game, &exe).expect("inside the folder");
+        assert_eq!(relative, "Binaries/Win64/Game-Win64-Shipping.EXE");
+        // The remembered path finds the folder again the way Steam's own list does.
+        assert_eq!(
+            resolve_game_root(dir.path(), &[relative]).as_deref(),
+            Some(game.as_path())
+        );
+
+        let outside = dir.path().join("Other.exe");
+        fs::write(&outside, b"exe").expect("exe");
+        assert!(
+            executable_relative_to(&game, &outside).is_none(),
+            "not inside the folder"
+        );
+        assert!(
+            executable_relative_to(&game, &game.join("readme.txt")).is_none(),
+            "not an exe"
+        );
+        assert!(
+            executable_relative_to(&game, &game.join("Missing.exe")).is_none(),
+            "not there"
+        );
+        assert!(
+            executable_relative_to(
+                &game,
+                &game.join("Binaries/Win64/../Win64/Game-Win64-Shipping.EXE")
+            )
+            .is_some_and(|path| path == "Binaries/Win64/Game-Win64-Shipping.EXE"),
+            "a roundabout spelling still resolves"
+        );
     }
 
     #[test]
