@@ -106,10 +106,10 @@ impl AppUpdater {
     }
 
     pub fn can_self_update() -> bool {
-        if cfg!(debug_assertions) || Self::configured_repository().is_none() {
+        if cfg!(debug_assertions) || Self::configured_repository().is_none() || self_update_disabled() {
             return false;
         }
-        env::current_exe().is_ok_and(|path| expected_target_name(&path))
+        env::current_exe().is_ok_and(|path| expected_target_name(&path) && !is_local_build(&path))
     }
 
     pub fn prepare_update(&self) -> Result<Option<PreparedUpdate>, UpdateError> {
@@ -407,6 +407,28 @@ fn expected_update_source(path: &Path) -> bool {
             .is_some_and(|name| name.starts_with("Drydock-") && !name.ends_with(".download"))
 }
 
+/// Whether the running binary is a local `cargo build` output rather than an installed Drydock.
+///
+/// A release build from the workspace is called `Drydock.exe` and reports the version in
+/// `Cargo.toml`, which is older than whatever is published — so the updater would replace the very
+/// build someone just made to test a fix, silently. Cargo leaves its own lock file next to the
+/// binary in `target/<profile>`, which identifies a build directory without guessing from names.
+fn is_local_build(path: &Path) -> bool {
+    path.parent()
+        .is_some_and(|directory| directory.join(".cargo-lock").exists())
+}
+
+/// `DRYDOCK_NO_SELF_UPDATE` (anything but empty or `0`) turns the self-updater off for a run —
+/// for testing a build that is deliberately not the published one, or for a deployment that
+/// updates Drydock by its own means.
+fn self_update_disabled() -> bool {
+    disables_self_update(env::var_os("DRYDOCK_NO_SELF_UPDATE").as_deref())
+}
+
+fn disables_self_update(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|value| !value.is_empty() && value != "0")
+}
+
 fn expected_target_name(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -587,6 +609,27 @@ mod tests {
         assert!(AppVersion::parse("1.2.3.4").is_err());
         assert!(AppVersion::parse("not-a-version").is_err());
         assert!(AppVersion::parse("v1.2.3").expect("version") > AppVersion::parse("1.2.2").expect("version"));
+    }
+
+    #[test]
+    fn a_binary_in_a_cargo_build_directory_never_replaces_itself() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let binary = directory.path().join("Drydock.exe");
+        assert!(!is_local_build(&binary), "an installed copy updates itself");
+        std::fs::write(directory.path().join(".cargo-lock"), b"").expect("lock file");
+        assert!(
+            is_local_build(&binary),
+            "a build someone made to test a fix must survive the update check"
+        );
+    }
+
+    #[test]
+    fn the_self_update_switch_is_off_only_when_it_is_really_set() {
+        use std::ffi::OsStr;
+        assert!(!disables_self_update(None));
+        assert!(!disables_self_update(Some(OsStr::new(""))));
+        assert!(!disables_self_update(Some(OsStr::new("0"))));
+        assert!(disables_self_update(Some(OsStr::new("1"))));
     }
 
     #[test]

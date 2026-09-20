@@ -87,6 +87,12 @@ impl Settings {
     /// crowding a slower one noticeably.
     pub const DEFAULT_DOWNLOAD_CONNECTIONS: u32 = 16;
 
+    /// The most connections a download may use. A game made of many tiny files spends its time
+    /// waiting for round trips rather than for bytes — one request per few-kilobyte chunk — so more
+    /// requests in flight is the only thing that helps there. Past this the content servers gain
+    /// nothing and start refusing.
+    pub const MAXIMUM_DOWNLOAD_CONNECTIONS: u32 = 64;
+
     /// The self-hosting overrides in the shape [`crate::config`] wants.
     #[must_use]
     pub fn config_overrides(&self) -> crate::config::UserOverrides {

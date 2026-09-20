@@ -13,7 +13,7 @@
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::io::Read;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -53,6 +53,8 @@ pub enum CdnError {
     Status(u16),
     #[error("chunk exceeded the size limit")]
     TooLarge,
+    #[error("the download was stopped")]
+    Cancelled,
     #[error(transparent)]
     Chunk(#[from] ChunkError),
     #[error("decompressed chunk length {actual} did not match the manifest's {expected}")]
@@ -83,7 +85,10 @@ impl CdnClient {
         let client = Client::builder()
             .user_agent(user_agent())
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(60))
+            // One chunk is at most a megabyte. A server that needs longer than this for it is a
+            // server to drop rather than to wait for: another one gets the chunk while this one is
+            // still thinking, and a pause does not hang on it either.
+            .timeout(Duration::from_secs(30))
             .build()?;
         Ok(Self { client })
     }
@@ -129,6 +134,21 @@ impl CdnClient {
         depot_id: u32,
         chunk: &ChunkEntry,
     ) -> Result<Vec<u8>, CdnError> {
+        self.fetch_chunk_cancellable(server, depot_id, chunk, &AtomicBool::new(false))
+    }
+
+    /// [`Self::fetch_chunk`] that drops the transfer as soon as `cancel` is set.
+    ///
+    /// A pause is only as fast as the slowest request still in flight: with dozens of connections,
+    /// waiting for each one to finish its chunk — or worse, to run into the request timeout on a
+    /// server that stopped sending — is what makes "pausing" take far longer than it should.
+    pub fn fetch_chunk_cancellable(
+        &self,
+        server: &ContentServer,
+        depot_id: u32,
+        chunk: &ChunkEntry,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<u8>, CdnError> {
         let url = server.chunk_url(depot_id, &chunk.id_hex());
         let response = self.client.get(&url).send()?;
         if !response.status().is_success() {
@@ -140,9 +160,19 @@ impl CdnClient {
         }
         let capacity = expected.unwrap_or_else(|| u64::from(chunk.compressed_len));
         let mut encrypted = Vec::with_capacity(capacity.min(MAXIMUM_CHUNK_BYTES) as usize);
-        response
-            .take(MAXIMUM_CHUNK_BYTES + 1)
-            .read_to_end(&mut encrypted)?;
+        let mut reader = response.take(MAXIMUM_CHUNK_BYTES + 1);
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(CdnError::Cancelled);
+            }
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => encrypted.extend_from_slice(&buffer[..read]),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         if encrypted.len() as u64 > MAXIMUM_CHUNK_BYTES {
             return Err(CdnError::TooLarge);
         }

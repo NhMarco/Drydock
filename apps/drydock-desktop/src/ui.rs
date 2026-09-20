@@ -1,10 +1,13 @@
-use crate::downloads::{DownloadJob, DownloadKind, DownloadUpdate, JobLimits, human_bytes, run_depot_job};
+use crate::downloads::{
+    DownloadJob, DownloadKind, DownloadUpdate, JOB_PREPARING, JobLimits, claim_abandoned, human_bytes,
+    run_depot_job,
+};
 use crate::unlocks::{UnlockUpdateSweep, UnlockWrites};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -1650,7 +1653,7 @@ impl DrydockApp {
         let limits = JobLimits {
             connections: match self.settings.max_download_connections {
                 0 => Settings::DEFAULT_DOWNLOAD_CONNECTIONS,
-                n => n.clamp(1, 32),
+                n => n.clamp(1, Settings::MAXIMUM_DOWNLOAD_CONNECTIONS),
             } as usize,
             max_bps: match self.settings.max_download_mbps {
                 0 => None,
@@ -1660,6 +1663,8 @@ impl DrydockApp {
         };
         let cancel = Arc::new(AtomicBool::new(false));
         let thread_cancel = Arc::clone(&cancel);
+        let state = Arc::new(AtomicU8::new(JOB_PREPARING));
+        let thread_state = Arc::clone(&state);
         let (sender, receiver) = mpsc::channel();
         let job_name = name.clone();
         std::thread::spawn(move || {
@@ -1672,6 +1677,7 @@ impl DrydockApp {
                 games_directory,
                 limits,
                 &thread_cancel,
+                &thread_state,
                 &sender,
             );
             let _ = sender.send(DownloadUpdate::Finished(result));
@@ -1683,10 +1689,15 @@ impl DrydockApp {
             name,
             kind,
             cancel,
+            state,
             receiver,
             progress: None,
+            preparing: None,
+            started: Instant::now(),
             speed_bps: 0.0,
             peak_bps: 0.0,
+            disk_bps: 0.0,
+            peak_disk_bps: 0.0,
             sample: None,
             finished: None,
         });
@@ -1773,15 +1784,54 @@ impl DrydockApp {
     /// Pauses the running download: the thread stops cleanly between chunks and the entry stays at the
     /// front of the queue, so partial files remain and it can resume later.
     fn pause_download(&mut self) {
-        if let Some(job) = self.download_job.as_ref()
-            && job.kind == DownloadKind::Download
-            && job.finished.is_none()
-        {
-            job.cancel.store(true, Ordering::Relaxed);
-            self.download_paused = true;
-            self.status = "Pausing the download…".into();
-            self.status_error = false;
+        let Some(cancel) = self
+            .download_job
+            .as_ref()
+            .filter(|job| job.kind == DownloadKind::Download && job.finished.is_none())
+            .map(|job| Arc::clone(&job.cancel))
+        else {
+            return;
+        };
+        cancel.store(true, Ordering::Relaxed);
+        self.download_paused = true;
+        self.download_error = None;
+        self.status = if self.abandon_preparing_job() {
+            "Download stopped. It stays in the queue — press RESUME to try again.".into()
+        } else {
+            "Pausing the download…".into()
+        };
+        self.status_error = false;
+    }
+
+    /// Lets go of a job that has not started writing yet, so the user is never locked into waiting.
+    ///
+    /// Preparing means waiting on the depot package, which the source builds on demand: minutes for
+    /// a big title, and the thread only notices a cancel once that request returns. Until then the
+    /// banner, the queue and every download control would be frozen with no way out — exactly the
+    /// state a stuck "Preparing…" left behind. Dropping the handle frees all of it at once; the
+    /// thread finds the job taken (see `JOB_ABANDONED`), writes nothing and ends by itself.
+    ///
+    /// Returns `false` when the engine already has the files — that job has to be stopped the normal
+    /// way, which it does between chunks anyway.
+    fn abandon_preparing_job(&mut self) -> bool {
+        let Some(job) = self.download_job.as_ref() else {
+            return false;
+        };
+        if job.finished.is_some() || !claim_abandoned(&job.state) {
+            return false;
         }
+        let app_id = job.app_id;
+        self.download_job = None;
+        // An activation waiting on this verify would otherwise keep waiting for a job that no longer
+        // reports back, leaving its page disabled for good.
+        if self
+            .activation_verify
+            .as_ref()
+            .is_some_and(|(pending, _)| *pending == app_id)
+        {
+            self.activation_verify = None;
+        }
+        true
     }
 
     /// Removes the current (paused) download from the queue and starts the next one, if any. Partial
@@ -1823,10 +1873,18 @@ impl DrydockApp {
     /// not a pause), or start the new front directly when nothing is running.
     fn switch_or_start(&mut self, switching_status: &str) {
         if self.download_running() {
-            self.download_switch_pending = true;
             if let Some(job) = &self.download_job {
                 job.cancel.store(true, Ordering::Relaxed);
             }
+            // A job that is still preparing is let go of at once, so the new front starts now instead
+            // of behind a package request that can run for minutes.
+            if self.abandon_preparing_job() {
+                self.download_paused = false;
+                self.download_error = None;
+                self.start_front_download();
+                return;
+            }
+            self.download_switch_pending = true;
             self.status = switching_status.to_owned();
             self.status_error = false;
         } else {
@@ -1845,6 +1903,7 @@ impl DrydockApp {
             loop {
                 match job.receiver.try_recv() {
                     Ok(DownloadUpdate::Progress(progress)) => job.progress = Some(progress),
+                    Ok(DownloadUpdate::Preparing(step)) => job.preparing = Some(step),
                     Ok(DownloadUpdate::Installed(root)) => job.install_root = Some(root),
                     Ok(DownloadUpdate::Verified(complete)) => job.verified = Some(complete),
                     Ok(DownloadUpdate::Finished(result)) => {
@@ -1858,23 +1917,37 @@ impl DrydockApp {
                     }
                 }
             }
-            // Estimate download speed from how many bytes arrived since the last ~0.5s sample.
-            if let Some(done) = job.progress.as_ref().map(|p| p.done_bytes) {
+            // Network and disk are measured apart, from the job's own counters: the wire carries
+            // compressed chunks, the disk takes the unpacked bytes, and a chunk that was already
+            // valid on disk costs nothing on the wire at all. Reading one number off the other is
+            // what made the peak claim hundreds of MB/s on a line doing fifty.
+            if let Some(tick) = job.progress.as_ref() {
+                let (network, disk) = (tick.network_bytes, tick.disk_bytes);
                 let now = Instant::now();
                 match job.sample {
-                    Some((then, prev_done)) if now.duration_since(then).as_secs_f64() >= 0.5 => {
+                    Some((then, previous_network, previous_disk))
+                        if now.duration_since(then).as_secs_f64() >= 0.5 =>
+                    {
                         let elapsed = now.duration_since(then).as_secs_f64();
-                        let instant = done.saturating_sub(prev_done) as f64 / elapsed;
-                        // Exponential smoothing so the number doesn't jump around.
-                        job.speed_bps = if job.speed_bps == 0.0 {
-                            instant
-                        } else {
-                            job.speed_bps * 0.6 + instant * 0.4
+                        // Exponential smoothing so the numbers don't jump around.
+                        let smooth = |current: f64, instant: f64| {
+                            if current == 0.0 {
+                                instant
+                            } else {
+                                current * 0.6 + instant * 0.4
+                            }
                         };
+                        job.speed_bps = smooth(
+                            job.speed_bps,
+                            network.saturating_sub(previous_network) as f64 / elapsed,
+                        );
+                        job.disk_bps =
+                            smooth(job.disk_bps, disk.saturating_sub(previous_disk) as f64 / elapsed);
                         job.peak_bps = job.peak_bps.max(job.speed_bps);
-                        job.sample = Some((now, done));
+                        job.peak_disk_bps = job.peak_disk_bps.max(job.disk_bps);
+                        job.sample = Some((now, network, disk));
                     }
-                    None => job.sample = Some((now, done)),
+                    None => job.sample = Some((now, network, disk)),
                     _ => {}
                 }
             }
@@ -3124,8 +3197,32 @@ impl DrydockApp {
                 .filter(|tick| tick.app_id == app_id)
                 .cloned()
         });
-        let speed = active.map_or(0.0, |job| job.speed_bps);
+        // A pause that is still winding down reports zero rather than a number fading out over
+        // several seconds, which read as "it is still going".
+        let stopping = running && self.download_paused;
+        let speed = if stopping {
+            0.0
+        } else {
+            active.map_or(0.0, |job| job.speed_bps)
+        };
         let peak = active.map_or(0.0, |job| job.peak_bps);
+        let disk = if stopping {
+            0.0
+        } else {
+            active.map_or(0.0, |job| job.disk_bps)
+        };
+        // Before the first chunk there is nothing to measure, so the banner names the step the job is
+        // waiting on and how long it has waited: a package the source is still building then reads as
+        // work in progress instead of a hang — and PAUSE/CANCEL end it either way.
+        let preparing = active.map(|job| {
+            let step = job.preparing.unwrap_or("Preparing…");
+            let waited = job.started.elapsed().as_secs();
+            if waited >= 5 {
+                format!("{step}  {}:{:02}", waited / 60, waited % 60)
+            } else {
+                step.to_owned()
+            }
+        });
 
         let queue_len = self.settings.download_queue.len();
         let mut pause_clicked = false;
@@ -3212,8 +3309,19 @@ impl DrydockApp {
             } else {
                 "Files are being verified…"
             }
+        } else if stopping {
+            "Pausing…"
         } else if running {
-            "Data is downloading…"
+            // Working through the file list comes before the first byte — saying "downloading"
+            // through it is what made the start look stuck.
+            if progress
+                .as_ref()
+                .is_some_and(|tick| tick.stage == drydock_core::DownloadStage::Allocating)
+            {
+                "The download is being prepared…"
+            } else {
+                "Data is downloading…"
+            }
         } else if error.is_some() {
             "Paused — download error"
         } else {
@@ -3224,6 +3332,10 @@ impl DrydockApp {
                 download_mini_stat(ui, "NETWORK", &human_bps(speed), ACCENT_SOFT);
                 ui.add_space(24.0);
                 download_mini_stat(ui, "PEAK", &human_bps(peak), ACCENT);
+                ui.add_space(24.0);
+                // Written while downloading, read while verifying — and the only thing moving while
+                // the engine works through chunks it already has, where the wire stays idle.
+                download_mini_stat(ui, "DISK", &human_bps(disk), VERDIGRIS);
                 ui.add_space(24.0);
                 download_mini_stat(ui, "TOTAL SIZE", &human_bytes(total), AMBER);
             });
@@ -3263,7 +3375,11 @@ impl DrydockApp {
                 ui.horizontal(|ui| {
                     ui.add(egui::Spinner::new().size(14.0).color(ACCENT));
                     ui.add_space(6.0);
-                    ui.label(RichText::new("Preparing…").size(11.0).color(MUTED));
+                    ui.label(
+                        RichText::new(preparing.as_deref().unwrap_or("Preparing…"))
+                            .size(11.0)
+                            .color(MUTED),
+                    );
                 });
             }
             ui.add_space(10.0);
@@ -3367,7 +3483,21 @@ impl DrydockApp {
             if let Some(job) = &self.download_job {
                 job.cancel.store(true, Ordering::Relaxed);
             }
-            self.status = "Cancelling the verify…".into();
+            // Cancelled while it was still preparing: nothing was checked, so the banner has no
+            // result to show and simply goes away.
+            let for_activation = self
+                .activation_verify
+                .as_ref()
+                .is_some_and(|(pending, _)| *pending == app_id);
+            self.status = if self.abandon_preparing_job() {
+                if for_activation {
+                    "Verify cancelled — the activation was not started.".into()
+                } else {
+                    "Verify cancelled.".into()
+                }
+            } else {
+                "Cancelling the verify…".into()
+            };
             self.status_error = false;
         }
         if dismiss {
@@ -6102,11 +6232,14 @@ impl DrydockApp {
                 // Max parallel CDN connections (0 in an old settings file migrates to the default).
                 let mut connections = match self.settings.max_download_connections {
                     0 => Settings::DEFAULT_DOWNLOAD_CONNECTIONS,
-                    n => n.clamp(1, 32),
+                    n => n.clamp(1, Settings::MAXIMUM_DOWNLOAD_CONNECTIONS),
                 };
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Max connections").size(12.0).color(ACCENT));
-                    ui.add(egui::Slider::new(&mut connections, 1..=32));
+                    ui.add(egui::Slider::new(
+                        &mut connections,
+                        1..=Settings::MAXIMUM_DOWNLOAD_CONNECTIONS,
+                    ));
                 });
                 if connections != self.settings.max_download_connections {
                     self.settings.max_download_connections = connections;
@@ -6966,16 +7099,23 @@ impl DrydockApp {
                     name: "The Blood of Dawnwalker".into(),
                     kind: DownloadKind::Download,
                     cancel: Arc::new(AtomicBool::new(false)),
+                    state: Arc::new(AtomicU8::new(crate::downloads::JOB_RUNNING)),
                     receiver,
+                    preparing: None,
+                    started: Instant::now(),
                     progress: Some(DownloadProgress {
                         app_id: 3_751_260,
                         stage: drydock_core::DownloadStage::Downloading,
                         done_bytes: 1_288_490_188,
                         total_bytes: 10_737_418_240,
+                        network_bytes: 906_167_910,
+                        disk_bytes: 1_288_490_188,
                         current_file: "Dawnwalker/Content/Paks/Dawnwalker-Windows.ucas".into(),
                     }),
                     speed_bps: 10_380_902.0,
                     peak_bps: 11_010_048.0,
+                    disk_bps: 14_889_779.0,
+                    peak_disk_bps: 15_728_640.0,
                     sample: None,
                     finished: None,
                 });

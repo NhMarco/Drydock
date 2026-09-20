@@ -126,6 +126,33 @@ fn outside_root(root: &std::path::Path, target: &std::path::Path) -> std::io::Er
     )
 }
 
+/// An open folder inside a [`WriteRoot`], from [`WriteRoot::open_dir`]. Files are opened by name
+/// relative to it, which keeps the sandbox (the handle cannot be made to point elsewhere) while
+/// costing one resolution step instead of one per path component.
+pub(crate) struct WriteDir(cap_std::fs::Dir);
+
+impl WriteDir {
+    /// Opens a file directly inside this folder, creating it when `create` is set. `name` must be a
+    /// single file name; anything else is refused.
+    pub(crate) fn open(&self, name: &std::path::Path, create: bool) -> std::io::Result<std::fs::File> {
+        if name.components().count() != 1 || name.parent().is_some_and(|p| !p.as_os_str().is_empty()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} is not a plain file name", name.display()),
+            ));
+        }
+        self.0
+            .open_with(
+                name,
+                cap_std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(create),
+            )
+            .map(cap_std::fs::File::into_std)
+    }
+}
+
 /// A folder that writes are confined to.
 ///
 /// Files are opened through a pinned `cap_std` directory handle, which refuses any link that leads
@@ -178,6 +205,22 @@ impl WriteRoot {
         self.dir
             .open(self.relative(target)?)
             .map(cap_std::fs::File::into_std)
+    }
+
+    /// An open handle to a folder inside the root, for opening many files in it.
+    ///
+    /// A sandboxed open resolves every component of the path again and checks each one for links.
+    /// On a game whose files sit eight folders deep and number in the hundred thousands, that is
+    /// most of the cost of touching a file — through a folder handle only the file name is left to
+    /// resolve, and the handle itself is as confined as the root it came from.
+    pub(crate) fn open_dir(&self, target: &std::path::Path) -> std::io::Result<WriteDir> {
+        let relative = self.relative(target)?;
+        let dir = if relative.as_os_str().is_empty() {
+            self.dir.try_clone()?
+        } else {
+            self.dir.open_dir(relative)?
+        };
+        Ok(WriteDir(dir))
     }
 
     /// Opens a file for reading and writing, creating it when `create` is set. Its folder must exist.
@@ -504,5 +547,70 @@ mod tests {
                 joined.display()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod open_cost_probe {
+    use super::*;
+    use std::time::Instant;
+
+    /// Measurement, not a check: how much a sandboxed open of a deep path costs compared with one
+    /// through an already-open folder handle. Run with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn deep_path_opens_versus_folder_handle() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let scope = WriteRoot::new(root.path()).expect("root");
+        let deep = root
+            .path()
+            .join("Data/Public/Game/Mods/Shared/Public/Content/Groups");
+        scope.create_dir_all(&deep).expect("folders");
+        const COUNT: usize = 2000;
+
+        let started = Instant::now();
+        for index in 0..COUNT {
+            let file = scope
+                .open(&deep.join(format!("a{index}.json")), true)
+                .expect("open");
+            file.set_len(64).expect("size");
+        }
+        let full = started.elapsed();
+
+        let handle = scope.open_dir(&deep).expect("folder handle");
+        let started = Instant::now();
+        for index in 0..COUNT {
+            let file = handle
+                .open(std::path::Path::new(&format!("b{index}.json")), true)
+                .expect("open");
+            file.set_len(64).expect("size");
+        }
+        let cached = started.elapsed();
+
+        // Reopening files that already exist is what the download does for every chunk it writes.
+        let started = Instant::now();
+        for index in 0..COUNT {
+            scope
+                .open(&deep.join(format!("a{index}.json")), false)
+                .expect("reopen");
+        }
+        let full_again = started.elapsed();
+        let started = Instant::now();
+        for index in 0..COUNT {
+            handle
+                .open(std::path::Path::new(&format!("b{index}.json")), false)
+                .expect("reopen");
+        }
+        let cached_again = started.elapsed();
+
+        let each = |elapsed: std::time::Duration| elapsed.as_secs_f64() * 1e6 / COUNT as f64;
+        println!(
+            "{COUNT} files — create: whole path {:.1} µs, folder handle {:.1} µs | reopen: whole \
+             path {:.1} µs, folder handle {:.1} µs",
+            each(full),
+            each(cached),
+            each(full_again),
+            each(cached_again)
+        );
     }
 }

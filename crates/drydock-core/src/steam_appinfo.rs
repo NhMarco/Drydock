@@ -6,6 +6,7 @@
 //! pins the exact extraction root. Source: the public SteamCMD.net mirror of Steam `app_info`
 //! (`config.launch`), which needs no API key, so the client fetches it directly.
 
+use std::collections::BTreeSet;
 use std::io::Read;
 use std::time::Duration;
 
@@ -17,9 +18,8 @@ use crate::version::user_agent;
 
 const MAXIMUM_APPINFO_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Returns the distinct Windows launch executables for `app_id`, as forward-slash relative paths
-/// (e.g. `bin64/CrimsonDesert.exe`). Non-Windows and non-`.exe` launch entries are dropped.
-pub fn fetch_windows_executables(app_id: u32) -> Result<Vec<String>, SteamAppInfoError> {
+/// Fetches an app's public `app_info` document from the SteamCMD.net mirror.
+fn fetch_app_info(app_id: u32) -> Result<serde_json::Value, SteamAppInfoError> {
     if app_id == 0 {
         return Err(SteamAppInfoError::InvalidAppId);
     }
@@ -37,7 +37,48 @@ pub fn fetch_windows_executables(app_id: u32) -> Result<Vec<String>, SteamAppInf
     if bytes.len() as u64 > MAXIMUM_APPINFO_BYTES {
         return Err(SteamAppInfoError::TooLarge);
     }
-    let json: serde_json::Value = serde_json::from_slice(&bytes)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+/// The depots of `app_id` that Steam marks for another operating system.
+///
+/// A provider's package carries **every** depot an app has — the Windows, macOS and Linux builds of
+/// the same game, each the game's full size. Downloading all of them takes several times the disk
+/// space Steam would use, and a verify would report every foreign-OS file as missing. Only depots
+/// app-info explicitly assigns to another OS are named here: anything it does not mention stays,
+/// because the package knows about depots app-info does not (content shared from another app, say).
+pub fn fetch_non_windows_depots(app_id: u32) -> Result<BTreeSet<u32>, SteamAppInfoError> {
+    Ok(non_windows_depots(&fetch_app_info(app_id)?, app_id))
+}
+
+/// Reads the depot IDs assigned to another OS out of a SteamCMD.net app-info document: a depot whose
+/// `config.oslist` names an OS but not Windows. Pure, for unit testing.
+#[must_use]
+pub fn non_windows_depots(json: &serde_json::Value, app_id: u32) -> BTreeSet<u32> {
+    let Some(depots) = json["data"][app_id.to_string()]["depots"].as_object() else {
+        return BTreeSet::new();
+    };
+    let mut foreign = BTreeSet::new();
+    for (key, depot) in depots {
+        // `branches` and the other non-depot keys sit in the same object.
+        let Ok(depot_id) = key.parse::<u32>() else {
+            continue;
+        };
+        let oslist = depot["config"]["oslist"].as_str().unwrap_or_default();
+        if !oslist.is_empty() && !oslist.to_ascii_lowercase().contains("windows") {
+            foreign.insert(depot_id);
+        }
+    }
+    foreign
+}
+
+/// Returns the distinct Windows launch executables for `app_id`, as forward-slash relative paths
+/// (e.g. `bin64/CrimsonDesert.exe`). Non-Windows and non-`.exe` launch entries are dropped.
+pub fn fetch_windows_executables(app_id: u32) -> Result<Vec<String>, SteamAppInfoError> {
+    if app_id == 0 {
+        return Err(SteamAppInfoError::InvalidAppId);
+    }
+    let json = fetch_app_info(app_id)?;
     Ok(windows_executables(&json, app_id))
 }
 
@@ -87,21 +128,7 @@ pub fn fetch_windows_arch(app_id: u32) -> Result<Option<bool>, SteamAppInfoError
     if app_id == 0 {
         return Err(SteamAppInfoError::InvalidAppId);
     }
-    let client = Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(20))
-        .build()?;
-    let response = client
-        .get(format!("https://api.steamcmd.net/v1/info/{app_id}"))
-        .header(USER_AGENT, user_agent())
-        .send()?
-        .error_for_status()?;
-    let mut bytes = Vec::new();
-    response.take(MAXIMUM_APPINFO_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAXIMUM_APPINFO_BYTES {
-        return Err(SteamAppInfoError::TooLarge);
-    }
-    let json: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let json = fetch_app_info(app_id)?;
     Ok(windows_arch(&json, app_id))
 }
 
@@ -145,21 +172,7 @@ pub fn fetch_install_dir(app_id: u32) -> Result<Option<String>, SteamAppInfoErro
     if app_id == 0 {
         return Err(SteamAppInfoError::InvalidAppId);
     }
-    let client = Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(20))
-        .build()?;
-    let response = client
-        .get(format!("https://api.steamcmd.net/v1/info/{app_id}"))
-        .header(USER_AGENT, user_agent())
-        .send()?
-        .error_for_status()?;
-    let mut bytes = Vec::new();
-    response.take(MAXIMUM_APPINFO_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAXIMUM_APPINFO_BYTES {
-        return Err(SteamAppInfoError::TooLarge);
-    }
-    let json: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let json = fetch_app_info(app_id)?;
     Ok(install_dir_name(&json, app_id))
 }
 
@@ -188,6 +201,35 @@ pub enum SteamAppInfoError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_depots_of_another_os_are_named() {
+        // Shaped like Baldur's Gate 3: the same game as a Windows, a macOS and a Linux depot, plus
+        // language and DLC depots, and the `branches` key that sits beside them.
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{"data":{"1086940":{"depots":{
+                "1086941":{"config":{"oslist":"windows"}},
+                "1086944":{"config":{"oslist":"windows","language":"german"}},
+                "1419660":{"config":{"oslist":"macos"}},
+                "2378501":{"config":{"oslist":"linux"}},
+                "2330358":{"config":{"oslist":"windows"},"dlcappid":"2956320"},
+                "2378500":{"dlcappid":"2378500"},
+                "228990":{"config":{"oslist":"windows"},"depotfromapp":"228980"},
+                "branches":{"public":{"buildid":"1"}}
+            }}}}"#,
+        )
+        .expect("json");
+        assert_eq!(
+            non_windows_depots(&json, 1_086_940),
+            BTreeSet::from([1_419_660, 2_378_501]),
+            "the Windows, language, DLC and shared-redistributable depots all stay"
+        );
+        // Nothing to go by: the caller keeps the package as it is.
+        assert!(non_windows_depots(&json, 730).is_empty());
+        let empty: serde_json::Value =
+            serde_json::from_str(r#"{"data":{"730":{"depots":{"branches":{}}}}}"#).expect("json");
+        assert!(non_windows_depots(&empty, 730).is_empty());
+    }
 
     #[test]
     fn extracts_windows_exe_paths_and_skips_other_os() {

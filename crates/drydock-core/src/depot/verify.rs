@@ -122,6 +122,9 @@ pub fn verify(
                 stage: DownloadStage::Verifying,
                 done_bytes: pass.done.load(Ordering::Relaxed).min(total),
                 total_bytes: total,
+                // A verify only reads: every byte it works through is disk, never network.
+                network_bytes: 0,
+                disk_bytes: pass.done.load(Ordering::Relaxed),
                 current_file: name,
             });
             if pass.checked.load(Ordering::Relaxed) >= units.len() || cancel.load(Ordering::Relaxed) {

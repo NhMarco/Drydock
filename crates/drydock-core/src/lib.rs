@@ -88,7 +88,8 @@ pub use self_test::{SelfTestError, SelfTestReport, run_self_test};
 pub use settings::{InstalledGame, LoadOutcome, QueuedDownload, Settings, SettingsError};
 pub use steam::{SteamDiscovery, SteamError, discover_steam, is_valid_steam_directory, load_manifests};
 pub use steam_appinfo::{
-    SteamAppInfoError, fetch_install_dir, fetch_windows_arch, fetch_windows_executables,
+    SteamAppInfoError, fetch_install_dir, fetch_non_windows_depots, fetch_windows_arch,
+    fetch_windows_executables,
 };
 pub use steam_process::{SteamProcessError, is_steam_running, restart_steam, start_steam, stop_steam};
 pub use steam_service::{

@@ -14,6 +14,7 @@
 //! verified against the git-blob SHA the proxy advertised.
 
 use std::io::Read;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
@@ -158,6 +159,16 @@ impl ProxyClient {
     /// Downloads the per-app depot package ZIP (all `<depot>_<manifest>.manifest` files plus the
     /// key-bearing `.lua`/`.key`) via the proxy. A `404` means no depot data exists for the app.
     pub fn depot_package(&self, app_id: u32) -> Result<Vec<u8>, ProxyError> {
+        self.depot_package_cancellable(app_id, &AtomicBool::new(false))
+    }
+
+    /// [`Self::depot_package`], but it stops as soon as `cancel` is set. The package can be tens of
+    /// megabytes and the upstream builds it on demand, so this is the one request a user is likely
+    /// to wait minutes for — it must not hold a download hostage when they press Pause.
+    pub fn depot_package_cancellable(&self, app_id: u32, cancel: &AtomicBool) -> Result<Vec<u8>, ProxyError> {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(ProxyError::Cancelled);
+        }
         // The upstream packages the depot on demand, which can take minutes for a large title, so
         // override the client's default request timeout with a generous one.
         let response = self
@@ -168,7 +179,7 @@ impl ProxyClient {
             return Err(ProxyError::DepotUnavailable(app_id));
         }
         let response = Self::check_status(response)?;
-        read_capped(response, MAXIMUM_DEPOT_MANIFEST_ZIP_BYTES)
+        read_capped_cancellable(response, MAXIMUM_DEPOT_MANIFEST_ZIP_BYTES, cancel)
     }
 
     /// The app's achievement schema as a gbe_fork `achievements.json` array (text), for the local
@@ -328,6 +339,36 @@ fn read_capped(response: Response, limit: u64) -> Result<Vec<u8>, ProxyError> {
     Ok(bytes)
 }
 
+/// [`read_capped`] that gives up mid-body when `cancel` is set, so a slow or stalled transfer can
+/// be abandoned instead of being waited out until the request timeout.
+fn read_capped_cancellable(
+    response: Response,
+    limit: u64,
+    cancel: &AtomicBool,
+) -> Result<Vec<u8>, ProxyError> {
+    if response.content_length().is_some_and(|length| length > limit) {
+        return Err(ProxyError::TooLarge);
+    }
+    let mut reader = response.take(limit + 1);
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(ProxyError::Cancelled);
+        }
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => bytes.extend_from_slice(&buffer[..read]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if bytes.len() as u64 > limit {
+        return Err(ProxyError::TooLarge);
+    }
+    Ok(bytes)
+}
+
 fn random_nonce() -> String {
     let mut raw = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut raw);
@@ -467,6 +508,8 @@ pub enum ProxyError {
     DepotUnavailable(u32),
     #[error("{0} changed while it was being loaded. Refresh and try again.")]
     ContentChanged(String),
+    #[error("The request was cancelled")]
+    Cancelled,
     #[error("The proxy request could not be signed")]
     Signing,
     #[error("The system clock is set before the Unix epoch")]

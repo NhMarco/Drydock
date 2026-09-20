@@ -1,12 +1,12 @@
 //! Fetch + parse orchestration and the download/verify engine.
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError, mpsc};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
@@ -86,7 +86,24 @@ impl DepotData {
     /// `.lua` (`addappid(<depot>, 1, "<hex>")`) and/or any `.key` file. Encrypted filenames are
     /// decrypted with the matching depot key.
     pub fn fetch(proxy: &ProxyClient, app_id: u32) -> Result<Self, DepotDownloadError> {
-        Self::parse_package(app_id, proxy.depot_package(app_id)?)
+        Self::fetch_cancellable(proxy, app_id, &AtomicBool::new(false))
+    }
+
+    /// [`Self::fetch`] that can be stopped while the package is still being fetched. The upstream
+    /// builds the package on demand, so this wait is measured in minutes for a big title — long
+    /// enough that a user must be able to walk away from it.
+    pub fn fetch_cancellable(
+        proxy: &ProxyClient,
+        app_id: u32,
+        cancel: &AtomicBool,
+    ) -> Result<Self, DepotDownloadError> {
+        let package = proxy
+            .depot_package_cancellable(app_id, cancel)
+            .map_err(|error| match error {
+                ProxyError::Cancelled => DepotDownloadError::Cancelled,
+                other => DepotDownloadError::Proxy(other),
+            })?;
+        Self::parse_package(app_id, package)
     }
 
     /// The parsing half of [`Self::fetch`], split out so it can be exercised without a network.
@@ -166,6 +183,33 @@ impl DepotData {
             .any(|manifest| !is_shared_redistributable_depot(manifest.depot_id))
     }
 
+    /// Drops the depots in `unwanted`, and reports how many went.
+    ///
+    /// A provider's package carries every depot an app has, including the macOS and Linux builds of
+    /// the same game — each the game's full size. Downloading those on Windows wastes the space
+    /// several times over and makes a verify report every foreign-OS file as missing.
+    ///
+    /// Nothing is dropped when that would leave no game content at all: the package is then laid
+    /// out in a way the depot list does not describe, and downloading all of it beats nothing.
+    pub fn drop_depots(&mut self, unwanted: &BTreeSet<u32>) -> usize {
+        let keeps_content = self.manifests.iter().any(|manifest| {
+            !unwanted.contains(&manifest.depot_id) && !is_shared_redistributable_depot(manifest.depot_id)
+        });
+        if !keeps_content {
+            return 0;
+        }
+        let before = self.manifests.len();
+        self.manifests
+            .retain(|manifest| !unwanted.contains(&manifest.depot_id));
+        self.raw_manifests.retain(|name, _| {
+            name.split('_')
+                .next()
+                .and_then(|depot| depot.parse::<u32>().ok())
+                .is_none_or(|depot| !unwanted.contains(&depot))
+        });
+        before - self.manifests.len()
+    }
+
     /// Depot IDs of the manifests actually in the package (for user-facing diagnostics).
     #[must_use]
     pub fn manifest_depots(&self) -> Vec<u32> {
@@ -189,6 +233,10 @@ impl DepotData {
 /// What the engine is doing, for the UI's Downloads bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DownloadStage {
+    /// Directories are being created and every file sized before a byte is fetched. On a big game
+    /// that is tens of thousands of files and can run for minutes, so it is a stage of its own
+    /// instead of silence.
+    Allocating,
     Downloading,
     Verifying,
 }
@@ -200,6 +248,12 @@ pub struct DownloadProgress {
     pub stage: DownloadStage,
     pub done_bytes: u64,
     pub total_bytes: u64,
+    /// Bytes that actually came off the wire, compressed, as the CDN sent them. A chunk already
+    /// valid on disk costs nothing here — which is the difference between a download speed and the
+    /// rate at which the engine works through a game it mostly has already.
+    pub network_bytes: u64,
+    /// Bytes this job moved on disk: written for a download, read for a verify.
+    pub disk_bytes: u64,
     pub current_file: String,
 }
 
@@ -225,6 +279,9 @@ pub fn download(
     progress: impl FnMut(DownloadProgress),
 ) -> Result<DownloadOutcome, DepotDownloadError> {
     let servers = cdn.content_servers(0, data.app_id)?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(DepotDownloadError::Cancelled);
+    }
     download_from(
         data,
         install_root,
@@ -258,21 +315,52 @@ fn download_from(
     let app_id = data.app_id;
     let pool = ServerPool::new(servers)?;
 
+    // What is left before the first chunk — the free-space check and indexing the manifests — still
+    // takes a moment on a game of this size, so it says what it is doing and gives up when the user
+    // stops the download. The files themselves are made as their chunks arrive (see
+    // [`Engine::prepare_file`]), not here.
+    let total_files = data
+        .manifests
+        .iter()
+        .flat_map(|manifest| &manifest.files)
+        .filter(|file| !file.is_directory())
+        .count();
+    let mut indexed = 0usize;
+    let mut ticked = Instant::now();
+    let mut tick = |progress: &mut dyn FnMut(DownloadProgress), done: usize, force: bool| {
+        if !force && ticked.elapsed() < Duration::from_millis(200) {
+            return;
+        }
+        ticked = Instant::now();
+        progress(DownloadProgress {
+            app_id,
+            stage: DownloadStage::Allocating,
+            done_bytes: 0,
+            total_bytes: total,
+            // Nothing is on the wire yet, and nothing of ours is on the disk.
+            network_bytes: 0,
+            disk_bytes: 0,
+            current_file: format!("Checking the file list: {done} of {total_files}"),
+        });
+    };
+    tick(&mut progress, 0, true);
+
     // Refuse before writing anything if the volume plainly cannot hold the download. Sizing every
     // file up front means a full disk would otherwise fail somewhere in the middle, leaving a
     // half-written install behind and an I/O error the user has to interpret.
     let additional = additional_space(data, install_root);
     check_free_space(install_root, additional)?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(DepotDownloadError::Cancelled);
+    }
     let scope =
         crate::safe_path::WriteRoot::new(install_root).map_err(|error| io_err(install_root, error))?;
 
-    // Create every directory + size every file up front, then list every distinct chunk once, with
-    // each place it belongs.
+    // List every distinct chunk once, with each place it belongs. Folders named by the manifest are
+    // created here — there are few of them, and an empty one would otherwise never be made at all.
     let mut files: Vec<FileSlot> = Vec::new();
     let mut chunks: Vec<ChunkTask> = Vec::new();
     let mut by_content: HashMap<(u32, [u8; 20], u32, u32), usize> = HashMap::new();
-    // Folders already created by this call. Thousands of files share a handful of folders, and each
-    // creation also checks the path for links, so it is done once per folder.
     let mut created: HashSet<PathBuf> = HashSet::new();
     for manifest in &data.manifests {
         let depot_id = manifest.depot_id;
@@ -282,32 +370,39 @@ fn download_from(
         for file in &manifest.files {
             let target = joined(install_root, &file.path);
             if file.is_directory() {
-                if !created.contains(&target) {
+                if created.insert(target.clone()) {
                     scope
                         .create_dir_all(&target)
                         .map_err(|error| io_err(&target, error))?;
-                    created.insert(target);
                 }
                 continue;
             }
-            if let Some(parent) = target.parent()
-                && !created.contains(parent)
-            {
-                scope
-                    .create_dir_all(parent)
-                    .map_err(|error| io_err(parent, error))?;
-                created.insert(parent.to_owned());
+            indexed += 1;
+            if cancel.load(Ordering::Relaxed) {
+                return Err(DepotDownloadError::Cancelled);
             }
-            // A file we just created holds nothing but zeroes, so checksumming its chunks before
-            // downloading them is pure waste — on a fresh install that meant reading back (and
-            // Adler-32-ing) the entire game before fetching a single byte of it.
-            let existed = target.exists();
-            open_sized(&scope, &target, file.size)?;
+            tick(&mut progress, indexed, false);
+            // An empty file has no chunks, so no fetcher will ever reach it: it is made here or not
+            // at all. There are few of them, unlike the rest.
+            let prepared = if file.chunks.is_empty() {
+                if let Some(parent) = target.parent()
+                    && created.insert(parent.to_owned())
+                {
+                    scope
+                        .create_dir_all(parent)
+                        .map_err(|error| io_err(parent, error))?;
+                }
+                let handle = open_sized(&scope, &target, file.size)?;
+                Some(handle.metadata().map_or(0, |data| data.len()))
+            } else {
+                None
+            };
             let index = files.len();
             files.push(FileSlot {
                 path: target,
                 relative: file.path.clone(),
-                may_resume: existed,
+                size: file.size,
+                prepared: Mutex::new(prepared),
             });
             for chunk in &file.chunks {
                 // Games often repeat content. Like Steam, fetch each distinct chunk once and write it
@@ -345,10 +440,14 @@ fn download_from(
         cancel,
         limiter: max_bps.filter(|bps| *bps > 0).map(RateLimiter::new),
         next: AtomicUsize::new(0),
+        created: Mutex::new(created),
+        dirs: Mutex::new(DirCache::default()),
         retries: Mutex::new(Vec::new()),
         completed: AtomicUsize::new(0),
         done: AtomicU64::new(0),
         bytes_written: AtomicU64::new(0),
+        bytes_fetched: AtomicU64::new(0),
+        bytes_disk: AtomicU64::new(0),
         current_file: Mutex::new(String::new()),
         failure: Mutex::new(None),
     };
@@ -358,7 +457,7 @@ fn download_from(
     let (sender, receiver) = mpsc::sync_channel::<Fetched>(decoders);
     let receiver = Mutex::new(receiver);
     std::thread::scope(|threads| {
-        for _ in 0..connections.clamp(1, 32) {
+        for _ in 0..connections.clamp(1, 64) {
             let sender = sender.clone();
             threads.spawn(|| engine.fetch_chunks(sender));
         }
@@ -376,6 +475,8 @@ fn download_from(
                 stage: DownloadStage::Downloading,
                 done_bytes: engine.done.load(Ordering::Relaxed).min(total),
                 total_bytes: total,
+                network_bytes: engine.bytes_fetched.load(Ordering::Relaxed),
+                disk_bytes: engine.bytes_disk.load(Ordering::Relaxed),
                 current_file: name,
             });
             if engine.finished() || engine.stopped() {
@@ -401,6 +502,8 @@ fn download_from(
         stage: DownloadStage::Downloading,
         done_bytes: total,
         total_bytes: total,
+        network_bytes: engine.bytes_fetched.load(Ordering::Relaxed),
+        disk_bytes: engine.bytes_disk.load(Ordering::Relaxed),
         current_file: String::new(),
     });
     Ok(DownloadOutcome {
@@ -421,10 +524,15 @@ struct FileSlot {
     path: PathBuf,
     /// Manifest-relative path, shown as the "current file" in progress ticks.
     relative: String,
-    /// Whether the file already existed before this call. Only then can its on-disk bytes hold
-    /// anything worth verifying; a file `open_sized` just created is all zeroes, so checksumming it
-    /// before downloading would read the whole install back for nothing.
-    may_resume: bool,
+    size: u64,
+    /// `None` until this file has been created and sized; then how many bytes it held *before* this
+    /// download — the only part of it that can contain anything worth keeping. Zero means the file
+    /// is new here, so none of it is worth checksumming.
+    ///
+    /// Creating and sizing happens the first time a chunk of the file is dealt with, not up front:
+    /// a big game is over a hundred thousand files, and making every one of them before the first
+    /// byte is fetched is minutes of watching nothing happen.
+    prepared: Mutex<Option<u64>>,
 }
 
 /// One distinct chunk and every place in the install that holds a copy of it.
@@ -466,11 +574,23 @@ struct Engine<'a> {
     limiter: Option<RateLimiter>,
     /// The next chunk no fetcher has taken yet.
     next: AtomicUsize,
+    /// Folders made so far. Thousands of files share a handful of folders, and creating one also
+    /// checks the path for links, so it is done once per folder rather than once per file.
+    created: Mutex<HashSet<PathBuf>>,
+    /// Open handles to those folders, shared by every thread — see [`DirCache`].
+    dirs: Mutex<DirCache>,
     retries: Mutex<Vec<Retry>>,
     /// Chunks fully written (or found intact).
     completed: AtomicUsize,
     done: AtomicU64,
     bytes_written: AtomicU64,
+    /// Compressed bytes taken off the wire, including a body that turned out garbled and had to be
+    /// fetched again — the line carried it either way.
+    bytes_fetched: AtomicU64,
+    /// Bytes moved on disk: written chunks plus the ones read back to check whether they are
+    /// already in place. On a resume that check is the only thing happening for minutes, so leaving
+    /// it out of the reading is what makes a working download look idle.
+    bytes_disk: AtomicU64,
     current_file: Mutex<String>,
     /// The first error; it stops every thread.
     failure: Mutex<Option<DepotDownloadError>>,
@@ -530,6 +650,8 @@ impl Engine<'_> {
             }
             let (server, body) = match self.fetch(task) {
                 Ok(fetched) => fetched,
+                // A pause is not a failure: it needs no error recorded, the download simply ends.
+                Err(DepotDownloadError::Cancelled) => break,
                 Err(error) => {
                     self.fail(error);
                     break;
@@ -548,6 +670,85 @@ impl Engine<'_> {
         }
     }
 
+    /// Makes one file real: its folder is created, the file itself is created and sized, and
+    /// whether it already existed is remembered. Runs once per file, the first time a chunk of it is
+    /// dealt with — doing this for every file of a game up front is minutes in which the download
+    /// looks like it never starts.
+    fn prepare_file(&self, index: usize) -> Result<u64, DepotDownloadError> {
+        let slot = &self.files[index];
+        let mut prepared = lock(&slot.prepared);
+        if let Some(had_bytes) = *prepared {
+            return Ok(had_bytes);
+        }
+        // How much the file held before this download decides how much of it is worth checking:
+        // what a download just created holds nothing but zeroes, so checksumming it before fetching
+        // would read the whole install back for nothing. The length comes from the handle that is
+        // opened here anyway, so no extra call is made for it, now or per chunk later.
+        let file = self.open_file(index, true)?;
+        let had_bytes = file
+            .metadata()
+            .map_err(|source| io_err(&slot.path, source))?
+            .len();
+        file.set_len(slot.size)
+            .map_err(|source| io_err(&slot.path, source))?;
+        *prepared = Some(had_bytes);
+        Ok(had_bytes)
+    }
+
+    /// Opens one of the download's files through its folder's handle, creating the folder (once) and
+    /// the file itself when asked.
+    fn open_file(&self, index: usize, create: bool) -> Result<File, DepotDownloadError> {
+        let slot = &self.files[index];
+        let parent = slot.path.parent().unwrap_or(&slot.path);
+        let name = slot
+            .path
+            .file_name()
+            .map(Path::new)
+            .ok_or_else(|| io_err(&slot.path, std::io::ErrorKind::InvalidInput.into()))?;
+        self.dir(parent)?
+            .open(name, create)
+            .map_err(|source| io_err(&slot.path, source))
+    }
+
+    /// The open handle for a folder, opening (and creating) it the first time it is asked for.
+    fn dir(&self, parent: &Path) -> Result<Arc<crate::safe_path::WriteDir>, DepotDownloadError> {
+        {
+            let mut cache = lock(&self.dirs);
+            cache.used += 1;
+            let used = cache.used;
+            if let Some(entry) = cache.open.get_mut(parent) {
+                entry.0 = used;
+                return Ok(Arc::clone(&entry.1));
+            }
+        }
+        if lock(&self.created).insert(parent.to_owned()) {
+            self.scope
+                .create_dir_all(parent)
+                .map_err(|error| io_err(parent, error))?;
+        }
+        // Opened outside the lock: two threads reaching a new folder together simply open it twice
+        // and one handle is dropped, which is cheaper than making every other thread wait.
+        let handle = Arc::new(
+            self.scope
+                .open_dir(parent)
+                .map_err(|error| io_err(parent, error))?,
+        );
+        let mut cache = lock(&self.dirs);
+        cache.used += 1;
+        let used = cache.used;
+        if cache.open.len() >= DirCache::LIMIT
+            && let Some(coldest) = cache
+                .open
+                .iter()
+                .min_by_key(|(_, (used, _))| *used)
+                .map(|(path, _)| path.clone())
+        {
+            cache.open.remove(&coldest);
+        }
+        cache.open.insert(parent.to_owned(), (used, Arc::clone(&handle)));
+        Ok(handle)
+    }
+
     /// The copies of chunk `index` that still need writing. In a file that existed before this
     /// download, a copy whose bytes already check out is skipped (resume and repair) and counts as
     /// done right away.
@@ -560,12 +761,24 @@ impl Engine<'_> {
         let chunk = task.chunk;
         let mut needed = Vec::with_capacity(task.copies.len());
         for &(file, offset) in &task.copies {
+            let had_bytes = self.prepare_file(file)?;
             let slot = &self.files[file];
-            if slot.may_resume {
-                let handle = handles.get(&self.scope, file, &slot.path)?;
-                if chunk_on_disk_ok(handle, offset, chunk.uncompressed_len, chunk.crc, &slot.path)
-                    .unwrap_or(false)
-                {
+            // Only a copy that was fully inside the old file can hold anything worth keeping.
+            if had_bytes >= offset + u64::from(chunk.uncompressed_len) {
+                let handle = handles.get(self, file)?;
+                let intact = chunk_on_disk_ok(
+                    handle,
+                    had_bytes,
+                    offset,
+                    chunk.uncompressed_len,
+                    chunk.crc,
+                    &slot.path,
+                )
+                .unwrap_or(false);
+                // The check reads the copy off the disk whether or not it turns out to be good.
+                self.bytes_disk
+                    .fetch_add(u64::from(chunk.uncompressed_len), Ordering::Relaxed);
+                if intact {
                     self.done
                         .fetch_add(u64::from(chunk.uncompressed_len), Ordering::Relaxed);
                     continue;
@@ -581,16 +794,26 @@ impl Engine<'_> {
         let mut avoid = None;
         let mut last = None;
         for _ in 0..CHUNK_ATTEMPTS.max(self.pool.len()) {
+            // Between attempts as well: a chunk no server wants to serve must not keep a pause
+            // waiting for every server in the pool to time out in turn.
+            if self.stopped() {
+                return Err(DepotDownloadError::Cancelled);
+            }
             let server = self.pool.pick(avoid);
             let started = Instant::now();
-            match self
-                .cdn
-                .fetch_chunk(self.pool.server(server), task.depot_id, task.chunk)
-            {
+            match self.cdn.fetch_chunk_cancellable(
+                self.pool.server(server),
+                task.depot_id,
+                task.chunk,
+                self.cancel,
+            ) {
                 Ok(body) => {
                     self.pool.record(server, body.len(), started.elapsed());
+                    self.bytes_fetched.fetch_add(body.len() as u64, Ordering::Relaxed);
                     return Ok((server, body));
                 }
+                // A stopped transfer says nothing about the server, so it keeps its score.
+                Err(CdnError::Cancelled) => return Err(DepotDownloadError::Cancelled),
                 Err(error) => {
                     self.pool.record_failure(server);
                     avoid = Some(server);
@@ -626,7 +849,7 @@ impl Engine<'_> {
                     for &(file, offset) in &fetched.copies {
                         let slot = &self.files[file];
                         let written = handles
-                            .get(&self.scope, file, &slot.path)
+                            .get(self, file)
                             .and_then(|handle| write_at(handle, offset, &raw, &slot.path));
                         if let Err(error) = written {
                             self.fail(error);
@@ -634,6 +857,7 @@ impl Engine<'_> {
                         }
                         self.done.fetch_add(raw.len() as u64, Ordering::Relaxed);
                         self.bytes_written.fetch_add(raw.len() as u64, Ordering::Relaxed);
+                        self.bytes_disk.fetch_add(raw.len() as u64, Ordering::Relaxed);
                     }
                     self.completed.fetch_add(1, Ordering::Relaxed);
                 }
@@ -655,29 +879,56 @@ impl Engine<'_> {
     }
 }
 
-/// A thread's open handles to the files it touches, reused across its chunks.
+/// Open folder handles shared by every thread of one download.
+///
+/// Opening a file through the write sandbox resolves — and link-checks — every component of its
+/// path. Measured on a game whose files sit eight folders deep, that is 731 µs per open against
+/// 74 µs when the folder is already open, and a download of a hundred thousand small files does
+/// nothing else. So each folder is opened once and its handle is kept.
 #[derive(Default)]
-struct FileHandles(HashMap<usize, File>);
+struct DirCache {
+    open: HashMap<PathBuf, (u64, Arc<crate::safe_path::WriteDir>)>,
+    used: u64,
+}
+
+impl DirCache {
+    /// Folders kept open at once. A game has far fewer folders than files, and a handle costs
+    /// little, but an install with tens of thousands of them should not hold them all.
+    const LIMIT: usize = 1024;
+}
+
+/// A thread's open handles to the files it touches, reused across its chunks. Each is kept with the
+/// tick it was last used at, so the cache can drop only its coldest entry.
+#[derive(Default)]
+struct FileHandles(HashMap<usize, (u64, File)>, u64);
 
 impl FileHandles {
-    /// At most this many stay open per thread (512 across all of them at the maximum).
-    const LIMIT: usize = 16;
+    /// At most this many stay open per thread.
+    const LIMIT: usize = 64;
 
-    fn get(
-        &mut self,
-        scope: &crate::safe_path::WriteRoot,
-        index: usize,
-        path: &Path,
-    ) -> Result<&mut File, DepotDownloadError> {
-        if self.0.len() >= Self::LIMIT && !self.0.contains_key(&index) {
-            self.0.clear();
+    fn get(&mut self, engine: &Engine, index: usize) -> Result<&mut File, DepotDownloadError> {
+        // Over the limit, drop the handle that has gone unused the longest — throwing all of them
+        // away instead meant reopening every file again right after, which on a game of many small
+        // files is an open (and an antivirus scan) for practically every chunk.
+        if self.0.len() >= Self::LIMIT
+            && !self.0.contains_key(&index)
+            && let Some(&oldest) = self
+                .0
+                .iter()
+                .min_by_key(|(_, (used, _))| *used)
+                .map(|(key, _)| key)
+        {
+            self.0.remove(&oldest);
         }
+        self.1 += 1;
+        let used = self.1;
         match self.0.entry(index) {
-            Entry::Occupied(entry) => Ok(entry.into_mut()),
-            Entry::Vacant(entry) => {
-                let file = scope.open(path, false).map_err(|source| io_err(path, source))?;
-                Ok(entry.insert(file))
+            Entry::Occupied(entry) => {
+                let slot = entry.into_mut();
+                slot.0 = used;
+                Ok(&mut slot.1)
             }
+            Entry::Vacant(entry) => Ok(&mut entry.insert((used, engine.open_file(index, false)?)).1),
         }
     }
 }
@@ -688,16 +939,24 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// How many more bytes the download needs on disk: each file's size beyond what is already there, so
 /// resuming or repairing an install does not ask for room for the whole game again.
+///
+/// A path two depots both carry takes the room of the larger one, not of both: they write the same
+/// file, one after the other.
 pub(crate) fn additional_space(data: &DepotData, install_root: &Path) -> u64 {
-    data.manifests
+    let mut wanted: HashMap<PathBuf, u64> = HashMap::new();
+    for file in data
+        .manifests
         .iter()
         .flat_map(|manifest| &manifest.files)
         .filter(|file| !file.is_directory())
-        .map(|file| {
-            file.size.saturating_sub(
-                std::fs::metadata(joined(install_root, &file.path)).map_or(0, |meta| meta.len()),
-            )
-        })
+    {
+        let target = joined(install_root, &file.path);
+        let size = wanted.entry(target).or_default();
+        *size = (*size).max(file.size);
+    }
+    wanted
+        .into_iter()
+        .map(|(target, size)| size.saturating_sub(std::fs::metadata(target).map_or(0, |meta| meta.len())))
         .fold(0_u64, u64::saturating_add)
 }
 
@@ -802,24 +1061,60 @@ impl RateLimiter {
 }
 
 /// Reads `len` bytes at `offset` and returns whether their Adler-32 matches `expected_crc`.
+/// Whether the bytes already at `offset` are the chunk the manifest expects.
+///
+/// `had_bytes` is the file's length *before* this download touched it, taken once when the file was
+/// prepared: asking the filesystem again for every chunk is a system call per chunk, and on a game
+/// made of a hundred thousand small files that is most of the work.
 fn chunk_on_disk_ok(
     file: &mut std::fs::File,
+    had_bytes: u64,
     offset: u64,
     len: u32,
     expected_crc: u32,
     path: &Path,
 ) -> Result<bool, DepotDownloadError> {
-    let metadata = file.metadata().map_err(|source| io_err(path, source))?;
-    if metadata.len() < offset + u64::from(len) {
+    if had_bytes < offset + u64::from(len) {
         return Ok(false);
     }
-    file.seek(SeekFrom::Start(offset))
-        .map_err(|source| io_err(path, source))?;
     let mut buffer = vec![0u8; len as usize];
-    if file.read_exact(&mut buffer).is_err() {
+    if read_at(file, offset, &mut buffer, path).is_err() {
         return Ok(false);
     }
     Ok(steam_adler_hash(&buffer) == expected_crc)
+}
+
+/// Reads at an absolute offset without moving the file cursor first — one system call instead of a
+/// seek and a read, and safe to use on a handle several threads share.
+fn read_at(
+    file: &mut std::fs::File,
+    offset: u64,
+    buffer: &mut [u8],
+    path: &Path,
+) -> Result<(), DepotDownloadError> {
+    let mut done = 0;
+    while done < buffer.len() {
+        let read = positioned_read(file, offset + done as u64, &mut buffer[done..])
+            .map_err(|source| io_err(path, source))?;
+        if read == 0 {
+            return Err(io_err(
+                path,
+                std::io::Error::from(std::io::ErrorKind::UnexpectedEof),
+            ));
+        }
+        done += read;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn positioned_read(file: &std::fs::File, offset: u64, buffer: &mut [u8]) -> std::io::Result<usize> {
+    std::os::windows::fs::FileExt::seek_read(file, buffer, offset)
+}
+
+#[cfg(not(windows))]
+fn positioned_read(file: &std::fs::File, offset: u64, buffer: &mut [u8]) -> std::io::Result<usize> {
+    std::os::unix::fs::FileExt::read_at(file, buffer, offset)
 }
 
 fn write_at(
@@ -919,6 +1214,60 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_work_before_the_first_chunk_is_reported_and_can_be_stopped() {
+        // Whatever still happens before the first chunk has to say what it is doing and stop when
+        // the user does — silence here is what made a download look frozen with a Pause button that
+        // did nothing.
+        let mut keys = DepotKeys::default();
+        keys.0.insert(1, [7u8; 32]);
+        let data = DepotData {
+            app_id: 1,
+            keys,
+            manifests: vec![manifest_with(vec![FileEntry {
+                path: "game/data.bin".into(),
+                size: 64,
+                flags: 0,
+                chunks: Vec::new(),
+            }])],
+            ..DepotData::default()
+        };
+        let root = tempfile::tempdir().expect("temp dir");
+        let cancel = AtomicBool::new(false);
+        let mut ticks = Vec::new();
+        let result = download_from(
+            &data,
+            root.path(),
+            &CdnClient::new().expect("client"),
+            vec![ContentServer {
+                // Never contacted: the download is stopped before a single chunk is fetched.
+                host: "127.0.0.1:1".into(),
+                https: false,
+            }],
+            &cancel,
+            4,
+            None,
+            |tick| {
+                cancel.store(true, Ordering::Relaxed);
+                ticks.push(tick);
+            },
+        );
+
+        assert!(matches!(result, Err(DepotDownloadError::Cancelled)));
+        let first = ticks.first().expect("a tick before any file work");
+        assert_eq!(first.stage, DownloadStage::Allocating);
+        assert_eq!(first.total_bytes, 64, "the full size is known up front");
+        assert!(
+            first.current_file.contains("Checking the file list"),
+            "the user is told what the wait is: {}",
+            first.current_file
+        );
+        assert!(
+            !root.path().join("game/data.bin").exists(),
+            "a stopped download leaves nothing behind"
+        );
+    }
+
     /// Packs `(name, bytes)` into a ZIP shaped like an upstream depot package.
     fn package_zip(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
         use std::io::Write;
@@ -1006,6 +1355,56 @@ mod tests {
         let mut manifest = manifest_with(vec![]);
         manifest.depot_id = depot_id;
         manifest
+    }
+
+    #[test]
+    fn foreign_os_depots_are_dropped_but_never_the_last_of_the_content() {
+        let file = |path: &str, size: u64| FileEntry {
+            path: path.into(),
+            size,
+            flags: 0,
+            chunks: Vec::new(),
+        };
+        let depot = |depot_id: u32, files: Vec<FileEntry>| {
+            let mut manifest = manifest_with(files);
+            manifest.depot_id = depot_id;
+            manifest
+        };
+        // Windows, macOS and Linux builds of one game, plus a shared redistributable.
+        let mut data = DepotData {
+            app_id: 1_086_940,
+            manifests: vec![
+                depot(1_086_941, vec![file("data/game.pak", 150)]),
+                depot(1_419_660, vec![file("data/game.pak", 150)]),
+                depot(2_378_501, vec![file("data/game.pak", 150)]),
+                depot(228_990, vec![file("redist/vcredist.exe", 5)]),
+            ],
+            raw_manifests: [
+                ("1086941_1.manifest".to_owned(), vec![1]),
+                ("1419660_2.manifest".to_owned(), vec![2]),
+                ("2378501_3.manifest".to_owned(), vec![3]),
+                ("228990_4.manifest".to_owned(), vec![4]),
+            ]
+            .into(),
+            ..DepotData::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            additional_space(&data, dir.path()),
+            155,
+            "the three OS builds write one file, so it is counted once"
+        );
+
+        assert_eq!(data.drop_depots(&BTreeSet::from([1_419_660, 2_378_501])), 2);
+        assert_eq!(data.manifest_depots(), vec![228_990, 1_086_941]);
+        assert_eq!(
+            data.raw_manifests.keys().collect::<Vec<_>>(),
+            ["1086941_1.manifest", "228990_4.manifest"]
+        );
+
+        // Dropping everything with game content in it is ignored rather than obeyed.
+        assert_eq!(data.drop_depots(&BTreeSet::from([1_086_941])), 0);
+        assert_eq!(data.manifest_depots(), vec![228_990, 1_086_941]);
     }
 
     #[test]
@@ -1212,6 +1611,10 @@ mod tests {
                 // The same content again, in another file.
                 file("game/copy.bin", first.len(), vec![a.clone()]),
                 file("game/sub/other.bin", third.len(), vec![c.clone()]),
+                // No chunks: nothing fetches it, so it is only there if the engine makes it itself.
+                file("game/empty.marker", 0, Vec::new()),
+                // Straight in the install root, like a game's executable — no folder to open first.
+                file("top.bin", first.len(), vec![a.clone()]),
             ])],
             ..DepotData::default()
         };
@@ -1243,6 +1646,11 @@ mod tests {
             std::fs::read(root.path().join("game/sub/other.bin")).unwrap(),
             third
         );
+        assert_eq!(std::fs::read(root.path().join("top.bin")).unwrap(), first);
+        assert!(
+            root.path().join("game/empty.marker").is_file(),
+            "a file without chunks is still part of the install"
+        );
         assert_eq!(
             server.requests_for(&a.id_hex()),
             1,
@@ -1254,11 +1662,12 @@ mod tests {
             2,
             "a garbled chunk is fetched again"
         );
-        assert_eq!(outcome.files_written, 3);
+        assert_eq!(outcome.files_written, 5);
         assert_eq!(outcome.bytes_written, data.total_bytes());
 
         // Everything is in place now, so running again fetches nothing and writes nothing.
         let before = server.total_requests();
+        let mut ticks = Vec::new();
         let again = download_from(
             &data,
             root.path(),
@@ -1267,11 +1676,23 @@ mod tests {
             &AtomicBool::new(false),
             4,
             None,
-            |_| {},
+            |tick| ticks.push(tick),
         )
         .unwrap();
         assert_eq!(server.total_requests(), before);
         assert_eq!(again.bytes_written, 0);
+
+        // Working through chunks that are already on disk is disk work, not network: reporting it
+        // as network is what made the speed read hundreds of MB/s on a line doing a fraction of it.
+        let last = ticks.last().expect("a final progress tick");
+        assert_eq!(last.done_bytes, data.total_bytes(), "the run still completes");
+        assert_eq!(last.network_bytes, 0, "nothing came off the wire");
+        assert!(
+            last.disk_bytes >= data.total_bytes(),
+            "every checked chunk was read from disk: {} of {}",
+            last.disk_bytes,
+            data.total_bytes()
+        );
     }
 
     #[test]

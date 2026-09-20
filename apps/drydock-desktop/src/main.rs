@@ -139,6 +139,15 @@ fn main() -> eframe::Result {
     }
     // Diagnostic: run the full update check (download + verify + stage) without applying it.
     if arguments.as_slice() == ["--check-update"] {
+        // Say so rather than reporting "up to date": a build that may not update itself never asks
+        // GitHub, and a tester should not have to guess which of the two they are looking at.
+        if !AppUpdater::can_self_update() {
+            println!(
+                "Self-update is off for this build ({APP_VERSION}) — a local build, a debug build \
+                 or DRYDOCK_NO_SELF_UPDATE. Nothing was checked."
+            );
+            return Ok(());
+        }
         match AppUpdater::new().and_then(|updater| updater.prepare_update()) {
             Ok(Some(update)) => {
                 println!(
