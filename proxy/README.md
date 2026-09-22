@@ -13,6 +13,7 @@ is tried first; the others fill what it is missing, so one being down does not t
 | `ryu` | `RYU_AUTH_CODE` | **The default.** `generator.ryuu.lol`; `secure_download` returns the manifests+lua ZIP |
 | `depotbox` | `DEPOTBOX_API_KEY` | `depotbox.org`; builds Lua on demand (`DEPOTBOX_LUA_TIMEOUT_MS`, default 90 s) and lists no tags |
 | `steamtools` | `STEAMTOOLS_API_KEY` | `api.steamtools.app`; also backs `/v1/app-info`. The key allows 85 requests/min plus a daily quota |
+| `hubcap` | `HUBCAP_API_KEY` | `hubcapmanifest.com`; **day-limited** — see below. Its library (~157k apps) feeds the gamelist for free |
 
 `PROVIDER_SOURCES` defaults to `ryu` alone. A provider that is not listed is fully off and is never
 contacted — and **its credential is not required to boot**, so running Ryu-only needs no SteamTools
@@ -22,6 +23,25 @@ A provider that answers `429` is skipped for Lua and depot requests until its li
 depot package is only cached once it is a real ZIP archive (an HTML or JSON answer moves on to the
 next provider), and provider credentials are never forwarded when an upstream redirects to another
 host. When a provider without tags (DepotBox) wins an App ID, the tags another provider had are kept.
+
+### Day-limited providers (Hubcap)
+
+Hubcap's manifest downloads are capped **per day** (the others are capped per minute at worst), so it
+is treated differently from the rest — wherever it appears in `PROVIDER_SOURCES`:
+
+- **Asked last, and only when it is the only option.** Every ordinary provider is tried first; then
+  any copy already on disk, however old, is used instead. Only when there is neither is Hubcap asked.
+- **Never asked without allowance.** `/api/v1/generate/usage` reports what is left of the day (the
+  `single` bucket, cached for `HUBCAP_USAGE_TTL_SECONDS`); at or below `HUBCAP_RESERVE` the provider
+  is skipped. A refresh (`force_update`) is never requested — that is what spends the allowance.
+- **What it serves is kept.** Its package is stored as a *kept* cache entry: it outlives the 24 h TTL
+  and the eviction sweep, so the app stays downloadable without spending the allowance again. The
+  moment an ordinary provider serves that app, its package replaces the kept one and normal caching
+  resumes. `X-Cache: KEPT` marks a response that came from such an entry.
+- **No Lua.** Hubcap's unlock only exists inside the manifest ZIP, so `/v1/lua/:appid` never uses it;
+  fetching a whole package to answer a Lua request would spend a day's allowance on it.
+- **Gamelist at the lowest priority.** Its library is free to read and is merged in last, so it only
+  adds the apps no other provider lists (and, having no tags, never overwrites another provider's).
 
 A second group of payloads — the Steam Service (OST) files, the Denuvo fixes, the repacks list and
 the Ubisoft magicfiles — is served from a GitHub repository (`GITHUB_OWNER`/`GITHUB_REPO`) rather
@@ -67,12 +87,12 @@ All responses are JSON unless noted. Protected endpoints require the HMAC header
 | GET    | `/v1/service/manifest`, `/v1/service/file/:name` | yes | Steam Service (OST) payload from GitHub. |
 | GET    | `/v1/emu/manifest`, `/v1/emu/file/:name` | yes | Emulator DLLs from GitHub (`EMU_DIRECTORY`, default `Files/dlls`). |
 | GET    | `/v1/repacks`           | yes  | `{ "repacks": [{ "appid", "sources": [{ "repacker", "link" }] }] }`. External http(s) download links; no file bytes. |
-| GET    | `/v1/depot/package/:appid` | yes | `application/zip` of the app's depot `.manifest` files plus the depot keys (an `<appid>.lua` with keyed `addappid` lines, from every provider). Streamed. `X-Depot-Source` names the upstream that served it. |
+| GET    | `/v1/depot/package/:appid` | yes | `application/zip` of the app's depot `.manifest` files plus the depot keys (an `<appid>.lua` with keyed `addappid` lines, from every provider). Streamed. `X-Depot-Source` names the upstream that served it, `X-Cache` is `MISS`/`HIT`/`KEPT`. |
 
 `/v1/depot/package/:appid` relays the per-app depot package Drydock uses to download real game files
 itself (manifest + depot key → Steam CDN). It draws from one or more upstreams — **Ryu**
-(`secure_download`), **DepotBox** (`direct-download`), **SteamTools** (`manifest`) — each returning a
-manifests+keys ZIP. The enabled set and try order come from **`PROVIDER_SOURCES`** (comma-separated,
+(`secure_download`), **DepotBox** (`direct-download`), **SteamTools** (`manifest`), **Hubcap**
+(`api/v1/manifest`) — each returning a manifests+keys ZIP. The enabled set and try order come from **`PROVIDER_SOURCES`** (comma-separated,
 first valid ZIP wins; unknown names ignored; `DEPOT_PACKAGE_SOURCES` is the legacy fallback). It
 defaults to `ryu`; set it to `ryu,depotbox,steamtools` to use all three. Depot keys are read from the bundled `.lua`
 (`addappid(<depotid>, 0|1, "<hexkey>")`) or `.key` file. Ryu needs `RYU_AUTH_CODE` (its reseller auth

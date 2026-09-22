@@ -10,19 +10,24 @@ import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, readdir, rename, rm, stat, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
-import type { Readable } from "node:stream";
+import { Readable } from "node:stream";
 import type { FastifyBaseLogger } from "fastify";
 
 interface Meta {
   contentType: string;
   storedAt: number;
   size: number;
+  /** See {@link FileCache.put}: a kept entry outlives the TTL and the sweep. */
+  kept?: boolean;
 }
 
 export interface CacheHit {
   stream: () => Readable;
   contentType: string;
   contentLength: number;
+  /** Whether this entry is a kept one, and when it was stored (for `X-Cache` and logging). */
+  kept: boolean;
+  storedAt: number;
 }
 
 // Expired entries are deleted once they are this much older than the TTL. The grace period means a
@@ -117,6 +122,9 @@ export class FileCache {
     const data = meta.slice(0, -".json".length);
     try {
       const parsed = JSON.parse(await readFile(meta, "utf8")) as Meta;
+      // A kept entry is the only copy of a file whose source allows a handful of requests per day.
+      // Deleting it would mean spending one of them again — it goes when a normal source replaces it.
+      if (parsed.kept === true) return null;
       if (Number.isFinite(parsed.storedAt) && parsed.storedAt > cutoff) return null;
       await rm(data, { force: true });
       await rm(meta, { force: true });
@@ -132,24 +140,49 @@ export class FileCache {
   /** A fresh cached entry for `key`, or `null` when absent or older than the TTL. */
   async get(key: string): Promise<CacheHit | null> {
     if (this.ttlMs <= 0) return null;
+    const entry = await this.read(key);
+    if (!entry) return null;
+    return Date.now() - entry.storedAt > this.ttlMs ? null : entry;
+  }
+
+  /**
+   * The cached entry for `key` whatever its age, for a caller that would otherwise have nothing to
+   * serve at all. A kept entry is what this is for: it stands in until a provider can supply the
+   * file again, and only then is it replaced (see {@link put}).
+   */
+  async getStale(key: string): Promise<CacheHit | null> {
+    return this.read(key);
+  }
+
+  /** Reads an entry and its metadata without judging its age. */
+  private async read(key: string): Promise<CacheHit | null> {
     const { data, meta } = this.paths(key);
     try {
       const parsed = JSON.parse(await readFile(meta, "utf8")) as Meta;
-      if (!Number.isFinite(parsed.storedAt) || Date.now() - parsed.storedAt > this.ttlMs) return null;
+      if (!Number.isFinite(parsed.storedAt)) return null;
       const info = await stat(data);
       if (info.size !== parsed.size) return null;
       return {
         stream: () => createReadStream(data),
         contentType: parsed.contentType,
         contentLength: parsed.size,
+        kept: parsed.kept === true,
+        storedAt: parsed.storedAt,
       };
     } catch {
       return null;
     }
   }
 
-  /** Stores `source` under `key`, returning the resulting cache hit so the caller can serve it. */
-  async put(key: string, source: Readable, contentType: string): Promise<CacheHit> {
+  /**
+   * Stores `source` under `key`, returning the resulting cache hit so the caller can serve it.
+   *
+   * `kept` marks an entry that must outlive the TTL and the sweep: it came from a source whose
+   * allowance is measured per day, so throwing it away would mean either spending that allowance
+   * again or having nothing to serve. It stops being kept the moment an ordinary source supplies
+   * the same key — that `put` overwrites the entry, and normal expiry applies again.
+   */
+  async put(key: string, source: Readable, contentType: string, kept = false): Promise<CacheHit> {
     const { data, meta } = this.paths(key);
     await mkdir(this.dir, { recursive: true });
     const temporary = `${data}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
@@ -162,13 +195,19 @@ export class FileCache {
       // Write the sidecar *before* publishing the data file, so a reader can never see a fresh data
       // file described by the previous entry's metadata (which `get` would then reject on the size
       // check, making the key permanently un-cacheable).
-      const record: Meta = { contentType, storedAt: Date.now(), size: info.size };
+      const record: Meta = { contentType, storedAt: Date.now(), size: info.size, ...(kept ? { kept } : {}) };
       await this.exclusive(async () => {
         await writeFile(temporaryMeta, JSON.stringify(record));
         await rename(temporary, data);
         await rename(temporaryMeta, meta);
       });
-      return { stream: () => createReadStream(data), contentType, contentLength: info.size };
+      return {
+        stream: () => createReadStream(data),
+        contentType,
+        contentLength: info.size,
+        kept,
+        storedAt: record.storedAt,
+      };
     } catch (error) {
       await rm(temporary, { force: true }).catch(() => {});
       await rm(temporaryMeta, { force: true }).catch(() => {});
@@ -191,7 +230,7 @@ export class FileCache {
   async getOrFetch(
     key: string,
     contentType: string,
-    open: () => Promise<Readable>,
+    open: () => Promise<{ stream: Readable; kept?: boolean } | Readable>,
   ): Promise<{ hit: CacheHit; cached: boolean }> {
     const existing = await this.get(key);
     if (existing) return { hit: existing, cached: true };
@@ -200,8 +239,10 @@ export class FileCache {
     if (pending) return { hit: await pending, cached: true };
 
     const work = (async () => {
-      const source = await open();
-      return this.put(key, source, contentType);
+      const opened = await open();
+      const source = opened instanceof Readable ? opened : opened.stream;
+      const kept = opened instanceof Readable ? false : opened.kept === true;
+      return this.put(key, source, contentType, kept);
     })();
     this.inFlight.set(key, work);
     try {

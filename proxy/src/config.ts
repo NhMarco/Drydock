@@ -32,8 +32,26 @@ function boolean(name: string, fallback: boolean): boolean {
 
 // The upstreams the depot-package route can draw from. Order in `DEPOT_PACKAGE_SOURCES` is the
 // try order; listing a name enables it, omitting it disables it.
-export const DEPOT_PACKAGE_SOURCE_NAMES = ["ryu", "depotbox", "steamtools"] as const;
+export const DEPOT_PACKAGE_SOURCE_NAMES = ["ryu", "depotbox", "steamtools", "hubcap"] as const;
 export type DepotPackageSourceName = (typeof DEPOT_PACKAGE_SOURCE_NAMES)[number];
+
+// Providers whose allowance is measured per *day*, not per minute. They are always tried after every
+// other source, wherever they are listed in `PROVIDER_SOURCES`, and they only feed the gamelist with
+// the apps nobody else has: a request spent on an app another provider could have served is an app
+// the proxy cannot serve at all for the rest of the day.
+export const LAST_RESORT_SOURCE_NAMES = ["hubcap"] as const satisfies readonly DepotPackageSourceName[];
+export type LastResortSourceName = (typeof LAST_RESORT_SOURCE_NAMES)[number];
+/** Every provider that is not day-limited — the ones that also answer `/v1/lua`. */
+export type OrdinarySourceName = Exclude<DepotPackageSourceName, LastResortSourceName>;
+
+export function isLastResort(name: DepotPackageSourceName): name is LastResortSourceName {
+  return (LAST_RESORT_SOURCE_NAMES as readonly string[]).includes(name);
+}
+
+/** The configured providers with the day-limited ones moved to the back, order otherwise kept. */
+export function orderedSources(sources: DepotPackageSourceName[]): DepotPackageSourceName[] {
+  return [...sources.filter((name) => !isLastResort(name)), ...sources.filter(isLastResort)];
+}
 
 // Parses the ordered, comma-separated source list, keeping only known names and dropping duplicates
 // so a stray/typo'd entry can never break startup. Falls back to `fallback` when nothing valid is set.
@@ -92,11 +110,25 @@ export interface Config {
   ryuBase: string;
   ryuAuthCode: string;
 
+  // Hubcap Manifest (hubcapmanifest.com): the last-resort package source and an extra gamelist. Its
+  // manifest downloads are capped per day, so what it serves is kept until another provider can.
+  hubcapBase: string;
+  hubcapApiKey: string;
+  // Entries per `/api/v1/library` page. The API accepts large pages (20k answered in ~2 s), and
+  // fewer, bigger pages beat many small ones for a library of ~157k apps.
+  hubcapLibraryPageSize: number;
+  // How long a reading of the daily allowance is reused before asking again.
+  hubcapUsageTtlSeconds: number;
+  // Requests of the daily allowance to leave untouched, so a burst cannot spend the last of it.
+  hubcapReserve: number;
+
   // Global, ordered list of ACTIVE providers (`PROVIDER_SOURCES`). One toggle governs everything a
   // provider can supply — the gamelist, per-app Lua, and depot-package downloads. Any of "ryu",
-  // "depotbox", "steamtools"; unknown names are dropped. A provider not listed here is fully off (it
-  // never feeds the gamelist/Lua nor is tried for depot downloads). Default `ryu` only; add more to
-  // re-enable (e.g. "ryu,depotbox,steamtools"). Falls back to the legacy `DEPOT_PACKAGE_SOURCES`.
+  // "depotbox", "steamtools", "hubcap"; unknown names are dropped. A provider not listed here is
+  // fully off (it never feeds the gamelist/Lua nor is tried for depot downloads). Default `ryu`
+  // only; add more to re-enable (e.g. "ryu,depotbox,steamtools,hubcap"). A day-limited provider is
+  // moved to the back of the order whatever position it is given (see `orderedSources`). Falls back
+  // to the legacy `DEPOT_PACKAGE_SOURCES`.
   providerSources: DepotPackageSourceName[];
 
   githubOwner: string;
@@ -176,6 +208,12 @@ export function loadConfig(): Config {
 
     ryuBase: optional("RYU_API_BASE", "https://generator.ryuu.lol").replace(/\/+$/, ""),
     ryuAuthCode: credential("RYU_AUTH_CODE", "ryu"),
+
+    hubcapBase: optional("HUBCAP_API_BASE", "https://hubcapmanifest.com").replace(/\/+$/, ""),
+    hubcapApiKey: credential("HUBCAP_API_KEY", "hubcap"),
+    hubcapLibraryPageSize: Math.min(Math.max(integer("HUBCAP_LIBRARY_PAGE_SIZE", 20_000), 1), 50_000),
+    hubcapUsageTtlSeconds: integer("HUBCAP_USAGE_TTL_SECONDS", 300),
+    hubcapReserve: integer("HUBCAP_RESERVE", 0),
 
     // One global provider toggle for gamelist + Lua + depot. Default Ryu only; DepotBox/SteamTools
     // stay wired and come back by adding them here. `DEPOT_PACKAGE_SOURCES` is honoured as a fallback.

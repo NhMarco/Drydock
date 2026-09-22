@@ -4,12 +4,14 @@
 import Fastify from "fastify";
 import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
-import { loadConfig } from "./config.js";
+import { isLastResort, loadConfig, orderedSources, type OrdinarySourceName } from "./config.js";
 import { SteamToolsClient } from "./upstream.js";
 import { DepotBoxClient } from "./depotbox.js";
 import { RyuClient } from "./ryu.js";
+import { HubcapClient } from "./hubcap.js";
 import { GitHubClient } from "./github.js";
 import { MergedGamelistSource, MergedLuaSource, ProviderCooldown } from "./merged.js";
+import type { LuaSource } from "./depotbox.js";
 import { GamelistCache } from "./gamelistCache.js";
 import { ServiceCache } from "./serviceCache.js";
 import { EmuCache } from "./emuCache.js";
@@ -56,19 +58,31 @@ async function main(): Promise<void> {
   const client = new SteamToolsClient(config);
   const depotbox = new DepotBoxClient(config);
   const ryu = new RyuClient(config);
+  const hubcap = new HubcapClient(config);
   const github = new GitHubClient(config);
 
   // One global provider toggle (PROVIDER_SOURCES, ordered) governs the gamelist, Lua and depot. Each
   // active provider contributes what it can; a deactivated one (not in the list) never feeds any of
-  // them. All three providers implement both GamelistSource and LuaSource, so one active list drives
-  // both. Order = priority (index 0 wins on shared AppIDs / is tried first for Lua).
-  const providerRegistry = { ryu, depotbox, steamtools: client };
-  const activeProviders = config.providerSources.map((name) => ({ name, source: providerRegistry[name] }));
-  app.log.info({ providers: config.providerSources }, "Active providers (gamelist / lua / depot).");
+  // them. Order = priority (index 0 wins on shared AppIDs / is tried first for Lua), except that a
+  // day-limited provider is always moved to the back and contributes no Lua at all.
+  const providerRegistry = { ryu, depotbox, steamtools: client, hubcap };
+  // Day-limited providers are moved to the back: last to be asked for a package, and lowest priority
+  // in the gamelist, where they only add the apps nobody else lists.
+  const activeProviders = orderedSources(config.providerSources).map((name) => ({
+    name,
+    source: providerRegistry[name],
+  }));
+  app.log.info({ providers: activeProviders.map((p) => p.name) }, "Active providers (gamelist / lua / depot).");
   const gamelistSource = new MergedGamelistSource(activeProviders, app.log);
   // Shared, so a provider that rate limits Lua requests is also left alone for depot packages.
   const cooldown = new ProviderCooldown();
-  const luaSource = new MergedLuaSource(activeProviders, app.log, cooldown);
+  // Hubcap has no Lua endpoint of its own — its unlock only comes inside the manifest ZIP, and
+  // fetching that to answer a Lua request would spend a day's allowance on it.
+  const luaRegistry: Record<OrdinarySourceName, LuaSource> = { ryu, depotbox, steamtools: client };
+  const luaProviders = orderedSources(config.providerSources)
+    .filter((name): name is OrdinarySourceName => !isLastResort(name))
+    .map((name) => ({ name, source: luaRegistry[name] }));
+  const luaSource = new MergedLuaSource(luaProviders, app.log, cooldown);
   const cache = new GamelistCache(config, gamelistSource, app.log);
   const serviceCache = new ServiceCache(config, github, app.log);
   const emuCache = new EmuCache(config, github, app.log);

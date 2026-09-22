@@ -25,6 +25,7 @@ pub mod repacks;
 #[cfg(test)]
 mod review_regressions;
 pub mod safe_path;
+pub mod search;
 pub mod self_test;
 pub mod settings;
 pub mod steam;
@@ -84,6 +85,7 @@ pub use paths::PortablePaths;
 pub use proxy::{ProxyClient, ProxyError, hmac_secret, proxy_base_url};
 pub use repacks::{LinkError, RepackApp, RepackSource, is_http_url, open_link};
 pub use safe_path::{is_safe_path_segment, join_within, safe_segments};
+pub use search::{SearchQuery, normalize as normalize_search};
 pub use self_test::{SelfTestError, SelfTestReport, run_self_test};
 pub use settings::{InstalledGame, LoadOutcome, QueuedDownload, Settings, SettingsError};
 pub use steam::{SteamDiscovery, SteamError, discover_steam, is_valid_steam_directory, load_manifests};

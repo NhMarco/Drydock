@@ -19,11 +19,11 @@ use drydock_core::{
     ConflictingSoftwareStatus, DenuvoWatchClient, DepotData, DownloadProgress, DownloadedDll,
     EmuTemplateInput, FixEntry, FixStatus, GameLanguageOptions, LoadOutcome, OpenSteamTool, PeArch,
     PortablePaths, PreparedUpdate, ProxyClient, QueueEffect, QueuedDownload, RepackApp, S3Credentials,
-    Settings, SteamDiscovery, SteamManifest, SteamServiceState, SteamServiceStatus, SteamStoreClient,
-    SteamStoreDetails, SteamUriAction, StoreCapsule, StoreFeatured, UnlockSource, VerifiedEntitlement,
-    achievement_image_urls, add_app_files, apply_denuvo_fix, apply_language, back_up_before_overwrite,
-    clear_previous_token_files, cloud, detect_conflicting_software, detect_pe_arch, discover_steam,
-    download_queue, ensure_toolchain, executable_relative_to, fetch_achievement_images,
+    SearchQuery, Settings, SteamDiscovery, SteamManifest, SteamServiceState, SteamServiceStatus,
+    SteamStoreClient, SteamStoreDetails, SteamUriAction, StoreCapsule, StoreFeatured, UnlockSource,
+    VerifiedEntitlement, achievement_image_urls, add_app_files, apply_denuvo_fix, apply_language,
+    back_up_before_overwrite, clear_previous_token_files, cloud, detect_conflicting_software, detect_pe_arch,
+    discover_steam, download_queue, ensure_toolchain, executable_relative_to, fetch_achievement_images,
     fetch_reframework_dll, fetch_windows_arch, fetch_windows_executables, fix_status,
     install_depot_manifests, install_magicfiles, install_service, installed_app_luas, is_steam_running,
     is_valid_steam_directory, launch_executables, load_cached_denuvo_appids, load_catalog_apps,
@@ -63,7 +63,11 @@ const AMBER: Color32 = Color32::from_rgb(242, 201, 76); // #F2C94C
 /// Rusted iron for destructive actions and errors.
 const DANGER: Color32 = Color32::from_rgb(199, 92, 92); // #C75C5C
 const SIDEBAR_FILL: Color32 = Color32::from_rgb(17, 20, 23); // #111417
-const CATALOG_REFRESH_COOLDOWN: Duration = Duration::from_secs(24 * 60 * 60);
+/// How long a fetched catalog is kept before the next start-up asks again. The proxy rebuilds its
+/// gamelist hourly, so anything longer means new games sit in the store for a day before anyone
+/// sees them. Asking costs almost nothing: the request carries the last `ETag`, and an unchanged
+/// list answers `304` without a body.
+const CATALOG_REFRESH_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 /// Steam header art is 460×215 — this ratio is used for card cover heights and detail artwork.
 const STEAM_HEADER_ASPECT: f32 = 0.467;
 /// Height of the top navigation bar and the bottom status strip that frame the storefront.
@@ -834,7 +838,7 @@ impl DrydockApp {
         if self.catalog_receiver.is_some() {
             return;
         }
-        // The list is kept for 24 hours; only a forced refresh bypasses that window. The
+        // The list is kept for an hour; only a forced refresh bypasses that window. The
         // schema suffix invalidates caches written before the drm/tags fields were added.
         let marker = self.paths.cache_dir().join("catalog-refresh.marker");
         let marker_value = format!("{APP_VERSION}:catalog-v2");
@@ -3938,7 +3942,9 @@ impl DrydockApp {
         ui.add_space(16.0);
         self.home_filter_row(ui);
         ui.add_space(12.0);
-        let query = self.search.trim().to_lowercase();
+        // Titles carry marks nobody types — "EA SPORTS FC™ 27" — so both sides are reduced to the
+        // same plain form before they are compared (see `drydock_core::search`).
+        let query = SearchQuery::new(&self.search);
         let open = {
             let repack_filter = self.repack_filter.clone();
             let fix_filter = self.fix_filter;
@@ -3949,9 +3955,7 @@ impl DrydockApp {
                 .iter()
                 .filter(|entry| {
                     catalog_matches_filters(entry, &repack_filter, fix_filter, repackers, fix_flags)
-                        && (query.is_empty()
-                            || entry.name.to_lowercase().contains(&query)
-                            || entry.app_id.to_string().contains(&query))
+                        && (query.matches(&entry.name) || entry.app_id.to_string().contains(query.typed()))
                 })
                 .take(200)
                 .collect();
@@ -4184,9 +4188,14 @@ impl DrydockApp {
                                         ("Installed in Drydock", LibrarySource::DrydockInstalled),
                                         ("Available", LibrarySource::Available),
                                     ] {
-                                        if let Some(id) =
-                                            library_rail_group(ui, title, source, &entries, selected)
-                                        {
+                                        if let Some(id) = library_rail_group(
+                                            ui,
+                                            title,
+                                            source,
+                                            &entries,
+                                            selected,
+                                            &self.header_resolver,
+                                        ) {
                                             action = Some(LibraryAction::Select(id));
                                         }
                                     }
@@ -4204,7 +4213,9 @@ impl DrydockApp {
                         Vec2::new(ui.available_width(), body_h),
                         Layout::top_down(Align::Min),
                         |ui| {
-                            if let Some(overview_action) = library_overview(ui, entry, body_h) {
+                            if let Some(overview_action) =
+                                library_overview(ui, entry, body_h, &self.header_resolver)
+                            {
                                 action = Some(overview_action);
                             }
                         },
@@ -7922,12 +7933,13 @@ fn game_search_box(
             .desired_width(width),
     );
 
-    let query = search.trim().to_lowercase();
+    // Marks and punctuation in a title are ignored on both sides (`drydock_core::search`).
+    let query = SearchQuery::new(search);
     let selected_name = selected
         .and_then(|app_id| catalog.iter().find(|entry| entry.app_id == app_id))
         .map(|entry| entry.name.to_lowercase());
     // Without an active filter, an empty query (or re-selecting the current pick) collapses the list.
-    if !allow_empty && (query.is_empty() || selected_name.as_deref() == Some(query.as_str())) {
+    if !allow_empty && (query.is_empty() || selected_name.as_deref() == Some(query.typed())) {
         return None;
     }
 
@@ -7935,9 +7947,7 @@ fn game_search_box(
         .iter()
         .filter(|entry| {
             extra_filter(entry)
-                && (query.is_empty()
-                    || entry.name.to_lowercase().contains(&query)
-                    || entry.app_id.to_string().contains(&query))
+                && (query.matches(&entry.name) || entry.app_id.to_string().contains(query.typed()))
         })
         .take(100)
         .collect();
@@ -8768,6 +8778,7 @@ fn library_rail_group(
     source: LibrarySource,
     entries: &[LibraryEntry],
     selected: Option<u32>,
+    headers: &HeaderResolver,
 ) -> Option<u32> {
     let group: Vec<&LibraryEntry> = entries.iter().filter(|entry| entry.source == source).collect();
     let mut clicked = None;
@@ -8783,7 +8794,7 @@ fn library_rail_group(
                 return;
             }
             for entry in group {
-                if library_rail_row(ui, entry, selected == Some(entry.app_id)) {
+                if library_rail_row(ui, entry, selected == Some(entry.app_id), headers) {
                     clicked = Some(entry.app_id);
                 }
             }
@@ -8795,7 +8806,12 @@ fn library_rail_group(
 /// One entry in the Steam-style Library rail: a small landscape thumbnail + title. Games that exist
 /// only through Drydock' lua/manifest activation (not installed by Steam) are dimmed grey; the
 /// highlighted game gets a violet fill and accent bar. Returns true when clicked.
-fn library_rail_row(ui: &mut egui::Ui, entry: &LibraryEntry, selected: bool) -> bool {
+fn library_rail_row(
+    ui: &mut egui::Ui,
+    entry: &LibraryEntry,
+    selected: bool,
+    headers: &HeaderResolver,
+) -> bool {
     let dim = !entry.installed;
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), RAIL_ROW_H), Sense::click());
     let hover = ui.ctx().animate_bool(resp.id, resp.hovered());
@@ -8815,10 +8831,19 @@ fn library_rail_row(ui: &mut egui::Ui, entry: &LibraryEntry, selected: bool) -> 
         egui::pos2(rect.left() + 9.0, rect.center().y - th / 2.0),
         Vec2::new(tw, th),
     );
+    // The same path the store rows take: cheap App-ID CDN guesses, then the -resolved
+    // header for the titles Steam moved to hashed asset paths — without it those games sat here with
+    // an empty tile forever, however often they were looked at.
     let urls = steam_artwork_urls(entry.app_id);
-    let refs: Vec<&str> = urls.iter().map(String::as_str).collect();
+    let resolved = headers.get(entry.app_id);
+    let mut refs: Vec<&str> = urls.iter().map(String::as_str).collect();
+    if let Some(url) = resolved.as_deref() {
+        refs.push(url);
+    }
     // Cover-fit so the thumbnail fills its rect with no letterbox bars.
-    paint_remote_image_cover_multi(ui, thumb, &refs, egui::CornerRadius::same(3));
+    if paint_remote_image_cover_multi(ui, thumb, &refs, egui::CornerRadius::same(3)) {
+        headers.request(entry.app_id);
+    }
     let color = if dim && !selected { MUTED } else { TEXT };
     ui.painter().with_clip_rect(rect).text(
         egui::pos2(thumb.right() + 11.0, rect.center().y),
@@ -8835,7 +8860,12 @@ fn library_rail_row(ui: &mut egui::Ui, entry: &LibraryEntry, selected: bool) -> 
 
 /// The right-hand Library overview of the highlighted game: a full-width header banner, the title,
 /// an Installed/Activated status line, and the Play / Set-.exe / Store-page controls.
-fn library_overview(ui: &mut egui::Ui, entry: &LibraryEntry, body_h: f32) -> Option<LibraryAction> {
+fn library_overview(
+    ui: &mut egui::Ui,
+    entry: &LibraryEntry,
+    body_h: f32,
+    headers: &HeaderResolver,
+) -> Option<LibraryAction> {
     let mut action = None;
     egui::Frame::new()
         .fill(SURFACE)
@@ -8860,8 +8890,14 @@ fn library_overview(ui: &mut egui::Ui, entry: &LibraryEntry, body_h: f32) -> Opt
                     entry.app_id
                 ),
             ];
-            let refs: Vec<&str> = urls.iter().map(String::as_str).collect();
-            paint_remote_image_cover_multi(
+            // …and, for the titles whose art Steam moved to a hashed asset path, the header the
+            // store rows resolve through `appdetails`. Without it the banner stayed empty for them.
+            let resolved = headers.get(entry.app_id);
+            let mut refs: Vec<&str> = urls.iter().map(String::as_str).collect();
+            if let Some(url) = resolved.as_deref() {
+                refs.push(url);
+            }
+            let all_failed = paint_remote_image_cover_multi(
                 ui,
                 hero,
                 &refs,
@@ -8872,6 +8908,9 @@ fn library_overview(ui: &mut egui::Ui, entry: &LibraryEntry, body_h: f32) -> Opt
                     se: 0,
                 },
             );
+            if all_failed {
+                headers.request(entry.app_id);
+            }
             egui::Frame::new()
                 .inner_margin(egui::Margin::symmetric(22, 18))
                 .show(ui, |ui| {

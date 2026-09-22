@@ -21,6 +21,26 @@ const log = { info() {}, warn() {}, error() {} } as unknown as FastifyBaseLogger
 const TEST: Deadline = { label: "Test", error: upstreamError };
 const ZIP = Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.from("rest of the archive")]);
 
+/**
+ * A ZIP-shaped buffer whose local file headers carry `names`, which is what the package check reads
+ * to tell a real depot package from a provider's "I do not have this app" answer.
+ */
+function zipWith(names: string[], payload = "content"): Buffer {
+  const parts: Buffer[] = [];
+  for (const name of names) {
+    const header = Buffer.alloc(30);
+    header.writeUInt32LE(0x04034b50, 0);
+    header.writeUInt16LE(Buffer.byteLength(name), 26);
+    parts.push(header, Buffer.from(name), Buffer.from(payload));
+  }
+  return Buffer.concat(parts);
+}
+
+/** What a provider with the app returns: the unlock plus at least one depot manifest. */
+const PACKAGE = zipWith(["70.lua", "71_8765.manifest"]);
+/** What a provider without it can return instead: a ZIP holding nothing but the unlock. */
+const LUA_ONLY_PACKAGE = zipWith(["70.lua"]);
+
 function raw(body: Buffer | string, contentType: string, chunkSize = 2): RawStream {
   const bytes = Buffer.from(body);
   const chunks: Buffer[] = [];
@@ -132,21 +152,57 @@ test("only a real ZIP archive passes the package check, whole and within its siz
   await assert.rejects(collect(oversized), refused);
 });
 
-test("the depot route moves past a provider that answers with a web page", async () => {
+test("a package holding only the lua counts as not having the app", async () => {
+  // Seen in production: DepotBox answers 200 with a 281-byte ZIP carrying just `<appid>.lua`. It
+  // passes every other check, so it used to be cached for a day — and the provider that had the
+  // real manifests was never asked.
   const dir = await mkdtemp(join(tmpdir(), "drydock-depot-"));
   const app = Fastify();
   try {
     const upstreams = {
-      depotbox: { downloadDepotPackage: async () => raw("<html>maintenance</html>", "text/html") },
-      steamtools: { downloadManifestZip: async () => raw(ZIP, "application/zip") },
-      ryu: { downloadDepotPackage: async () => raw(ZIP, "application/zip") },
+      depotbox: { downloadDepotPackage: async () => raw(LUA_ONLY_PACKAGE, "application/zip") },
+      steamtools: { downloadManifestZip: async () => raw(PACKAGE, "application/zip") },
+      ryu: { downloadDepotPackage: async () => raw(PACKAGE, "application/zip") },
     } as unknown as DepotUpstreams;
     const cache = new FileCache(dir, 60_000, log);
     registerDepotRoutes(app, upstreams, ["depotbox", "steamtools"], cache, async () => {}, new ProviderCooldown());
     const response = await app.inject({ url: "/v1/depot/package/70" });
     assert.equal(response.statusCode, 200);
     assert.equal(response.headers["x-depot-source"], "steamtools");
-    assert.deepEqual(response.rawPayload, ZIP);
+    assert.deepEqual(response.rawPayload, PACKAGE);
+
+    // And a lua-only answer from everyone is an error, not a cached dead end.
+    const nobody = Fastify();
+    const onlyLua = {
+      depotbox: { downloadDepotPackage: async () => raw(LUA_ONLY_PACKAGE, "application/zip") },
+      steamtools: { downloadManifestZip: async () => raw(LUA_ONLY_PACKAGE, "application/zip") },
+      ryu: { downloadDepotPackage: async () => raw(LUA_ONLY_PACKAGE, "application/zip") },
+    } as unknown as DepotUpstreams;
+    registerDepotRoutes(nobody, onlyLua, ["depotbox"], cache, async () => {}, new ProviderCooldown());
+    const refused = await nobody.inject({ url: "/v1/depot/package/71" });
+    assert.equal(refused.statusCode, 502);
+    await nobody.close();
+  } finally {
+    await app.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the depot route moves past a provider that answers with a web page", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "drydock-depot-"));
+  const app = Fastify();
+  try {
+    const upstreams = {
+      depotbox: { downloadDepotPackage: async () => raw("<html>maintenance</html>", "text/html") },
+      steamtools: { downloadManifestZip: async () => raw(PACKAGE, "application/zip") },
+      ryu: { downloadDepotPackage: async () => raw(PACKAGE, "application/zip") },
+    } as unknown as DepotUpstreams;
+    const cache = new FileCache(dir, 60_000, log);
+    registerDepotRoutes(app, upstreams, ["depotbox", "steamtools"], cache, async () => {}, new ProviderCooldown());
+    const response = await app.inject({ url: "/v1/depot/package/70" });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.headers["x-depot-source"], "steamtools");
+    assert.deepEqual(response.rawPayload, PACKAGE);
   } finally {
     await app.close();
     await rm(dir, { recursive: true, force: true });
