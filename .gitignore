@@ -10,7 +10,7 @@
 
 # --- Secrets: never commit ------------------------------------------------
 # Build-time injected values live in git-ignored `*.secret` files next to `build.rs`
-# (proxy-base-url.secret, hmac-secret.secret). See README ▸ Configuration.
+# (proxy-base-url.secret, hmac-secret.secret, update-token.secret). See README ▸ Configuration.
 *.secret
 *.pem
 *.key

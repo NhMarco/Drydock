@@ -22,7 +22,7 @@ one `brand/` folder, and stays current with a plain `git pull`. See
   per-category actions (install, verify, update, uninstall, launch).
 - **Depot downloads** — a parallel, resumable download engine that verifies every chunk against its
   manifest checksum and repairs damaged installs in place.
-- **Store** — browse featured, new releases, repacks and Denuvo-tracked titles, filtered against the
+- **Store** — browse featured, new releases and Denuvo-tracked titles, filtered against the
   available catalog.
 - **Emulator toolchain** — generates a complete local configuration (DLCs, languages, achievements
   with mirrored icons) and deploys the matching binaries for the detected architecture.

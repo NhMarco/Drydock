@@ -76,6 +76,9 @@ pub struct Features {
     pub tools: bool,
     /// The Cloud page: cloud save redirection and its providers.
     pub cloud: bool,
+    /// The Store's Denuvo tab, listing the games that ship with Denuvo. (The Denuvo filter and
+    /// badges stay either way: they come from the same list, which the Store needs regardless.)
+    pub denuvo_tab: bool,
     /// The Repacks tab, repack filters, and "Download repack" on game pages.
     pub repacks: bool,
     /// "Apply Denuvo fix" on game pages, the Denuvo-fix filter and its walkthrough.
@@ -102,6 +105,12 @@ pub struct Brand {
     /// Whether the logo already spells the name (and tagline), so the side navigation shows the
     /// logo alone instead of repeating them beneath it.
     pub logo_is_wordmark: bool,
+    /// The product's Discord invite (`https://discord.gg/…`), offered as a button in the navigation
+    /// and after an activation. `None` shows no button. Never inherited from Drydock: a product
+    /// that names no server of its own must not send its users to somebody else's.
+    pub discord: Option<&'static str>,
+    /// Who made the product, credited in the About dialog ("Developed by …").
+    pub developer: &'static str,
     pub palette: Palette,
     pub navigation: Navigation,
     pub features: Features,
@@ -124,6 +133,8 @@ pub const DRYDOCK: Brand = Brand {
     name: drydock_core::brand::DRYDOCK.name,
     tagline: "Download · Activate · Play",
     logo_is_wordmark: false,
+    discord: None,
+    developer: "Drydock contributors",
     palette: Palette {
         background: Color32::from_rgb(21, 24, 27),     // #15181B cold slate
         surface: Color32::from_rgb(30, 35, 40),        // #1E2328
@@ -151,9 +162,10 @@ pub const DRYDOCK: Brand = Brand {
     features: Features {
         tools: true,
         cloud: true,
-        repacks: true,
-        denuvo_fix: true,
-        cracked_version: true,
+        denuvo_tab: true,
+        repacks: false,
+        denuvo_fix: false,
+        cracked_version: false,
     },
 };
 
@@ -230,5 +242,41 @@ mod tests {
     fn the_brand_name_is_the_one_the_core_names_the_files_after() {
         assert_eq!(DRYDOCK.name, drydock_core::brand::DRYDOCK.name);
         assert_eq!(BRAND.name, drydock_core::PRODUCT.name);
+    }
+
+    #[test]
+    fn every_product_credits_somebody() {
+        for brand in [DRYDOCK, BRAND] {
+            assert!(!brand.developer.trim().is_empty(), "{}: developer", brand.name);
+        }
+    }
+
+    /// The Discord button opens whatever the brand names in the browser, so it has to be an https
+    /// link to Discord — `build.rs` refuses anything else in a brand file, and this holds Drydock's
+    /// own value to the same rule.
+    #[test]
+    fn a_discord_link_leads_to_discord() {
+        for brand in [DRYDOCK, BRAND] {
+            let Some(invite) = brand.discord else {
+                continue;
+            };
+            let host = invite
+                .strip_prefix("https://")
+                .and_then(|rest| rest.split('/').next())
+                .unwrap_or_default();
+            assert!(
+                [
+                    "discord.gg",
+                    "discord.com",
+                    "www.discord.com",
+                    "discordapp.com",
+                    "www.discordapp.com"
+                ]
+                .contains(&host),
+                "{}: {invite:?} is not an https Discord link",
+                brand.name
+            );
+            assert!(drydock_core::is_http_url(invite));
+        }
     }
 }

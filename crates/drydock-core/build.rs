@@ -18,6 +18,9 @@ fn main() {
     // in the binary, just the proxy address and the shared HMAC signing secret.
     embed_secret("DRYDOCK_PROXY_BASE_URL", "proxy-base-url.secret");
     embed_secret("DRYDOCK_HMAC_SECRET", "hmac-secret.secret");
+    // Only for an update repository that is private (a white-label product under test): a
+    // read-only token for it. Drydock's releases are public, so its builds embed none.
+    embed_secret("DRYDOCK_UPDATE_TOKEN", "update-token.secret");
     let white_label = embed_product_name();
     embed_update_repository(white_label);
     // `version.rs` reads this with `option_env!` rather than the build script setting it, so declare

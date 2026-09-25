@@ -39,26 +39,46 @@ jobs:
     needs: guard
     uses: ./.github/workflows/ci.yml
 
+  # Which platforms this repository releases. All of them unless the repository variable
+  # RELEASE_PLATFORMS names fewer (e.g. "windows-x64 linux-x64") — a white-label repository can
+  # leave some out without editing this file, so it keeps pulling Drydock's without conflicts.
+  plan:
+    needs: guard
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - id: pick
+        shell: python
+        env:
+          WANTED: ${{ vars.RELEASE_PLATFORMS }}
+        run: |
+          import json, os, sys
+          # `platform` is the platform part of each asset name; the product name goes in front:
+          # Drydock here, or the name in a white-label repository's brand/brand.toml.
+          platforms = [
+              {"key": "windows-x64", "runner": "windows-2025", "platform": "windows-x64.exe", "extension": ".exe"},
+              {"key": "windows-arm64", "runner": "windows-11-arm", "platform": "windows-arm64.exe", "extension": ".exe"},
+              {"key": "linux-x64", "runner": "ubuntu-24.04", "platform": "linux-x64", "extension": ""},
+              {"key": "linux-arm64", "runner": "ubuntu-24.04-arm", "platform": "linux-arm64", "extension": ""},
+          ]
+          known = [entry["key"] for entry in platforms]
+          wanted = os.environ.get("WANTED", "").replace(",", " ").split()
+          unknown = [key for key in wanted if key not in known]
+          if unknown:
+              print(f"::error::RELEASE_PLATFORMS names unknown platforms {unknown}; known: {known}")
+              sys.exit(1)
+          chosen = [entry for entry in platforms if not wanted or entry["key"] in wanted]
+          print("Releasing for", ", ".join(entry["key"] for entry in chosen))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print("matrix=" + json.dumps({"include": chosen}), file=output)
+
   build:
-    needs: [guard, validation]
+    needs: [guard, validation, plan]
     strategy:
       fail-fast: false
-      matrix:
-        # The platform part of each asset name; the product name goes in front — Drydock here, or
-        # the name in a white-label repository's brand/brand.toml (see docs/branding.md).
-        include:
-          - runner: windows-2025
-            platform: windows-x64.exe
-            extension: .exe
-          - runner: windows-11-arm
-            platform: windows-arm64.exe
-            extension: .exe
-          - runner: ubuntu-24.04
-            platform: linux-x64
-            extension: ""
-          - runner: ubuntu-24.04-arm
-            platform: linux-arm64
-            extension: ""
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: build (${{ matrix.key }})
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -99,6 +119,9 @@ jobs:
           # cannot reach the proxy (same safe fallback as before).
           DRYDOCK_PROXY_BASE_URL: ${{ secrets.DRYDOCK_PROXY_BASE_URL }}
           DRYDOCK_HMAC_SECRET: ${{ secrets.DRYDOCK_HMAC_SECRET }}
+          # Only a repository whose releases are private sets this: a fine-grained, read-only token
+          # for itself, so its binaries can fetch its releases. Drydock's are public and set none.
+          DRYDOCK_UPDATE_TOKEN: ${{ secrets.DRYDOCK_UPDATE_TOKEN }}
         run: cargo build --locked --release -p drydock-desktop
       - name: Run packaged binary self-test on Linux
         if: runner.os == 'Linux'

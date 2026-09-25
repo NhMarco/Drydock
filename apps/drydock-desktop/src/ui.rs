@@ -248,8 +248,8 @@ impl Page {
     }
 }
 
-/// The Store's sub-tabs, mirroring Steam's own storefront navigation. `DenuvoWatch` is Drydock-only:
-/// the set of games that actually need activation.
+/// The Store's sub-tabs, mirroring Steam's own storefront navigation. `DenuvoWatch` is the set of
+/// games that actually need activation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum StoreTab {
     #[default]
@@ -262,7 +262,11 @@ enum StoreTab {
 impl StoreTab {
     /// Whether this product shows the tab at all (see `brand.rs`).
     fn offered(self) -> bool {
-        self != Self::Repacks || BRAND.features.repacks
+        match self {
+            Self::Repacks => BRAND.features.repacks,
+            Self::DenuvoWatch => BRAND.features.denuvo_tab,
+            Self::Featured | Self::NewReleases => true,
+        }
     }
 
     const ALL: [(Self, &'static str); 4] = [
@@ -458,6 +462,8 @@ pub struct DrydockApp {
     activation_verify_receiver: Option<Receiver<Result<VerifiedEntitlement, String>>>,
     verified_entitlement: Option<VerifiedEntitlement>,
     entitlement_success_app: Option<String>,
+    /// Whether the About dialog is open.
+    about_open: bool,
     response_code: [String; 8],
     // Foreign-install activation: dynamic game search, chosen/verified game folder, and the
     // background checks that resolve the install root and screen for crack/HV artifacts.
@@ -477,6 +483,10 @@ pub struct DrydockApp {
     ubisoft_activation_code: String,
     ubisoft_exe_dir: Option<PathBuf>,
     update_receiver: Option<Receiver<Result<Option<PreparedUpdate>, String>>>,
+    /// A downloaded and verified update, waiting for the user to say when to install it.
+    pending_update: Option<PreparedUpdate>,
+    /// Whether the dialog asking to install [`Self::pending_update`] is showing.
+    update_prompt_open: bool,
     exit_for_update: bool,
     // Cloud tab (CloudRedirect): provider form + the background DLL download / OAuth sign-in.
     cloud: CloudForm,
@@ -858,8 +868,11 @@ impl DrydockApp {
             activation_verify_receiver: None,
             verified_entitlement: None,
             entitlement_success_app: None,
+            about_open: false,
             response_code: std::array::from_fn(|_| String::new()),
             update_receiver: None,
+            pending_update: None,
+            update_prompt_open: false,
             exit_for_update: false,
             cloud: CloudForm::default(),
             cloud_download_receiver: None,
@@ -1599,6 +1612,11 @@ impl DrydockApp {
     }
 
     fn start_update_check(&mut self, automatic: bool) {
+        if self.pending_update.is_some() {
+            // Already downloaded and verified: ask again rather than fetch it a second time.
+            self.update_prompt_open = true;
+            return;
+        }
         if self.update_receiver.is_some() || !AppUpdater::can_self_update() {
             return;
         }
@@ -1635,18 +1653,18 @@ impl DrydockApp {
                 self.update_receiver = None;
                 self.busy_label = None;
                 match result {
-                    Ok(Some(update)) => match AppUpdater::launch(&update) {
-                        Ok(()) => {
-                            self.status =
-                                format!("Installing {product} {}…", update.version, product = BRAND.name);
-                            self.status_error = false;
-                            self.exit_for_update = true;
-                        }
-                        Err(error) => {
-                            self.status = format!("Update could not be started: {error}");
-                            self.status_error = true;
-                        }
-                    },
+                    // Installing closes the app, so it waits for the user's word (see
+                    // `update_prompt_window`) instead of starting on its own.
+                    Ok(Some(update)) => {
+                        self.status = format!(
+                            "{product} {} is ready to install",
+                            update.version,
+                            product = BRAND.name
+                        );
+                        self.status_error = false;
+                        self.pending_update = Some(update);
+                        self.update_prompt_open = true;
+                    }
                     Ok(None) => {
                         self.status = branded!("{product} is up to date").into();
                         self.status_error = false;
@@ -1664,6 +1682,26 @@ impl DrydockApp {
                 self.status_error = true;
             }
             Err(TryRecvError::Empty) => {}
+        }
+    }
+
+    /// Hands over to the pending update: the staged binary waits for this process to exit, puts
+    /// itself in place and starts again.
+    fn install_pending_update(&mut self) {
+        self.update_prompt_open = false;
+        let Some(update) = self.pending_update.as_ref() else {
+            return;
+        };
+        match AppUpdater::launch(update) {
+            Ok(()) => {
+                self.status = format!("Installing {product} {}…", update.version, product = BRAND.name);
+                self.status_error = false;
+                self.exit_for_update = true;
+            }
+            Err(error) => {
+                self.status = format!("Update could not be started: {error}");
+                self.status_error = true;
+            }
         }
     }
 
@@ -3207,8 +3245,23 @@ impl DrydockApp {
                         self.page = page;
                     }
                 }
-                // The secondary pages at the foot of the column, in reading order top to bottom.
+                // The foot of the column, in reading order top to bottom: the secondary pages, then
+                // About and Discord in the same rows — they open a dialog and the browser instead
+                // of a page. The layout runs bottom-up, so the last row comes first.
                 ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+                    if BRAND.discord.is_some()
+                        && side_nav_entry(ui, "DISCORD", false)
+                            .on_hover_text(branded!("Open the {product} Discord in your browser"))
+                            .clicked()
+                    {
+                        self.open_discord();
+                    }
+                    if side_nav_entry(ui, "ABOUT", self.about_open)
+                        .on_hover_text(branded!("About {product}"))
+                        .clicked()
+                    {
+                        self.about_open = true;
+                    }
                     for (page, label) in SECONDARY_DESTINATIONS.iter().rev() {
                         if side_nav_entry(ui, label, self.page == *page).clicked() {
                             self.page = *page;
@@ -3274,6 +3327,23 @@ impl DrydockApp {
                     // Right side: search field, then the secondary-page overflow group. The layout
                     // runs right to left, so the group is walked backwards to read left to right.
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        // About and Discord at the far end, as links like the pages before them —
+                        // they open a dialog and the browser instead of a page.
+                        if BRAND.discord.is_some()
+                            && nav_link(ui, "DISCORD", false)
+                                .on_hover_text(branded!("Open the {product} Discord in your browser"))
+                                .clicked()
+                        {
+                            self.open_discord();
+                        }
+                        ui.add_space(2.0);
+                        if nav_link(ui, "ABOUT", self.about_open)
+                            .on_hover_text(branded!("About {product}"))
+                            .clicked()
+                        {
+                            self.about_open = true;
+                        }
+                        ui.add_space(2.0);
                         for (page, label) in SECONDARY_DESTINATIONS.iter().rev() {
                             if nav_link(ui, label, self.page == *page).clicked() {
                                 self.page = *page;
@@ -5260,6 +5330,24 @@ impl DrydockApp {
         }
     }
 
+    /// Opens the product's Discord (`brand.rs`) in the browser. Only reachable from a button that is
+    /// shown when the product has one.
+    fn open_discord(&mut self) {
+        let Some(invite) = BRAND.discord else {
+            return;
+        };
+        match open_link(invite) {
+            Ok(()) => {
+                self.status = branded!("Opening the {product} Discord in your browser").to_owned();
+                self.status_error = false;
+            }
+            Err(error) => {
+                self.status = error.to_string();
+                self.status_error = true;
+            }
+        }
+    }
+
     fn details_page(&mut self, ui: &mut egui::Ui) {
         if back_button(ui, "Return to search").clicked() {
             self.page = Page::Home;
@@ -6137,6 +6225,10 @@ impl DrydockApp {
         content_column(ui, CONTENT_WIDTH, |ui| {
             let previous_auto_update = self.settings.auto_update_drydock;
             let mut auto_update_changed = false;
+            let pending_version = self
+                .pending_update
+                .as_ref()
+                .map(|update| update.version.to_string());
             panel(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
@@ -6154,7 +6246,17 @@ impl DrydockApp {
                             auto_update_changed = true;
                         }
                         ui.add_space(10.0);
-                        if ui
+                        // An update that is already downloaded and verified waits here after a
+                        // Cancel in the update prompt; the button brings the prompt back.
+                        if let Some(version) = pending_version.as_deref() {
+                            if ui
+                                .add(primary_button("UPDATE"))
+                                .on_hover_text(format!("Install {} {version}", BRAND.name))
+                                .clicked()
+                            {
+                                self.update_prompt_open = true;
+                            }
+                        } else if ui
                             .add_enabled(
                                 AppUpdater::can_self_update() && self.update_receiver.is_none(),
                                 ghost_button("CHECK NOW"),
@@ -7095,6 +7197,7 @@ impl DrydockApp {
         };
         let mut open = true;
         let mut close = false;
+        let mut discord = false;
         egui::Window::new(format!("{app_name} entitlement verified!"))
             .open(&mut open)
             .collapsible(false)
@@ -7118,10 +7221,209 @@ impl DrydockApp {
                 ui.add_space(16.0);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     close = ui.add(primary_button("CLOSE")).on_hover_text("Close this dialog").clicked();
+                    if BRAND.discord.is_some() {
+                        ui.add_space(8.0);
+                        discord = ui
+                            .add(ghost_button("OPEN DISCORD"))
+                            .on_hover_text(branded!("Open the {product} Discord in your browser"))
+                            .clicked();
+                    }
                 });
             });
+        if discord {
+            self.open_discord();
+        }
         if !open || close {
             self.entitlement_success_app = None;
+        }
+    }
+
+    /// Asks before installing a downloaded, verified update. Installing closes the app, which used to
+    /// happen without a word the moment the update was ready; now the user picks the moment, and
+    /// Cancel leaves it waiting on the Updates page.
+    fn update_prompt_window(&mut self, context: &egui::Context) {
+        if !self.update_prompt_open {
+            return;
+        }
+        let Some(version) = self
+            .pending_update
+            .as_ref()
+            .map(|update| update.version.to_string())
+        else {
+            self.update_prompt_open = false;
+            return;
+        };
+        let downloading = self.download_running();
+        let mut install = false;
+        let mut cancel = false;
+        let response = egui::Modal::new(egui::Id::new("update_prompt"))
+            .backdrop_color(scrim(170))
+            .frame(dialog_frame())
+            .show(context, |ui| {
+                ui.set_width(420.0);
+                ui.label(
+                    RichText::new("UPDATE AVAILABLE")
+                        .size(9.5)
+                        .extra_letter_spacing(2.0)
+                        .color(ACCENT),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(branded!("{product} update is available"))
+                        .size(22.0)
+                        .strong()
+                        .color(TEXT),
+                );
+                ui.add_space(10.0);
+                ui.label(
+                    RichText::new(format!("Version {APP_VERSION}  →  {version}"))
+                        .size(12.5)
+                        .color(ACCENT_SOFT),
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(branded!(
+                        "Downloaded and verified. {product} closes to install it and starts again right after."
+                    ))
+                    .size(11.5)
+                    .color(MUTED),
+                );
+                if downloading {
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("⚠ The running download stops and continues after the restart.")
+                            .size(11.5)
+                            .color(AMBER),
+                    );
+                }
+                ui.add_space(22.0);
+                ui.allocate_ui_with_layout(
+                    Vec2::new(ui.available_width(), 34.0),
+                    Layout::right_to_left(Align::Center),
+                    |ui| {
+                        install = ui
+                            .add(primary_button("UPDATE").min_size(Vec2::new(110.0, 34.0)))
+                            .clicked();
+                        ui.add_space(8.0);
+                        cancel = ui
+                            .add(ghost_button("CANCEL").min_size(Vec2::new(110.0, 34.0)))
+                            .clicked();
+                    },
+                );
+            });
+        if install {
+            self.install_pending_update();
+        } else if cancel || response.should_close() {
+            self.update_prompt_open = false;
+            self.status = format!(
+                "{product} {version} is ready — install it from Updates whenever it suits you",
+                product = BRAND.name
+            );
+            self.status_error = false;
+        }
+    }
+
+    /// The About dialog: the product, its version and who made it, over its logo as a faint
+    /// watermark — and, for a white-label product, the free software it is built on.
+    fn about_window(&mut self, context: &egui::Context) {
+        if !self.about_open {
+            return;
+        }
+        const SIZE: Vec2 = Vec2::new(400.0, 372.0);
+        let mut close = false;
+        let mut discord = false;
+        let response = egui::Modal::new(egui::Id::new("about"))
+            .backdrop_color(scrim(170))
+            .frame(dialog_frame())
+            .show(context, |ui| {
+                let (rect, _) = ui.allocate_exact_size(SIZE, Sense::hover());
+                // The watermark: the logo again, large, tilted and barely there.
+                egui::Image::new(brand::logo())
+                    .tint(Color32::from_white_alpha(12))
+                    .rotate(-0.26, Vec2::splat(0.5))
+                    .paint_at(
+                        ui,
+                        egui::Rect::from_center_size(
+                            rect.center() + Vec2::new(0.0, 10.0),
+                            Vec2::splat(300.0),
+                        ),
+                    );
+
+                let mut content = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(rect)
+                        .layout(Layout::top_down(Align::Center)),
+                );
+                content.add(
+                    egui::Image::new(brand::logo())
+                        .fit_to_exact_size(Vec2::splat(72.0))
+                        .corner_radius(36),
+                );
+                content.add_space(12.0);
+                content.label(RichText::new(BRAND.name).size(26.0).strong().color(TEXT));
+                content.label(RichText::new(BRAND.tagline).size(12.0).color(MUTED));
+                content.add_space(2.0);
+                content.label(
+                    RichText::new(format!("Version {APP_VERSION}"))
+                        .size(10.5)
+                        .color(MUTED),
+                );
+                content.add_space(20.0);
+                let (rule, _) = content.allocate_exact_size(Vec2::new(120.0, 1.0), Sense::hover());
+                content.painter().rect_filled(rule, 0.0, BORDER);
+                content.add_space(18.0);
+                content.label(
+                    RichText::new("DEVELOPED BY")
+                        .size(9.5)
+                        .extra_letter_spacing(2.0)
+                        .color(MUTED),
+                );
+                content.add_space(2.0);
+                content.label(
+                    RichText::new(BRAND.developer)
+                        .size(24.0)
+                        .italics()
+                        .color(ACCENT_SOFT),
+                );
+                content.add_space(18.0);
+                content.label(
+                    RichText::new(if drydock_core::brand::IS_WHITE_LABEL {
+                        "Built on Drydock"
+                    } else {
+                        "Free software under the GPL-2.0"
+                    })
+                    .size(10.0)
+                    .color(MUTED),
+                );
+
+                let mut footer = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(rect)
+                        .layout(Layout::bottom_up(Align::Center)),
+                );
+                let buttons = if BRAND.discord.is_some() { 2.0 } else { 1.0 };
+                footer.allocate_ui_with_layout(
+                    Vec2::new(120.0 * buttons + 8.0 * (buttons - 1.0), 34.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        if BRAND.discord.is_some() {
+                            discord = ui
+                                .add(ghost_button("DISCORD").min_size(Vec2::new(120.0, 34.0)))
+                                .on_hover_text(branded!("Open the {product} Discord in your browser"))
+                                .clicked();
+                        }
+                        close = ui
+                            .add(primary_button("CLOSE").min_size(Vec2::new(120.0, 34.0)))
+                            .clicked();
+                    },
+                );
+            });
+        if discord {
+            self.open_discord();
+        }
+        if close || response.should_close() {
+            self.about_open = false;
         }
     }
 
@@ -7152,7 +7454,7 @@ impl DrydockApp {
 #[cfg(feature = "screenshot")]
 impl DrydockApp {
     /// Ordered pages the screenshot harness walks through (see [`crate::screenshot`]).
-    pub const SCREENSHOT_PAGES: [&'static str; 14] = [
+    pub const SCREENSHOT_PAGES: [&'static str; 16] = [
         "home",
         "repacks",
         "denuvo",
@@ -7167,6 +7469,9 @@ impl DrydockApp {
         "guide",
         "guide-fixes",
         "downloads",
+        // Last: the dialogs stay open over whatever comes after them.
+        "about",
+        "update",
     ];
 
     /// Switches the visible page by key so the harness can capture each one.
@@ -7186,7 +7491,7 @@ impl DrydockApp {
                     self.page = Page::Details;
                 }
             }
-            "denuvo" => {
+            "denuvo" if BRAND.features.denuvo_tab => {
                 self.page = Page::Home;
                 self.store_tab = StoreTab::DenuvoWatch;
             }
@@ -7199,6 +7504,20 @@ impl DrydockApp {
                 self.add_game_folder = Some(PathBuf::from("D:\\Games\\Onimusha Way of the Sword"));
             }
             "library" => self.page = Page::Library,
+            "about" => {
+                self.page = Page::Home;
+                self.about_open = true;
+            }
+            "update" => {
+                self.about_open = false;
+                self.pending_update = Some(PreparedUpdate {
+                    version: drydock_core::AppVersion::parse("9.9.9").expect("a valid version"),
+                    source_path: PathBuf::new(),
+                    target_path: PathBuf::new(),
+                    sha256: String::new(),
+                });
+                self.update_prompt_open = true;
+            }
             "tools" if BRAND.features.tools => self.page = Page::Tools,
             "cloud" if BRAND.features.cloud => self.page = Page::Cloud,
             "activation" => self.page = Page::Activation,
@@ -7398,6 +7717,8 @@ impl eframe::App for DrydockApp {
             });
         self.crack_removal_window(&context);
         self.entitlement_success_window(&context);
+        self.about_window(&context);
+        self.update_prompt_window(&context);
         self.busy_overlay(&context);
     }
 }
@@ -7583,6 +7904,15 @@ fn side_nav_entry(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Respons
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     response
+}
+
+/// The card a modal dialog sits on (About, the update prompt).
+fn dialog_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(SURFACE)
+        .stroke(Stroke::new(1.0, BORDER))
+        .corner_radius(16)
+        .inner_margin(28)
 }
 
 /// A left-arrow back button used to return from a detail page to the list it was opened from.
@@ -11193,15 +11523,16 @@ mod ui_tests {
 
     #[test]
     fn the_store_shows_exactly_the_tabs_this_product_offers() {
-        // CI runs the tests for Drydock and again with the example brand, which leaves Repacks out,
-        // so this checks both ways — the core tabs are there in either.
+        // CI runs the tests for Drydock and again with the example brand, which turns Repacks on
+        // and the Denuvo tab off, so this checks both ways — the core tabs are there in either.
         let shown: Vec<&str> = StoreTab::ALL
             .into_iter()
             .filter(|(tab, _)| tab.offered())
             .map(|(_, label)| label)
             .collect();
         assert_eq!(shown.contains(&"Repacks"), BRAND.features.repacks);
-        for core in ["Featured", "New Releases", "Denuvo"] {
+        assert_eq!(shown.contains(&"Denuvo"), BRAND.features.denuvo_tab);
+        for core in ["Featured", "New Releases"] {
             assert!(shown.contains(&core), "{core} is part of every product");
         }
     }

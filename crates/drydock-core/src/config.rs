@@ -150,6 +150,23 @@ pub fn github_token() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Token for a private update repository, which the self-updater sends to GitHub's API so a build
+/// can update from releases that are not public. Environment first, then the build
+/// (`DRYDOCK_UPDATE_TOKEN` or a git-ignored `update-token.secret`); Drydock's own releases are
+/// public and ship without one.
+///
+/// Anything baked into a binary can be read back out of it by whoever has the binary, so this must
+/// be a fine-grained token that can do nothing but read that one repository.
+#[must_use]
+pub fn update_token() -> Option<String> {
+    update_token_with_source().0
+}
+
+#[must_use]
+pub fn update_token_with_source() -> (Option<String>, Source) {
+    resolve("DRYDOCK_UPDATE_TOKEN", "", option_env!("DRYDOCK_UPDATE_TOKEN"))
+}
+
 /// `owner/repo`, conservatively validated so a typo cannot turn into a request somewhere unexpected.
 #[must_use]
 pub fn is_valid_repository(value: &str) -> bool {
@@ -186,6 +203,7 @@ pub fn describe() -> Vec<ConfigEntry> {
     let (proxy, proxy_source) = proxy_base_url_with_source();
     let (secret, secret_source) = hmac_secret_with_source();
     let (repository, repository_source) = update_repository_with_source();
+    let (update_token, update_token_source) = update_token_with_source();
     vec![
         ConfigEntry {
             name: "Proxy base URL",
@@ -204,6 +222,14 @@ pub fn describe() -> Vec<ConfigEntry> {
             env_var: "DRYDOCK_UPDATE_REPOSITORY",
             value: repository.unwrap_or_else(|| "(none)".to_owned()),
             source: repository_source,
+        },
+        ConfigEntry {
+            name: "Update token",
+            env_var: "DRYDOCK_UPDATE_TOKEN",
+            value: update_token
+                .as_deref()
+                .map_or_else(|| "(none)".to_owned(), redact),
+            source: update_token_source,
         },
         ConfigEntry {
             name: "GitHub token",

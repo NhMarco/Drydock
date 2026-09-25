@@ -15,11 +15,28 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "tagline",
     "description",
     "logo_is_wordmark",
+    "discord",
+    "developer",
     "navigation",
     "features",
     "palette",
 ];
-const FEATURE_KEYS: &[&str] = &["tools", "cloud", "repacks", "denuvo_fix", "cracked_version"];
+/// The hosts a brand's Discord link may point at: the button says "Discord", so it leads there.
+const DISCORD_HOSTS: &[&str] = &[
+    "discord.gg",
+    "discord.com",
+    "www.discord.com",
+    "discordapp.com",
+    "www.discordapp.com",
+];
+const FEATURE_KEYS: &[&str] = &[
+    "tools",
+    "cloud",
+    "denuvo_tab",
+    "repacks",
+    "denuvo_fix",
+    "cracked_version",
+];
 const PALETTE_KEYS: &[&str] = &[
     "background",
     "surface",
@@ -92,6 +109,9 @@ struct Spec {
     tagline: Option<String>,
     description: Option<String>,
     logo_is_wordmark: Option<bool>,
+    /// The invite link; an empty string in the file means "no button", as does leaving it out.
+    discord: Option<String>,
+    developer: Option<String>,
     side_navigation: Option<bool>,
     features: Vec<(String, bool)>,
     /// `(key, [r, g, b, a], has_alpha)`.
@@ -131,6 +151,25 @@ impl Spec {
                 .as_bool()
                 .unwrap_or_else(|| fail("`logo_is_wordmark` must be true or false".into()))
         });
+        let discord = text_of("discord")
+            .map(|link| link.trim().to_owned())
+            .filter(|link| !link.is_empty());
+        if let Some(link) = &discord
+            && !is_discord_link(link)
+        {
+            fail(format!(
+                "`discord` must be an https link to {} (e.g. \"https://discord.gg/abc123\"), not {link:?}",
+                DISCORD_HOSTS.join(", ")
+            ));
+        }
+        let developer = text_of("developer").map(|name| name.trim().to_owned());
+        if let Some(name) = &developer
+            && (name.is_empty() || name.chars().count() > 64 || name.chars().any(char::is_control))
+        {
+            fail(format!(
+                "`developer` must be a name of 1 to 64 characters on one line, not {name:?}"
+            ));
+        }
         let side_navigation = text_of("navigation").map(|value| match value.as_str() {
             "top" => false,
             "side" => true,
@@ -182,6 +221,8 @@ impl Spec {
             tagline: text_of("tagline"),
             description: text_of("description"),
             logo_is_wordmark,
+            discord,
+            developer,
             side_navigation,
             features,
             palette,
@@ -227,6 +268,15 @@ impl Spec {
         let logo_is_wordmark = self
             .logo_is_wordmark
             .map_or_else(|| "DRYDOCK.logo_is_wordmark".to_owned(), |on| on.to_string());
+        // Not Drydock's when left out: a product without a server of its own shows no button.
+        let discord = self
+            .discord
+            .as_deref()
+            .map_or_else(|| "None".to_owned(), |link| format!("Some({link:?})"));
+        let developer = self
+            .developer
+            .as_deref()
+            .map_or_else(|| "DRYDOCK.developer".to_owned(), |name| format!("{name:?}"));
         let navigation = match self.side_navigation {
             Some(true) => "Navigation::Side",
             Some(false) => "Navigation::Top",
@@ -247,6 +297,8 @@ impl Spec {
              \x20   name: drydock_core::PRODUCT.name,\n\
              \x20   tagline: {tagline},\n\
              \x20   logo_is_wordmark: {logo_is_wordmark},\n\
+             \x20   discord: {discord},\n\
+             \x20   developer: {developer},\n\
              \x20   palette: Palette {{\n{palette}    }},\n\
              \x20   navigation: {navigation},\n\
              \x20   features: Features {{\n{features}    }},\n\
@@ -285,6 +337,18 @@ fn artwork(logo: &str, icon: &str) -> String {
     )
 }
 
+/// Whether `link` is an https link to Discord, with nothing in it that has no place in a URL.
+fn is_discord_link(link: &str) -> bool {
+    let Some(rest) = link.strip_prefix("https://") else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    DISCORD_HOSTS.contains(&host)
+        && link
+            .chars()
+            .all(|c| c.is_ascii_graphic() && !matches!(c, '"' | '\\' | '<' | '>'))
+}
+
 /// `#RRGGBB` or `#RRGGBBAA`, with whether the alpha was given.
 fn parse_colour(text: &str) -> Option<([u8; 4], bool)> {
     let hex = text.trim().strip_prefix('#')?;
@@ -320,6 +384,9 @@ fn windows_resources(workspace: &Path, brand: Option<&Path>, spec: Option<&Spec>
     resource.set("ProductName", &name);
     resource.set("FileDescription", &description);
     resource.set("LegalCopyright", "Drydock contributors");
+    if let Some(developer) = spec.and_then(|spec| spec.developer.as_deref()) {
+        resource.set("CompanyName", developer);
+    }
     resource.set_icon(&icon.display().to_string());
     if let Err(error) = resource.compile() {
         println!("cargo:warning=Windows resources could not be embedded: {error}");

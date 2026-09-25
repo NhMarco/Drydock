@@ -12,6 +12,8 @@ conflict-free pull (see [Keeping it current](#keeping-it-current)).
 | Set by `brand/brand.toml` | Stays Drydock's in every product |
 | --- | --- |
 | Name in the window, headings and messages | The proxy it talks to and the signed requests (`X-Drydock-*`) |
+| The Discord button and where it leads | |
+| The developer credited in the About dialog | The About dialog's "Built on Drydock" line (see below) |
 | Every colour of the interface (`[palette]`) | The `settings.json` format |
 | Logo, window icon, Windows file icon (`brand/*.png`, `brand/app-icon.ico`) | Activation: request codes, response verification, the `.Drydock` marker |
 | Navigation: top bar or left column | The depot engine, downloads, verify, Steam integration |
@@ -45,8 +47,10 @@ is a complete, commented example: copy the folder to `brand/` and edit it.
 | `tagline` | A short line under the name in the side navigation. | Drydock's |
 | `description` | Explorer's "File description". | `<name> — <tagline>` |
 | `logo_is_wordmark` | `true` when `logo.png` already spells the name, so the side navigation shows the logo alone. | `false` |
+| `developer` | Who made the product: "Developed by …" in the About dialog, and the Windows file's company. | `Drydock contributors` |
+| `discord` | The product's Discord invite, `https://discord.gg/…` (or a `discord.com` link). Shown as a button in the navigation and after an activation. | none — **not** Drydock's: no server of its own, no button |
 | `navigation` | `"top"` or `"side"`. | `"top"` |
-| `[features]` | `tools`, `cloud`, `repacks`, `denuvo_fix`, `cracked_version` — each `true` or `false`. | all on |
+| `[features]` | `tools`, `cloud`, `denuvo_tab`, `repacks`, `denuvo_fix`, `cracked_version` — each `true` or `false`. | Drydock's: the first three on, the other three off |
 | `[palette]` | `background`, `surface`, `surface_raised`, `surface_sunken`, `border`, `edge`, `text`, `muted`, `accent`, `accent_soft`, `accent_deep`, `success`, `success_hover`, `on_success`, `warning`, `danger`, `chrome`, `scrim`, `overlay`, `input`, `ambient` — each `"#RRGGBB"` or `"#RRGGBBAA"`. `apps/drydock-desktop/src/brand.rs` documents where each one is used. | Drydock's |
 
 Anything left out is Drydock's. An unknown key, a malformed colour or an invalid name fails the
@@ -87,6 +91,14 @@ Drydock build. To look at every page without clicking through:
    `git push -u origin main`.
 3. In the new repository, **Settings → Secrets and variables → Actions → Secrets**:
    `DRYDOCK_PROXY_BASE_URL` and `DRYDOCK_HMAC_SECRET` — the same values as Drydock's.
+   - Optional, **Variables**: `RELEASE_PLATFORMS` to release fewer platforms than all four, e.g.
+     `windows-x64 linux-x64` (known: `windows-x64`, `windows-arm64`, `linux-x64`, `linux-arm64`).
+   - Only for a **private** repository: `DRYDOCK_UPDATE_TOKEN`, a fine-grained personal access
+     token with access to that one repository and nothing but *Contents: Read-only*. A private
+     repository's releases cannot be downloaded anonymously, so without it the product cannot
+     update itself. The token is baked into every binary and can be read back out of it — never
+     give it more than that, and prefer publishing releases from a public repository once the
+     product ships to anyone you would not show the repository to.
 4. Release exactly as Drydock does: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 
 The release workflow reads the name from `brand/brand.toml`, names the assets `<name>-<platform>`,
@@ -122,6 +134,9 @@ These apply to changes in Drydock itself:
 - **New optional features get a flag in `Features`** (and in `FEATURE_KEYS`), checked where the
   feature is offered and where its data is fetched — a product without the feature should never
   download what it cannot show.
+- **The About dialog keeps its "Built on Drydock" line.** Drydock is GPL-2.0: a white-label
+  product is a modified version of it, and its source has to stay available under the same
+  licence to whoever gets its binaries.
 - **Backend identifiers stay Drydock's.** Renaming a request header, an environment variable, the
   activation salt or its `.Drydock` marker per product would split products that must stay
   interchangeable. The data directory is the deliberate exception: it is each product's own.

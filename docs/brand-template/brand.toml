@@ -19,16 +19,26 @@ description = "Example — Games, ready to play"
 # Whether logo.png already spells the name (and tagline); the side navigation then shows it alone.
 logo_is_wordmark = false
 
+# Who made the product: "Developed by …" in the About dialog. Defaults to "Drydock contributors".
+developer = "Example Studio"
+
+# The product's Discord invite, shown as a button in the navigation and after an activation.
+# Never Drydock's: leave it out (or "") and there is no button.
+# discord = "https://discord.gg/your-invite"
+
 # "top" (a storefront bar across the window) or "side" (a column down the left edge).
 navigation = "side"
 
-# Optional features; everything else is part of every product. Left out = Drydock's (on).
+# Optional features; everything else is part of every product. Left out = Drydock's choice:
+# Tools, Cloud and the Denuvo tab on; Repacks, Denuvo fix and cracked version off.
+# (This example turns Drydock's choices around, so CI builds every feature both ways.)
 [features]
 cloud = false
-repacks = false
+denuvo_tab = false
+repacks = true
+denuvo_fix = true
+cracked_version = true
 # tools = true
-# denuvo_fix = true
-# cracked_version = true
 
 # Every colour the interface paints with, as "#RRGGBB" or "#RRGGBBAA". The tests check text contrast
 # against WCAG AA, so an unreadable palette fails `cargo test`.

@@ -125,8 +125,9 @@ impl AppUpdater {
         }
         let binary_name = target_asset_name().ok_or(UpdateError::UnsupportedPlatform)?;
         let checksum_name = format!("{binary_name}.sha256");
-        let binary_url = asset_url(&release, binary_name)?;
-        let checksum_url = asset_url(&release, &checksum_name)?;
+        let authenticated = github_token().is_some();
+        let binary_url = asset_url(&release, binary_name, authenticated)?;
+        let checksum_url = asset_url(&release, &checksum_name, authenticated)?;
         let checksum = parse_checksum(&read_limited(
             self.authorized_get(&checksum_url, "application/octet-stream")?,
             MAXIMUM_CHECKSUM_BYTES,
@@ -207,7 +208,7 @@ impl AppUpdater {
     fn authorized_get(&self, url: &str, accept: &'static str) -> Result<Response, UpdateError> {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static(accept));
-        if let Some(token) = crate::config::github_token() {
+        if let Some(token) = github_token() {
             headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {token}"))?);
         }
         Ok(self.client.get(url).headers(headers).send()?)
@@ -458,12 +459,27 @@ fn is_installed_binary_name(name: &str) -> bool {
     name == PRODUCT.executable || target_asset_name() == Some(name)
 }
 
-fn asset_url(release: &GitHubRelease, name: &str) -> Result<String, UpdateError> {
+/// The token the updater sends to GitHub: the update token baked in for a private update
+/// repository, else a `DRYDOCK_GITHUB_TOKEN` from the environment. Neither is set for Drydock's
+/// public releases.
+fn github_token() -> Option<String> {
+    crate::config::update_token().or_else(crate::config::github_token)
+}
+
+/// Where to download an asset from: the public CDN URL, or — with a token — the API asset URL,
+/// the only one a token opens for a private repository's release.
+fn asset_url(release: &GitHubRelease, name: &str, authenticated: bool) -> Result<String, UpdateError> {
     release
         .assets
         .iter()
         .find(|asset| asset.name == name)
-        .map(|asset| asset.browser_download_url.clone())
+        .map(|asset| {
+            if authenticated && !asset.url.is_empty() {
+                asset.url.clone()
+            } else {
+                asset.browser_download_url.clone()
+            }
+        })
         .ok_or_else(|| UpdateError::MissingAsset(name.to_owned()))
 }
 
@@ -577,6 +593,11 @@ struct GitHubAsset {
     // count against GitHub's anonymous API rate limit, which matters when many users update at
     // once from the public release repo.
     browser_download_url: String,
+    // The API asset URL. A private repository's release answers 404 on the CDN URL even with a
+    // token, so an updater that has one downloads through here (GitHub redirects to the file, and
+    // the token is not passed on to the other host).
+    #[serde(default)]
+    url: String,
 }
 
 #[derive(Debug, Error)]
@@ -650,14 +671,19 @@ mod tests {
     #[test]
     fn release_asset_and_checksum_are_selected_strictly() {
         let release: GitHubRelease = serde_json::from_str(
-            r#"{"tag_name":"v1.2.0","assets":[{"name":"Drydock-linux-x64","browser_download_url":"https://github.com/NhMarco/Drydock/releases/download/v1.2.0/Drydock-linux-x64"}]}"#,
+            r#"{"tag_name":"v1.2.0","assets":[{"name":"Drydock-linux-x64","url":"https://api.github.com/repos/NhMarco/Drydock/releases/assets/7","browser_download_url":"https://github.com/NhMarco/Drydock/releases/download/v1.2.0/Drydock-linux-x64"}]}"#,
         )
         .expect("release");
         assert_eq!(
-            asset_url(&release, "Drydock-linux-x64").expect("asset"),
+            asset_url(&release, "Drydock-linux-x64", false).expect("asset"),
             "https://github.com/NhMarco/Drydock/releases/download/v1.2.0/Drydock-linux-x64"
         );
-        assert!(asset_url(&release, "Drydock-windows-x64.exe").is_err());
+        // With a token (a private update repository) only the API URL opens the file.
+        assert_eq!(
+            asset_url(&release, "Drydock-linux-x64", true).expect("asset"),
+            "https://api.github.com/repos/NhMarco/Drydock/releases/assets/7"
+        );
+        assert!(asset_url(&release, "Drydock-windows-x64.exe", false).is_err());
         assert_eq!(
             parse_checksum(b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  file")
                 .expect("hash"),
@@ -725,8 +751,8 @@ mod tests {
                 let expected = format!("{}-{platform}", product.name);
                 assert_eq!(asset_name_of(&product, os, architecture), Some(expected.as_str()));
             }
-            assert!(release.contains(&format!("platform: {platform}")));
-            assert!(release.contains(&format!("runner: {runner}")));
+            assert!(release.contains(&format!(r#""platform": "{platform}""#)));
+            assert!(release.contains(&format!(r#""runner": "{runner}""#)));
             assert!(validation.contains(&format!("runner: {runner}")));
         }
         // The product name comes from a white-label repository's brand file, Drydock otherwise.
