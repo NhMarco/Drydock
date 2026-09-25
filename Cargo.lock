@@ -780,6 +780,7 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "thiserror 2.0.20",
+ "toml",
  "walkdir",
  "windows-sys 0.61.2",
  "winreg",
@@ -801,6 +802,7 @@ dependencies = [
  "rfd",
  "sha2",
  "tempfile",
+ "toml",
  "winres",
 ]
 

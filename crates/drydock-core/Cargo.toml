@@ -6,6 +6,11 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 
+[build-dependencies]
+# Reads a white-label brand file's name (see `build.rs` and docs/branding.md). Already in the lock
+# file through winres, so it adds no new crate.
+toml = "0.5"
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

@@ -875,7 +875,7 @@ pub enum ActivationError {
     ResponseNotFound,
     #[error("The activation response has an invalid size")]
     InvalidTokenSize,
-    #[error("This is not a valid Drydock activation response")]
+    #[error("This is not a valid {} activation response", crate::brand::PRODUCT.name)]
     InvalidToken,
     #[error("This activation response version is not supported")]
     UnsupportedToken,
@@ -883,7 +883,7 @@ pub enum ActivationError {
     WrongAppId,
     #[error("The activation response belongs to a different machine")]
     WrongMachine,
-    #[error("The activation response belongs to a different Drydock installation")]
+    #[error("The activation response belongs to a different {} installation", crate::brand::PRODUCT.name)]
     WrongDevice,
     #[error("The activation response has expired or carries an invalid lifetime")]
     InvalidLifetime,

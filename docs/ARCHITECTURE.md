@@ -32,9 +32,10 @@ How Drydock is put together, and the conventions that are not obvious from readi
 ### Configuration goes through `config.rs`
 
 Never read a deployment-changeable value directly. `drydock-core::config` resolves each one from
-three layers, highest first: **environment variable** → **user settings** (the Settings ▸ Proxy /
-Self-hosting fields, pushed in by `Settings::apply_config_overrides`) → **build-time default**
-(`build.rs` `cargo:rustc-env`, from an env var or a git-ignored `*.secret` file).
+two layers, highest first: **environment variable** → **build-time default** (`build.rs`
+`cargo:rustc-env`, from an env var or a git-ignored `*.secret` file). The settings file still carries
+the former Proxy / Self-hosting fields so it keeps its format, but the app no longer applies them —
+there is no page left to see or clear them.
 
 New configuration belongs in that module with a `describe` entry, so `--config` keeps showing the
 whole picture. `proxy.rs` and `updater.rs` only re-export from it. A missing value resolves to `None`
@@ -80,7 +81,8 @@ code should use them rather than re-implementing their rules inline:
 
 ### Persistence
 
-`PortablePaths` resolves `%LOCALAPPDATA%\Drydock` (Windows) or `$XDG_DATA_HOME/Drydock` (elsewhere).
+`PortablePaths` resolves `%LOCALAPPDATA%\<Product>` (Windows) or `$XDG_DATA_HOME/<Product>` (elsewhere) —
+`Drydock`, or the white-label product's own name (see `docs/branding.md`).
 Persistent data — settings, the activation device key — lives in the root; regenerable caches live in
 `cache/` and can be wiped safely. Both the image cache and the store cache sweep themselves on
 startup, so neither grows without bound.

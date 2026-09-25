@@ -776,7 +776,7 @@ fn capture_authorization_code(listener: &TcpListener, expected_state: &str) -> R
             let _ = write_http_response(
                 &mut stream,
                 "200 OK",
-                "<h1>Sign-in failed</h1><p>You can close this tab and return to Drydock.</p>",
+                "<h1>Sign-in failed</h1><p>You can close this tab and return to {product}.</p>",
             );
             return Err(CloudError::OAuthDenied(error));
         }
@@ -784,14 +784,14 @@ fn capture_authorization_code(listener: &TcpListener, expected_state: &str) -> R
             let _ = write_http_response(
                 &mut stream,
                 "200 OK",
-                "<h1>Sign-in failed</h1><p>You can close this tab and return to Drydock.</p>",
+                "<h1>Sign-in failed</h1><p>You can close this tab and return to {product}.</p>",
             );
             return Err(CloudError::OAuthStateMismatch);
         }
         let _ = write_http_response(
             &mut stream,
             "200 OK",
-            "<h1>Signed in</h1><p>You can close this tab and return to Drydock.</p>",
+            "<h1>Signed in</h1><p>You can close this tab and return to {product}.</p>",
         );
         return code.ok_or(CloudError::OAuthStateMismatch);
     }
@@ -843,6 +843,8 @@ fn write_http_response(
     status: &str,
     body_html: &str,
 ) -> std::io::Result<()> {
+    // The page names the app the user goes back to, whichever product that is.
+    let body_html = body_html.replace("{product}", crate::brand::PRODUCT.name);
     let body = if body_html.is_empty() {
         String::new()
     } else {

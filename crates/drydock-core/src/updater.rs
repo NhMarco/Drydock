@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use thiserror::Error;
 
+use crate::brand::{PRODUCT, Product};
 use crate::version::{APP_VERSION, user_agent};
 
 const APPLY_ARGUMENT: &str = "--apply-update";
@@ -131,11 +132,12 @@ impl AppUpdater {
             MAXIMUM_CHECKSUM_BYTES,
         )?)?;
 
-        let update_directory = env::temp_dir().join("Drydock").join("updates");
+        let update_directory = update_directory();
         fs::create_dir_all(&update_directory)?;
         cleanup_old_updates(&update_directory);
         let destination = update_directory.join(format!(
-            "Drydock-{}-{}",
+            "{}-{}-{}",
+            PRODUCT.name,
             version,
             binary_name.replace(['/', '\\'], "_")
         ));
@@ -348,11 +350,15 @@ fn target_asset_name() -> Option<&'static str> {
 }
 
 fn asset_name_for(os: &str, architecture: &str) -> Option<&'static str> {
+    asset_name_of(&PRODUCT, os, architecture)
+}
+
+fn asset_name_of(product: &Product, os: &str, architecture: &str) -> Option<&'static str> {
     match (os, architecture) {
-        ("windows", "x86_64") => Some("Drydock-windows-x64.exe"),
-        ("windows", "aarch64") => Some("Drydock-windows-arm64.exe"),
-        ("linux", "x86_64") => Some("Drydock-linux-x64"),
-        ("linux", "aarch64") => Some("Drydock-linux-arm64"),
+        ("windows", "x86_64") => Some(product.assets.windows_x64),
+        ("windows", "aarch64") => Some(product.assets.windows_arm64),
+        ("linux", "x86_64") => Some(product.assets.linux_x64),
+        ("linux", "aarch64") => Some(product.assets.linux_arm64),
         _ => None,
     }
 }
@@ -398,13 +404,22 @@ fn has_expected_binary_architecture(path: &Path) -> Result<bool, UpdateError> {
     }
 }
 
+/// Where downloaded updates are staged: under the product's own name in the temp folder.
+fn update_directory() -> PathBuf {
+    env::temp_dir().join(PRODUCT.name).join("updates")
+}
+
 fn expected_update_source(path: &Path) -> bool {
-    let expected = env::temp_dir().join("Drydock").join("updates");
+    let expected = update_directory();
     path.parent().is_some_and(|parent| parent == expected)
         && path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("Drydock-") && !name.ends_with(".download"))
+            .is_some_and(|name| {
+                // Staged under the product's own name, so two products sharing the folder never
+                // take each other's download for their own.
+                name.starts_with(&format!("{}-", PRODUCT.name)) && !name.ends_with(".download")
+            })
 }
 
 /// Whether the running binary is a local `cargo build` output rather than an installed Drydock.
@@ -435,12 +450,12 @@ fn expected_target_name(path: &Path) -> bool {
         .is_some_and(is_installed_binary_name)
 }
 
-/// The names Drydock may legitimately run under: the canonical installed name, or this
-/// platform's published release asset — so a directly downloaded `Drydock-<os>-<arch>[.exe]`
-/// updates itself in place instead of silently disabling the updater on a name mismatch.
+/// The names this product may legitimately run under: its installed executable, or this platform's
+/// published release asset — so a directly downloaded `<Product>-<os>-<arch>[.exe]` updates itself
+/// in place instead of silently disabling the updater on a name mismatch. Another product's names
+/// never qualify: a white-label build does not take a file called Drydock for itself.
 fn is_installed_binary_name(name: &str) -> bool {
-    let canonical = if cfg!(windows) { "Drydock.exe" } else { "Drydock" };
-    name == canonical || target_asset_name() == Some(name)
+    name == PRODUCT.executable || target_asset_name() == Some(name)
 }
 
 fn asset_url(release: &GitHubRelease, name: &str) -> Result<String, UpdateError> {
@@ -566,7 +581,7 @@ struct GitHubAsset {
 
 #[derive(Debug, Error)]
 pub enum UpdateError {
-    #[error("The Drydock update repository is not configured in this build")]
+    #[error("The {} update repository is not configured in this build", crate::brand::PRODUCT.name)]
     NotConfigured,
     #[error("The update repository must use the owner/repository format")]
     InvalidRepository,
@@ -588,7 +603,7 @@ pub enum UpdateError {
     UnsupportedPlatform,
     #[error("The self-update request is invalid")]
     InvalidApplyRequest,
-    #[error("Drydock did not close in time")]
+    #[error("{} did not close in time", crate::brand::PRODUCT.name)]
     PreviousProcessRunning,
     #[error(transparent)]
     Network(#[from] reqwest::Error),
@@ -653,15 +668,37 @@ mod tests {
 
     #[test]
     fn accepts_canonical_and_platform_asset_names() {
-        let canonical = if cfg!(windows) { "Drydock.exe" } else { "Drydock" };
-        assert!(is_installed_binary_name(canonical));
+        assert!(is_installed_binary_name(PRODUCT.executable));
         // The directly downloaded release asset for this platform must self-update in place.
         assert!(is_installed_binary_name(
             target_asset_name().expect("this test runs on a supported platform")
         ));
         assert!(!is_installed_binary_name("notepad.exe"));
-        assert!(!is_installed_binary_name("Drydock-unknown-x64"));
+        assert!(!is_installed_binary_name(&format!(
+            "{}-unknown-x64",
+            PRODUCT.name
+        )));
+        // Another product's executable is never taken for this one's, whichever this build is.
+        let other = if PRODUCT == crate::brand::DRYDOCK {
+            OTHER_PRODUCT
+        } else {
+            crate::brand::DRYDOCK
+        };
+        assert!(!is_installed_binary_name(other.executable));
+        assert!(!is_installed_binary_name(other.assets.windows_x64));
     }
+
+    /// Some product other than Drydock, for the tests that must hold for every product.
+    const OTHER_PRODUCT: Product = Product {
+        name: "Example",
+        executable: if cfg!(windows) { "Example.exe" } else { "Example" },
+        assets: crate::brand::ReleaseAssets {
+            windows_x64: "Example-windows-x64.exe",
+            windows_arm64: "Example-windows-arm64.exe",
+            linux_x64: "Example-linux-x64",
+            linux_arm64: "Example-linux-arm64",
+        },
+    };
 
     #[test]
     fn repository_name_is_constrained() {
@@ -676,22 +713,25 @@ mod tests {
         let release =
             fs::read_to_string(root.join(".github/workflows/release.yml")).expect("release workflow");
         let validation = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("CI workflow");
-        for (os, architecture, asset, runner) in [
-            ("windows", "x86_64", "Drydock-windows-x64.exe", "windows-2025"),
-            (
-                "windows",
-                "aarch64",
-                "Drydock-windows-arm64.exe",
-                "windows-11-arm",
-            ),
-            ("linux", "x86_64", "Drydock-linux-x64", "ubuntu-24.04"),
-            ("linux", "aarch64", "Drydock-linux-arm64", "ubuntu-24.04-arm"),
+        for (os, architecture, platform, runner) in [
+            ("windows", "x86_64", "windows-x64.exe", "windows-2025"),
+            ("windows", "aarch64", "windows-arm64.exe", "windows-11-arm"),
+            ("linux", "x86_64", "linux-x64", "ubuntu-24.04"),
+            ("linux", "aarch64", "linux-arm64", "ubuntu-24.04-arm"),
         ] {
-            assert_eq!(asset_name_for(os, architecture), Some(asset));
-            assert!(release.contains(&format!("asset: {asset}")));
+            // The workflow names each asset `<PRODUCT>-<platform>`; every product the updater knows
+            // has to agree with that, not only the one this test happens to be built as.
+            for product in [crate::brand::DRYDOCK, PRODUCT, OTHER_PRODUCT] {
+                let expected = format!("{}-{platform}", product.name);
+                assert_eq!(asset_name_of(&product, os, architecture), Some(expected.as_str()));
+            }
+            assert!(release.contains(&format!("platform: {platform}")));
             assert!(release.contains(&format!("runner: {runner}")));
             assert!(validation.contains(&format!("runner: {runner}")));
         }
+        // The product name comes from a white-label repository's brand file, Drydock otherwise.
+        assert!(release.contains("ASSET=${product}-${{ matrix.platform }}"));
+        assert!(release.contains("brand/brand.toml"));
         assert!(release.contains("needs: build"));
         assert!(release.contains("DRYDOCK_RELEASE_VERSION"));
         assert!(release.contains("sha256sum"));

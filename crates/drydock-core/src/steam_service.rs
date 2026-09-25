@@ -690,7 +690,7 @@ impl TempTransaction {
         let mut bytes = [0u8; 16];
         rand::thread_rng().fill_bytes(&mut bytes);
         let unique: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-        let root = std::env::temp_dir().join("Drydock").join(unique);
+        let root = std::env::temp_dir().join(crate::brand::PRODUCT.name).join(unique);
         fs::create_dir_all(&root)?;
         Ok(Self { root })
     }

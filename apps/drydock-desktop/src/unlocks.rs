@@ -128,7 +128,8 @@ pub(crate) fn install_own_unlock(
     ) {
         Ok(()) => String::new(),
         Err(error) => format!(
-            " Drydock could not keep its own copy ({error}), so reinstalling it will need the files again."
+            " {product} could not keep its own copy ({error}), so reinstalling it will need the files again.",
+            product = crate::brand::BRAND.name
         ),
     };
 

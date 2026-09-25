@@ -31,5 +31,10 @@ drydock-core = { path = "../../crates/drydock-core" }
 [dev-dependencies]
 tempfile = "3.27"
 
+[build-dependencies]
+# Reads a white-label brand file (see `build.rs` and docs/branding.md). Already in the lock file
+# through winres, so it adds no new crate.
+toml = "0.5"
+
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

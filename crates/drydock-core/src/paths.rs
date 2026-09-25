@@ -3,6 +3,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::brand::PRODUCT;
+
 /// Per-user data locations. Persistent data (settings, activation device key) lives directly in
 /// the data root; regenerable caches live in a `cache` subdirectory that can be wiped safely.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -11,10 +13,12 @@ pub struct PortablePaths {
 }
 
 impl PortablePaths {
-    /// Resolves the per-user data directory — `%LOCALAPPDATA%\Drydock` on Windows,
-    /// `$XDG_DATA_HOME/Drydock` (or `~/.local/share/Drydock`) elsewhere — and migrates a legacy
-    /// portable `settings` folder next to the executable on first run. Falls back to a folder
-    /// beside the executable when the platform data directory cannot be determined.
+    /// Resolves the per-user data directory — `%LOCALAPPDATA%\<Product>` on Windows,
+    /// `$XDG_DATA_HOME/<Product>` (or `~/.local/share/<Product>`) elsewhere, named after the product
+    /// this build is (`Drydock`, or a white-label product's own name — see [`crate::brand`]) so each
+    /// product keeps its own settings, library and cache — and migrates a legacy portable `settings` folder next to the
+    /// executable on first run. Falls back to a folder beside the executable when the platform data
+    /// directory cannot be determined.
     pub fn discover() -> io::Result<Self> {
         let root = platform_data_root()
             .or_else(legacy_executable_dir)
@@ -83,7 +87,7 @@ impl PortablePaths {
 fn platform_data_root() -> Option<PathBuf> {
     env::var_os("LOCALAPPDATA")
         .filter(|value| !value.is_empty())
-        .map(|base| PathBuf::from(base).join("Drydock"))
+        .map(|base| PathBuf::from(base).join(PRODUCT.name))
 }
 
 #[cfg(not(windows))]
@@ -96,7 +100,7 @@ fn platform_data_root() -> Option<PathBuf> {
                 .filter(|value| !value.is_empty())
                 .map(|home| PathBuf::from(home).join(".local/share"))
         })
-        .map(|base| base.join("Drydock"))
+        .map(|base| base.join(PRODUCT.name))
 }
 
 /// The legacy portable location: a `settings` folder beside the executable.
@@ -153,5 +157,17 @@ mod tests {
         assert!(paths.settings_file().is_file());
         // Clearing again is a no-op that frees nothing.
         assert_eq!(paths.clear_cache().expect("clear again"), 0);
+    }
+
+    #[test]
+    fn each_product_keeps_its_data_under_its_own_name() {
+        // Drydock in `%LOCALAPPDATA%\Drydock`, a white-label product under its own name: separate
+        // settings, library and cache, so neither product ever reads or clears the other's.
+        if let Some(root) = platform_data_root() {
+            assert_eq!(
+                root.file_name().and_then(|name| name.to_str()),
+                Some(PRODUCT.name)
+            );
+        }
     }
 }

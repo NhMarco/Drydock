@@ -51,6 +51,14 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # White-label builds are this same code plus a brand/ folder (docs/branding.md). Building and
+      # testing once with the example brand keeps a change here from breaking them unnoticed.
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        env:
+          DRYDOCK_BRAND_DIR: docs/brand-template
+      - run: cargo test --workspace --locked
+        env:
+          DRYDOCK_BRAND_DIR: docs/brand-template
 
   native-build:
     if: github.event_name == 'workflow_dispatch'

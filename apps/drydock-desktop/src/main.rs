@@ -3,6 +3,7 @@
     windows_subsystem = "windows"
 )]
 
+mod brand;
 mod downloads;
 mod image_cache;
 mod ui;
@@ -60,11 +61,12 @@ fn main() -> eframe::Result {
             .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
             .unwrap_or_else(|| "<unknown>".to_string());
         let report = format!(
-            "==== Drydock {APP_VERSION} panicked ====\n\
+            "==== {} {APP_VERSION} panicked ====\n\
              when:   {:?}\n\
              thread: {name}\n\
              message:{payload}\n\
              at:     {location}\n{}\n",
+            brand::BRAND.name,
             std::time::SystemTime::now(),
             std::backtrace::Backtrace::force_capture()
         );
@@ -90,7 +92,8 @@ fn main() -> eframe::Result {
         match run_self_test() {
             Ok(report) => {
                 println!(
-                    "Drydock self-test passed: target={}, catalog_apps={}, activation={}, settings={}",
+                    "{} self-test passed: target={}, catalog_apps={}, activation={}, settings={}",
+                    brand::BRAND.name,
                     report.target,
                     report.catalog_apps,
                     report.activation_request_created,
@@ -99,7 +102,7 @@ fn main() -> eframe::Result {
                 return Ok(());
             }
             Err(error) => {
-                eprintln!("Drydock self-test failed: {error}");
+                eprintln!("{} self-test failed: {error}", brand::BRAND.name);
                 std::process::exit(1);
             }
         }
@@ -112,11 +115,11 @@ fn main() -> eframe::Result {
     // to run when a self-hosted setup talks to the wrong proxy — or to nothing at all. Secrets are
     // redacted, so the output is safe to paste into a bug report.
     if arguments.as_slice() == ["--config"] {
-        // Settings-level overrides are part of the answer, so load them the same way the GUI does.
+        // Report the data directory and whether its settings load; the configuration itself comes
+        // from the build and the environment only (the GUI no longer applies settings overrides).
         match PortablePaths::discover() {
             Ok(paths) => {
-                let (settings, outcome) = Settings::load_recovering(&paths.settings_file());
-                settings.apply_config_overrides();
+                let (_, outcome) = Settings::load_recovering(&paths.settings_file());
                 println!("Data directory: {}", paths.settings_dir().display());
                 if !matches!(outcome, drydock_core::LoadOutcome::Loaded) {
                     println!("Settings:       {outcome:?}");
@@ -176,12 +179,12 @@ fn main() -> eframe::Result {
     }
 
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("Drydock")
+        .with_title(brand::BRAND.name)
         .with_position([48.0, 48.0])
         .with_inner_size([1080.0, 640.0])
         .with_min_inner_size([800.0, 500.0])
         .with_clamp_size_to_monitor_size(true);
-    if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/app-icon.png")) {
+    if let Ok(icon) = eframe::icon_data::from_png_bytes(brand::ICON_PNG) {
         viewport = viewport.with_icon(icon);
     }
     let mut options = eframe::NativeOptions {
@@ -194,7 +197,7 @@ fn main() -> eframe::Result {
     options.glow_options.vsync = false;
 
     eframe::run_native(
-        "Drydock",
+        brand::BRAND.name,
         options,
         Box::new(|context| Ok(Box::new(ui::DrydockApp::new(context)))),
     )

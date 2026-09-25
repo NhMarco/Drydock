@@ -44,19 +44,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # The platform part of each asset name; the product name goes in front — Drydock here, or
+        # the name in a white-label repository's brand/brand.toml (see docs/branding.md).
         include:
           - runner: windows-2025
-            asset: Drydock-windows-x64.exe
-            binary: target/release/Drydock.exe
+            platform: windows-x64.exe
+            extension: .exe
           - runner: windows-11-arm
-            asset: Drydock-windows-arm64.exe
-            binary: target/release/Drydock.exe
+            platform: windows-arm64.exe
+            extension: .exe
           - runner: ubuntu-24.04
-            asset: Drydock-linux-x64
-            binary: target/release/Drydock
+            platform: linux-x64
+            extension: ""
           - runner: ubuntu-24.04-arm
-            asset: Drydock-linux-arm64
-            binary: target/release/Drydock
+            platform: linux-arm64
+            extension: ""
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -70,6 +72,12 @@ jobs:
             exit 1
           fi
           echo "DRYDOCK_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          # The release is named after the product: Drydock, or a white-label repository's brand
+          # (the build picks the brand up by itself; only the file names need it here).
+          product=$(sed -n 's/^name *= *"\([A-Za-z0-9_-]*\)".*/\1/p' brand/brand.toml 2>/dev/null | head -n 1)
+          product="${product:-Drydock}"
+          echo "BINARY=target/release/Drydock${{ matrix.extension }}" >> "$GITHUB_ENV"
+          echo "ASSET=${product}-${{ matrix.platform }}" >> "$GITHUB_ENV"
       - name: Install Linux desktop dependencies
         if: runner.os == 'Linux'
         run: >-
@@ -77,9 +85,9 @@ jobs:
           libgl1-mesa-dev libwayland-dev libx11-dev libxkbcommon-dev libxi-dev pkg-config
       - name: Build release with its update channel
         env:
-          # The channel shipped binaries check for updates. Same repository as the source now, so a
-          # fork only has to change this line (or set DRYDOCK_UPDATE_REPOSITORY at runtime).
-          DRYDOCK_UPDATE_REPOSITORY: NhMarco/Drydock
+          # The channel shipped binaries check for updates: the repository publishing this release,
+          # so a white-label repository's binaries follow its own releases, never Drydock's.
+          DRYDOCK_UPDATE_REPOSITORY: ${{ github.repository }}
           # Baked into the shipped binary so it can reach the self-hosted proxy and sign its
           # requests. The proxy holds the steamtools key and GitHub token server-side, so the app
           # no longer embeds either. Absent secrets embed nothing, so an unconfigured build simply
@@ -91,14 +99,14 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          "${{ matrix.binary }}" --self-test
-          actual=$("${{ matrix.binary }}" --version | tr -d '\r')
+          "$BINARY" --self-test
+          actual=$("$BINARY" --version | tr -d '\r')
           test "$actual" = "$DRYDOCK_RELEASE_VERSION"
       - name: Run packaged binary self-test on Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $binary = (Resolve-Path "${{ matrix.binary }}").Path
+          $binary = (Resolve-Path $env:BINARY).Path
           function Invoke-DrydockCli([string]$Argument, [string]$Name) {
             $stdout = Join-Path $env:RUNNER_TEMP "$Name.txt"
             $stderr = Join-Path $env:RUNNER_TEMP "$Name-error.txt"
@@ -121,15 +129,15 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp "${{ matrix.binary }}" "dist/${{ matrix.asset }}"
+          cp "$BINARY" "dist/$ASSET"
           cd dist
-          sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          sha256sum "$ASSET" > "$ASSET.sha256"
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset }}
+          name: ${{ env.ASSET }}
           path: |
-            dist/${{ matrix.asset }}
-            dist/${{ matrix.asset }}.sha256
+            dist/${{ env.ASSET }}
+            dist/${{ env.ASSET }}.sha256
           if-no-files-found: error
 
   publish:

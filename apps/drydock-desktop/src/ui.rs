@@ -1,3 +1,4 @@
+use crate::brand::{self, BRAND, Navigation};
 use crate::downloads::{
     DownloadJob, DownloadKind, DownloadUpdate, JOB_PREPARING, JobLimits, claim_abandoned, human_bytes,
     run_depot_job,
@@ -15,54 +16,97 @@ use std::time::{Duration, Instant, SystemTime};
 use drydock_core::depot::MAXIMUM_VERIFY_THREADS;
 use drydock_core::{
     APP_VERSION, ActivationRequestService, AddedAppState, AppCatalog, AppPayloadStore, AppUpdater,
-    CRACK_ARTIFACT_NAMES, CatalogApp, CloudProvider, CloudRedirect, CloudSettings, ConfigSource,
-    ConflictingSoftwareStatus, DenuvoWatchClient, DepotData, DownloadProgress, DownloadedDll,
-    EmuTemplateInput, FixEntry, FixStatus, GameLanguageOptions, LoadOutcome, OpenSteamTool, PeArch,
-    PortablePaths, PreparedUpdate, ProxyClient, QueueEffect, QueuedDownload, RepackApp, S3Credentials,
-    SearchQuery, Settings, SteamDiscovery, SteamManifest, SteamServiceState, SteamServiceStatus,
-    SteamStoreClient, SteamStoreDetails, SteamUriAction, StoreCapsule, StoreFeatured, UnlockSource,
-    VerifiedEntitlement, achievement_image_urls, add_app_files, apply_denuvo_fix, apply_language,
-    back_up_before_overwrite, clear_previous_token_files, cloud, detect_conflicting_software, detect_pe_arch,
-    discover_steam, download_queue, ensure_toolchain, executable_relative_to, fetch_achievement_images,
-    fetch_reframework_dll, fetch_windows_arch, fetch_windows_executables, fix_status,
-    install_depot_manifests, install_magicfiles, install_service, installed_app_luas, is_steam_running,
-    is_valid_steam_directory, launch_executables, load_cached_denuvo_appids, load_catalog_apps,
-    load_dll_files, load_manifests, missing_depot_manifests, open_link, open_steam_uri, overlay_sound_bytes,
-    read_denuvo_appids, read_language_options, read_own_unlock, release_update_blocks, remove_app_files,
-    remove_paths, resolve_game_root, restart_steam, run_and_capture_token_request, save_catalog_apps,
-    save_denuvo_appids, scan_crack_files, service_status, start_steam, stop_steam, toolchain_dlls,
-    uninstall_service,
+    CRACK_ARTIFACT_NAMES, CatalogApp, CloudProvider, CloudRedirect, CloudSettings, ConflictingSoftwareStatus,
+    DenuvoWatchClient, DepotData, DownloadProgress, DownloadedDll, EmuTemplateInput, FixEntry, FixStatus,
+    GameLanguageOptions, LoadOutcome, OpenSteamTool, PeArch, PortablePaths, PreparedUpdate, ProxyClient,
+    QueueEffect, QueuedDownload, RepackApp, S3Credentials, SearchQuery, Settings, SteamDiscovery,
+    SteamManifest, SteamServiceState, SteamServiceStatus, SteamStoreClient, SteamStoreDetails,
+    SteamUriAction, StoreCapsule, StoreFeatured, UnlockSource, VerifiedEntitlement, achievement_image_urls,
+    add_app_files, apply_denuvo_fix, apply_language, back_up_before_overwrite, clear_previous_token_files,
+    cloud, detect_conflicting_software, detect_pe_arch, discover_steam, download_queue, ensure_toolchain,
+    executable_relative_to, fetch_achievement_images, fetch_reframework_dll, fetch_windows_arch,
+    fetch_windows_executables, fix_status, install_depot_manifests, install_magicfiles, install_service,
+    installed_app_luas, is_steam_running, is_valid_steam_directory, launch_executables,
+    load_cached_denuvo_appids, load_catalog_apps, load_dll_files, load_manifests, missing_depot_manifests,
+    open_link, open_steam_uri, overlay_sound_bytes, read_denuvo_appids, read_language_options,
+    read_own_unlock, release_update_blocks, remove_app_files, remove_paths, resolve_game_root, restart_steam,
+    run_and_capture_token_request, save_catalog_apps, save_denuvo_appids, scan_crack_files, service_status,
+    start_steam, stop_steam, toolchain_dlls, uninstall_service,
 };
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke, Vec2};
 
-// Drydock palette — oxidised metals in a shipyard, not a storefront.
-//
-// The previous scheme was Steam's own: navy grounds with `#66C0F4`, which is literally Valve's brand
-// blue. It made the app read as a Steam product. This one is built from what a dry dock is made of —
-// brass fittings, copper gone to verdigris, iron gone to rust — over a cold slate ground. The
-// neutrals carry a faint warm bias so they sit under the brass instead of fighting it, and the three
-// semantic colours (verdigris / signal / rust) are separated by hue *and* lightness so state stays
-// readable without relying on colour alone.
-const BACKGROUND: Color32 = Color32::from_rgb(21, 24, 27); // #15181B cold slate
-const SURFACE: Color32 = Color32::from_rgb(30, 35, 40); // #1E2328
-const SURFACE_RAISED: Color32 = Color32::from_rgb(40, 47, 54); // #282F36
-const BORDER: Color32 = Color32::from_rgb(56, 66, 76); // #38424C
-const TEXT: Color32 = Color32::from_rgb(232, 230, 227); // #E8E6E3 warm off-white
-const MUTED: Color32 = Color32::from_rgb(142, 146, 153); // #8E9299
-/// Brand accent: brass fittings. Primary buttons, active nav, focus.
-const ACCENT: Color32 = Color32::from_rgb(223, 160, 74); // #DFA04A
-/// Lighter brass for secondary emphasis, spinners and inline highlights.
-const ACCENT_SOFT: Color32 = Color32::from_rgb(237, 190, 122); // #EDBE7A
-/// Darkened brass for badges and the gradient's far stop.
-const ACCENT_DEEP: Color32 = Color32::from_rgb(184, 127, 51); // #B87F33
-/// Oxidised copper — "installed", "ready", "play".
-const VERDIGRIS: Color32 = Color32::from_rgb(79, 168, 139); // #4FA88B
-/// Signal yellow for warnings. Lighter and more saturated than the brass accent so the two never
-/// read as the same thing, and it is always paired with a ⚠ glyph rather than carrying meaning alone.
-const AMBER: Color32 = Color32::from_rgb(242, 201, 76); // #F2C94C
-/// Rusted iron for destructive actions and errors.
-const DANGER: Color32 = Color32::from_rgb(199, 92, 92); // #C75C5C
-const SIDEBAR_FILL: Color32 = Color32::from_rgb(17, 20, 23); // #111417
+// The palette comes from the product being built (`brand.rs`); these names are what the rest of the
+// UI paints with, so a product's colours re-skin every screen without anything below changing. Keep
+// colour literals out of this file — a new shade belongs in `Palette`, or one product misses it.
+const BACKGROUND: Color32 = BRAND.palette.background;
+const SURFACE: Color32 = BRAND.palette.surface;
+const SURFACE_RAISED: Color32 = BRAND.palette.surface_raised;
+/// Inset areas: code blocks, log views, response fields.
+const SURFACE_SUNKEN: Color32 = BRAND.palette.surface_sunken;
+const BORDER: Color32 = BRAND.palette.border;
+/// The hairline between the navigation or status bar and the page.
+const EDGE: Color32 = BRAND.palette.edge;
+const TEXT: Color32 = BRAND.palette.text;
+const MUTED: Color32 = BRAND.palette.muted;
+/// The product colour. Primary buttons, active nav, focus.
+const ACCENT: Color32 = BRAND.palette.accent;
+/// Lighter accent for secondary emphasis, spinners and inline highlights.
+const ACCENT_SOFT: Color32 = BRAND.palette.accent_soft;
+/// Darker accent for badges, selections and the gradient's far stop.
+const ACCENT_DEEP: Color32 = BRAND.palette.accent_deep;
+/// "Installed", "ready", "play" (Drydock's oxidised copper, hence the name).
+const VERDIGRIS: Color32 = BRAND.palette.success;
+const VERDIGRIS_HOVER: Color32 = BRAND.palette.success_hover;
+/// Text on a success-coloured button.
+const ON_VERDIGRIS: Color32 = BRAND.palette.on_success;
+/// Warnings. Always paired with a ⚠ glyph rather than carrying meaning alone.
+const AMBER: Color32 = BRAND.palette.warning;
+/// Destructive actions and errors.
+const DANGER: Color32 = BRAND.palette.danger;
+/// The navigation and status bars.
+const SIDEBAR_FILL: Color32 = BRAND.palette.chrome;
+/// What dark scrims over artwork are made of; each one picks its own opacity.
+const SCRIM: Color32 = BRAND.palette.scrim;
+/// Text-field backgrounds.
+const INPUT_FILL: Color32 = BRAND.palette.input;
+/// The second, slower glow drifting behind the pages (the first is the accent).
+const AMBIENT: Color32 = BRAND.palette.ambient;
+
+/// A text shown to people that names the product: `branded!("Installed in {product}")`.
+///
+/// Built once per call site and kept, so it can go anywhere a `&'static str` goes — tuples of
+/// labels, hover texts, `.into()` for a status line — without a `format!` on every frame. Texts
+/// with other runtime values use `format!(…, product = BRAND.name)` instead.
+macro_rules! branded {
+    ($template:literal) => {{
+        static TEXT: std::sync::LazyLock<String> =
+            std::sync::LazyLock::new(|| format!($template, product = crate::brand::BRAND.name));
+        TEXT.as_str()
+    }};
+    // For the all-caps labels (buttons, eyebrows): `branded!(upper "ADD GAME TO {product}")`.
+    (upper $template:literal) => {{
+        static TEXT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            format!($template, product = crate::brand::BRAND.name.to_uppercase())
+        });
+        TEXT.as_str()
+    }};
+}
+
+/// A text from a `const` table with `{product}` where the product's name goes — for the tables
+/// `branded!` cannot reach because they are evaluated at compile time. Texts without the
+/// placeholder pass through without a copy.
+fn with_product(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.contains("{product}") {
+        std::borrow::Cow::Owned(text.replace("{product}", BRAND.name))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
+/// A scrim over artwork at the given opacity.
+fn scrim(alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(SCRIM.r(), SCRIM.g(), SCRIM.b(), alpha)
+}
 /// How long a fetched catalog is kept before the next start-up asks again. The proxy rebuilds its
 /// gamelist hourly, so anything longer means new games sit in the store for a day before anyone
 /// sees them. Asking costs almost nothing: the request carries the last `ETag`, and an unchanged
@@ -72,6 +116,27 @@ const CATALOG_REFRESH_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 const STEAM_HEADER_ASPECT: f32 = 0.467;
 /// Height of the top navigation bar and the bottom status strip that frame the storefront.
 const TOP_NAV_HEIGHT: f32 = 52.0;
+/// Width of the side navigation column (products with `Navigation::Side`).
+const SIDE_NAV_WIDTH: f32 = 228.0;
+/// The logo's diameter at the head of the side navigation.
+const SIDE_NAV_LOGO: f32 = 132.0;
+
+/// The main destinations, in the order both navigation layouts show them.
+const PRIMARY_DESTINATIONS: [(Page, &str); 5] = [
+    (Page::Home, "STORE"),
+    (Page::Library, "LIBRARY"),
+    (Page::Activation, "ACTIVATION"),
+    (Page::Tools, "TOOLS"),
+    (Page::Cloud, "CLOUD"),
+];
+
+/// The secondary pages, kept apart from the main ones (right of the search in the top bar, at the
+/// foot of the side column), in reading order.
+const SECONDARY_DESTINATIONS: [(Page, &str); 3] = [
+    (Page::Guide, "HELP"),
+    (Page::Updates, "UPDATES"),
+    (Page::Settings, "SETTINGS"),
+];
 const STATUS_BAR_HEIGHT: f32 = 30.0;
 const MIN_CONTENT_GUTTER: f32 = 24.0;
 /// Every tab's content is capped to this single width and centred, so all pages share one aligned
@@ -171,6 +236,18 @@ enum Page {
     Downloads,
 }
 
+impl Page {
+    /// Whether this product has the page at all (see `brand.rs`). The navigation leaves out what it
+    /// does not offer, and the page switch falls back to the Store should one be reached anyway.
+    fn offered(self) -> bool {
+        match self {
+            Self::Tools => BRAND.features.tools,
+            Self::Cloud => BRAND.features.cloud,
+            _ => true,
+        }
+    }
+}
+
 /// The Store's sub-tabs, mirroring Steam's own storefront navigation. `DenuvoWatch` is Drydock-only:
 /// the set of games that actually need activation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -183,6 +260,11 @@ enum StoreTab {
 }
 
 impl StoreTab {
+    /// Whether this product shows the tab at all (see `brand.rs`).
+    fn offered(self) -> bool {
+        self != Self::Repacks || BRAND.features.repacks
+    }
+
     const ALL: [(Self, &'static str); 4] = [
         (Self::Featured, "Featured"),
         (Self::NewReleases, "New Releases"),
@@ -612,9 +694,10 @@ impl DrydockApp {
         // otherwise the next save would wipe `added_apps` / `installed_games` / `launch_paths`.
         let (settings, load_outcome) = Settings::load_recovering(&paths.settings_file());
         let settings_read_only = !load_outcome.save_is_safe();
-        // Push the self-hosting overrides into the config layer before anything builds a
-        // `ProxyClient`, so a user-supplied proxy address is in effect from the very first request.
-        settings.apply_config_overrides();
+        // Proxy, signing secret and update channel come from the build (or, for development, the
+        // `DRYDOCK_*` environment variables). The settings file still carries the old self-hosting
+        // fields for compatibility, but they are no longer applied: with no page left to see or
+        // clear them, a stale entry would silently point the app at the wrong proxy for good.
         let (mut status, mut status_error) = match &load_outcome {
             LoadOutcome::Loaded => (String::from("Ready"), false),
             LoadOutcome::RecoveredFromBackup { reason } => {
@@ -966,7 +1049,8 @@ impl DrydockApp {
     /// Loads the GitHub "Denuvo" fixes in the background (the DepotBox "online fix" API was removed —
     /// Drydock now only offers the build-locked Denuvo fixes from the MFB repo).
     fn start_fixes_refresh(&mut self) {
-        if self.fixes_receiver.is_some() {
+        // A product that offers neither the Denuvo fix nor the cracked version never needs the list.
+        if self.fixes_receiver.is_some() || !BRAND.features.uses_fix_list() {
             return;
         }
         let (sender, receiver) = mpsc::channel();
@@ -1017,7 +1101,7 @@ impl DrydockApp {
     }
 
     fn start_repacks_refresh(&mut self) {
-        if self.repacks_receiver.is_some() {
+        if self.repacks_receiver.is_some() || !BRAND.features.repacks {
             return;
         }
         let (sender, receiver) = mpsc::channel();
@@ -1135,7 +1219,7 @@ impl DrydockApp {
                     .map_err(|error| error.to_string())?;
                 // Reassemble the (possibly split) zip parts, in order, into a temp file so a
                 // multi-hundred-MB fix never has to be held whole in memory.
-                let temp_dir = std::env::temp_dir().join("Drydock").join("fixes");
+                let temp_dir = std::env::temp_dir().join(BRAND.name).join("fixes");
                 std::fs::create_dir_all(&temp_dir).map_err(|error| error.to_string())?;
                 let zip_path = temp_dir.join(format!("{app_id}-{}.zip", std::process::id()));
                 {
@@ -1507,8 +1591,9 @@ impl DrydockApp {
             self.status_error = true;
         } else if !release.released.is_empty() && !self.status_error {
             self.status = format!(
-                "Steam can update {} game(s) again: the update block older Drydock versions set was lifted.",
-                release.released.len()
+                "Steam can update {} game(s) again: the update block older {product} versions set was lifted.",
+                release.released.len(),
+                product = BRAND.name
             );
         }
     }
@@ -1528,7 +1613,7 @@ impl DrydockApp {
             let _ = fs::create_dir_all(parent);
         }
         let _ = fs::write(marker, marker_value);
-        self.status = "Checking for a verified Drydock update…".into();
+        self.status = branded!("Checking for a verified {product} update…").into();
         self.status_error = false;
         self.busy_label = Some("Checking the release channel…".into());
         let (sender, receiver) = mpsc::channel();
@@ -1552,7 +1637,8 @@ impl DrydockApp {
                 match result {
                     Ok(Some(update)) => match AppUpdater::launch(&update) {
                         Ok(()) => {
-                            self.status = format!("Installing Drydock {}…", update.version);
+                            self.status =
+                                format!("Installing {product} {}…", update.version, product = BRAND.name);
                             self.status_error = false;
                             self.exit_for_update = true;
                         }
@@ -1562,7 +1648,7 @@ impl DrydockApp {
                         }
                     },
                     Ok(None) => {
-                        self.status = "Drydock is up to date".into();
+                        self.status = branded!("{product} is up to date").into();
                         self.status_error = false;
                     }
                     Err(error) => {
@@ -3022,9 +3108,129 @@ impl DrydockApp {
         }
     }
 
-    /// The top navigation bar (Steam-store style): the Drydock wordmark, the primary destinations as
-    /// horizontal links, a live game search on the right, and a small overflow group for the
-    /// secondary pages (Guide / Updates / Settings).
+    /// The main navigation, in the layout the product uses (`brand.rs`). Both layouts offer the same
+    /// destinations from [`PRIMARY_DESTINATIONS`] / [`SECONDARY_DESTINATIONS`] and the same search,
+    /// so a page added there appears in every product.
+    fn navigation(&mut self, root: &mut egui::Ui) {
+        match BRAND.navigation {
+            Navigation::Top => self.top_nav(root),
+            Navigation::Side => self.side_nav(root),
+        }
+    }
+
+    /// The game search that sits in the navigation: typing jumps to the Store's results.
+    fn nav_search(&mut self, ui: &mut egui::Ui, width: f32) {
+        // A rounded search pill; typing anything jumps to the Store's search results.
+        let before = self.search.clone();
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut self.search)
+                .hint_text("Search…")
+                .desired_width(width)
+                .margin(egui::Margin {
+                    left: 32,
+                    right: 12,
+                    top: 7,
+                    bottom: 7,
+                }),
+        );
+        // A magnifying-glass icon painted at the pill's left (a font glyph rendered as tofu on the
+        // bundled font, so it's drawn as a circle + handle instead).
+        let center = egui::pos2(response.rect.left() + 17.0, response.rect.center().y);
+        let radius = 5.0;
+        let painter = ui.painter();
+        painter.circle_stroke(center, radius, Stroke::new(1.6, MUTED));
+        let d = radius * std::f32::consts::FRAC_1_SQRT_2;
+        painter.line_segment(
+            [
+                egui::pos2(center.x + d, center.y + d),
+                egui::pos2(center.x + d + 3.5, center.y + d + 3.5),
+            ],
+            Stroke::new(1.6, MUTED),
+        );
+        if response.changed() && self.search != before && !self.search.trim().is_empty() {
+            self.page = Page::Home;
+        }
+    }
+
+    /// The side navigation: the product's logo at the head, the search, the primary destinations as
+    /// full-width rows, and the secondary pages pinned to the foot of the column.
+    fn side_nav(&mut self, root: &mut egui::Ui) {
+        egui::Panel::left("side_nav")
+            .exact_size(SIDE_NAV_WIDTH)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(SIDEBAR_FILL)
+                    .inner_margin(egui::Margin {
+                        left: 14,
+                        right: 14,
+                        top: 20,
+                        bottom: 14,
+                    })
+                    .stroke(Stroke::new(1.0, EDGE)),
+            )
+            .show(root, |ui| {
+                ui.vertical_centered(|ui| {
+                    // A soft glow of the accent behind the logo, so it sits in the column rather
+                    // than on it.
+                    let (rect, response) = ui.allocate_exact_size(Vec2::splat(SIDE_NAV_LOGO), Sense::click());
+                    let glow = Color32::from_rgba_unmultiplied(ACCENT.r(), ACCENT.g(), ACCENT.b(), 28);
+                    ui.painter()
+                        .circle_filled(rect.center(), SIDE_NAV_LOGO * 0.5 + 6.0, glow);
+                    egui::Image::new(brand::logo())
+                        .corner_radius((SIDE_NAV_LOGO / 2.0) as u8)
+                        .paint_at(ui, rect);
+                    if response.clicked() {
+                        self.page = Page::Home;
+                    }
+                    if response.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if !BRAND.logo_is_wordmark {
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(BRAND.name).size(18.0).strong().color(TEXT));
+                        ui.label(RichText::new(BRAND.tagline).size(10.5).color(MUTED));
+                    }
+                });
+                ui.add_space(18.0);
+                let width = ui.available_width();
+                self.nav_search(ui, width);
+                ui.add_space(16.0);
+                // Rows sit close together, like a list — the default widget spacing reads as gaps.
+                ui.spacing_mut().item_spacing.y = 4.0;
+                for (page, label) in PRIMARY_DESTINATIONS
+                    .into_iter()
+                    .filter(|(page, _)| page.offered())
+                {
+                    if side_nav_entry(ui, label, self.page == page).clicked() {
+                        self.page = page;
+                    }
+                }
+                // The secondary pages at the foot of the column, in reading order top to bottom.
+                ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+                    for (page, label) in SECONDARY_DESTINATIONS.iter().rev() {
+                        if side_nav_entry(ui, label, self.page == *page).clicked() {
+                            self.page = *page;
+                        }
+                    }
+                    ui.add_space(6.0);
+                    let rule = ui.available_rect_before_wrap();
+                    ui.painter().line_segment(
+                        [
+                            egui::pos2(rule.left(), rule.bottom()),
+                            egui::pos2(rule.right(), rule.bottom()),
+                        ],
+                        Stroke::new(1.0, BORDER),
+                    );
+                    ui.add_space(8.0);
+                });
+            });
+    }
+
+    /// The top navigation bar (Steam-store style): the product's mark and name, the primary
+    /// destinations as horizontal links, a live game search on the right, and a small overflow group
+    /// for the secondary pages (Guide / Updates / Settings).
     fn top_nav(&mut self, root: &mut egui::Ui) {
         egui::Panel::top("top_nav")
             .exact_size(TOP_NAV_HEIGHT)
@@ -3034,19 +3240,19 @@ impl DrydockApp {
                 egui::Frame::new()
                     .fill(SIDEBAR_FILL)
                     .inner_margin(egui::Margin::symmetric(20, 0))
-                    .stroke(Stroke::new(1.0, Color32::from_rgb(13, 15, 17))),
+                    .stroke(Stroke::new(1.0, EDGE)),
             )
             .show(root, |ui| {
                 ui.horizontal_centered(|ui| {
-                    // Brand mark: the avatar disc + the TIDE(S) wordmark, S in Steam blue.
+                    // The product's mark on its disc, then its name.
                     let (rect, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
                     ui.painter().circle_filled(rect.center(), 13.0, ACCENT_DEEP);
-                    egui::Image::new(egui::include_image!("../../../assets/app-icon.png"))
+                    egui::Image::new(brand::logo())
                         .corner_radius(13)
                         .paint_at(ui, rect);
                     ui.add_space(9.0);
                     ui.label(
-                        RichText::new("Drydock")
+                        RichText::new(BRAND.name)
                             .size(16.0)
                             .strong()
                             .color(TEXT)
@@ -3055,62 +3261,27 @@ impl DrydockApp {
 
                     ui.add_space(22.0);
                     // Primary destinations as underlined link tabs.
-                    for (page, label) in [
-                        (Page::Home, "STORE"),
-                        (Page::Library, "LIBRARY"),
-                        (Page::Activation, "ACTIVATION"),
-                        (Page::Tools, "TOOLS"),
-                        (Page::Cloud, "CLOUD"),
-                    ] {
+                    for (page, label) in PRIMARY_DESTINATIONS
+                        .into_iter()
+                        .filter(|(page, _)| page.offered())
+                    {
                         if nav_link(ui, label, self.page == page).clicked() {
                             self.page = page;
                         }
                         ui.add_space(4.0);
                     }
 
-                    // Right side: search field, then the secondary-page overflow group.
+                    // Right side: search field, then the secondary-page overflow group. The layout
+                    // runs right to left, so the group is walked backwards to read left to right.
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        for (page, label) in [
-                            (Page::Settings, "SETTINGS"),
-                            (Page::Updates, "UPDATES"),
-                            (Page::Guide, "HELP"),
-                        ] {
-                            if nav_link(ui, label, self.page == page).clicked() {
-                                self.page = page;
+                        for (page, label) in SECONDARY_DESTINATIONS.iter().rev() {
+                            if nav_link(ui, label, self.page == *page).clicked() {
+                                self.page = *page;
                             }
                             ui.add_space(2.0);
                         }
                         ui.add_space(8.0);
-                        // A rounded search pill; typing anything jumps to the Store's search results.
-                        let before = self.search.clone();
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut self.search)
-                                .hint_text("Search…")
-                                .desired_width(190.0)
-                                .margin(egui::Margin {
-                                    left: 32,
-                                    right: 12,
-                                    top: 7,
-                                    bottom: 7,
-                                }),
-                        );
-                        // A magnifying-glass icon painted at the pill's left (a font glyph rendered as
-                        // tofu on the bundled font, so it's drawn as a circle + handle instead).
-                        let center = egui::pos2(response.rect.left() + 17.0, response.rect.center().y);
-                        let radius = 5.0;
-                        let painter = ui.painter();
-                        painter.circle_stroke(center, radius, Stroke::new(1.6, MUTED));
-                        let d = radius * std::f32::consts::FRAC_1_SQRT_2;
-                        painter.line_segment(
-                            [
-                                egui::pos2(center.x + d, center.y + d),
-                                egui::pos2(center.x + d + 3.5, center.y + d + 3.5),
-                            ],
-                            Stroke::new(1.6, MUTED),
-                        );
-                        if response.changed() && self.search != before && !self.search.trim().is_empty() {
-                            self.page = Page::Home;
-                        }
+                        self.nav_search(ui, 190.0);
                     });
                 });
             });
@@ -3291,7 +3462,7 @@ impl DrydockApp {
                     sw: 12,
                     se: 0,
                 },
-                Color32::from_rgba_unmultiplied(8, 12, 18, 150),
+                scrim(150),
             );
             painter.text(
                 egui::pos2(rect.left() + 22.0, rect.bottom() - 19.0),
@@ -3523,7 +3694,7 @@ impl DrydockApp {
                 egui::Frame::new()
                     .fill(SIDEBAR_FILL)
                     .inner_margin(egui::Margin::symmetric(18, 0))
-                    .stroke(Stroke::new(1.0, Color32::from_rgb(13, 15, 17))),
+                    .stroke(Stroke::new(1.0, EDGE)),
             )
             .show(root, |ui| {
                 let bar = ui.max_rect();
@@ -3690,7 +3861,7 @@ impl DrydockApp {
         let mut selected = self.store_tab;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            for (tab, label) in StoreTab::ALL {
+            for (tab, label) in StoreTab::ALL.into_iter().filter(|(tab, _)| tab.offered()) {
                 if store_subtab(ui, label, selected == tab).clicked() {
                     selected = tab;
                 }
@@ -3772,7 +3943,10 @@ impl DrydockApp {
         let mut items = available.into_iter();
         let Some(hero) = items.next() else {
             ui.label(
-                RichText::new("None of Steam's top sellers are available in Drydock right now.").color(MUTED),
+                RichText::new(branded!(
+                    "None of Steam's top sellers are available in {product} right now."
+                ))
+                .color(MUTED),
             );
             return None;
         };
@@ -3815,8 +3989,10 @@ impl DrydockApp {
             .collect();
         if available.is_empty() {
             ui.label(
-                RichText::new("None of this category's games are available in Drydock right now.")
-                    .color(MUTED),
+                RichText::new(branded!(
+                    "None of this category's games are available in {product} right now."
+                ))
+                .color(MUTED),
             );
             return None;
         }
@@ -3851,8 +4027,9 @@ impl DrydockApp {
         }
         ui.label(
             RichText::new(format!(
-                "{} games currently ship with Denuvo — these are the titles Drydock activates.",
-                group_thousands(self.denuvo_appids.len())
+                "{} games currently ship with Denuvo — these are the titles {product} activates.",
+                group_thousands(self.denuvo_appids.len()),
+                product = BRAND.name
             ))
             .size(12.5)
             .color(MUTED),
@@ -4076,9 +4253,11 @@ impl DrydockApp {
         page_heading(ui, "Library");
         ui.add_space(4.0);
         ui.add(egui::Label::new(
-            RichText::new("Your installed and activated games — launch any of them straight from Drydock.")
-                .size(12.5)
-                .color(MUTED),
+            RichText::new(branded!(
+                "Your installed and activated games — launch any of them straight from {product}."
+            ))
+            .size(12.5)
+            .color(MUTED),
         ));
         ui.add_space(16.0);
 
@@ -4093,9 +4272,9 @@ impl DrydockApp {
                 );
                 ui.add_space(4.0);
                 ui.label(
-                    RichText::new(
-                        "Install a game through Steam or activate one in Drydock and it will show up here.",
-                    )
+                    RichText::new(branded!(
+                        "Install a game through Steam or activate one in {product} and it will show up here."
+                    ))
                     .size(11.5)
                     .color(MUTED),
                 );
@@ -4104,7 +4283,10 @@ impl DrydockApp {
                     if ui.add(primary_button("BROWSE THE STORE")).clicked() {
                         self.page = Page::Home;
                     }
-                    if ui.add(ghost_button("＋  ADD GAME TO DRYDOCK")).clicked() {
+                    if ui
+                        .add(ghost_button(branded!(upper "＋  ADD GAME TO {product}")))
+                        .clicked()
+                    {
                         add_game_requested = true;
                     }
                     if ui
@@ -4160,7 +4342,10 @@ impl DrydockApp {
                             ui.set_min_height(body_h - 14.0);
                             let add_w = ui.available_width();
                             if ui
-                                .add(ghost_button("＋  ADD GAME TO DRYDOCK").min_size(Vec2::new(add_w, 34.0)))
+                                .add(
+                                    ghost_button(branded!(upper "＋  ADD GAME TO {product}"))
+                                        .min_size(Vec2::new(add_w, 34.0)),
+                                )
                                 .clicked()
                             {
                                 add_game_requested = true;
@@ -4185,7 +4370,10 @@ impl DrydockApp {
                                     // Steam-style collapsible groups, all open by default.
                                     for (title, source) in [
                                         ("Installed in Steam", LibrarySource::SteamInstalled),
-                                        ("Installed in Drydock", LibrarySource::DrydockInstalled),
+                                        (
+                                            branded!("Installed in {product}"),
+                                            LibrarySource::DrydockInstalled,
+                                        ),
                                         ("Available", LibrarySource::Available),
                                     ] {
                                         if let Some(id) = library_rail_group(
@@ -4752,7 +4940,11 @@ impl DrydockApp {
                                 outcome.name
                             )
                         } else {
-                            format!("\"{}\" was added to your Drydock library", outcome.name)
+                            format!(
+                                "\"{}\" was added to your {product} library",
+                                outcome.name,
+                                product = BRAND.name
+                            )
                         };
                         self.add_game_folder = None;
                         self.add_game_search.clear();
@@ -4848,10 +5040,10 @@ impl DrydockApp {
             return;
         };
         ui.add_space(20.0);
-        page_heading(ui, "Add a game to Drydock");
+        page_heading(ui, branded!("Add a game to {product}"));
         ui.add_space(4.0);
         ui.add(egui::Label::new(
-            RichText::new("Point Drydock at a game you already have on disk — it detects the folder and the launch .exe so you can play it from here.")
+            RichText::new(branded!("Point {product} at a game you already have on disk — it detects the folder and the launch .exe so you can play it from here."))
                 .size(12.5)
                 .color(MUTED),
         ));
@@ -4918,39 +5110,48 @@ impl DrydockApp {
     /// The Home filter bar: a Repacks dropdown (Any / All repacks / each repacker) and a Fixes
     /// dropdown (Any / Online / Denuvo), styled to match the cards, plus a Clear link when active.
     fn home_filter_row(&mut self, ui: &mut egui::Ui) {
+        let features = BRAND.features;
+        // Both filters narrow by an optional feature; a product without either has no filter row.
+        if !features.repacks && !features.denuvo_fix {
+            return;
+        }
         let active = self.repack_filter != RepackFilter::Any || self.fix_filter != FixFilter::Any;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
 
-            filter_dropdown(
-                ui,
-                "home_repack_filter",
-                "REPACKS",
-                &self.repack_filter.label(),
-                168.0,
-                |ui| {
-                    ui.selectable_value(&mut self.repack_filter, RepackFilter::Any, "Any");
-                    ui.selectable_value(&mut self.repack_filter, RepackFilter::AnyRepack, "All repacks");
-                    for name in &self.available_repackers {
-                        let selected = self.repack_filter == RepackFilter::Repacker(name.clone());
-                        if ui.selectable_label(selected, name).clicked() {
-                            self.repack_filter = RepackFilter::Repacker(name.clone());
+            if features.repacks {
+                filter_dropdown(
+                    ui,
+                    "home_repack_filter",
+                    "REPACKS",
+                    &self.repack_filter.label(),
+                    168.0,
+                    |ui| {
+                        ui.selectable_value(&mut self.repack_filter, RepackFilter::Any, "Any");
+                        ui.selectable_value(&mut self.repack_filter, RepackFilter::AnyRepack, "All repacks");
+                        for name in &self.available_repackers {
+                            let selected = self.repack_filter == RepackFilter::Repacker(name.clone());
+                            if ui.selectable_label(selected, name).clicked() {
+                                self.repack_filter = RepackFilter::Repacker(name.clone());
+                            }
                         }
-                    }
-                },
-            );
+                    },
+                );
+            }
 
-            filter_dropdown(
-                ui,
-                "home_fix_filter",
-                "FIXES",
-                self.fix_filter.label(),
-                148.0,
-                |ui| {
-                    ui.selectable_value(&mut self.fix_filter, FixFilter::Any, "Any");
-                    ui.selectable_value(&mut self.fix_filter, FixFilter::Denuvo, "Denuvo");
-                },
-            );
+            if features.denuvo_fix {
+                filter_dropdown(
+                    ui,
+                    "home_fix_filter",
+                    "FIXES",
+                    self.fix_filter.label(),
+                    148.0,
+                    |ui| {
+                        ui.selectable_value(&mut self.fix_filter, FixFilter::Any, "Any");
+                        ui.selectable_value(&mut self.fix_filter, FixFilter::Denuvo, "Denuvo");
+                    },
+                );
+            }
 
             if active {
                 // Align the Clear link with the dropdown boxes (a label sits above those).
@@ -4974,6 +5175,9 @@ impl DrydockApp {
     /// Builds the Apply-Fix panel for the details page when the app has a build-locked Denuvo fix
     /// (from the GitHub MFB repo). The DepotBox "online fix" API path has been removed.
     fn details_fix_panel(&self, app_id: u32) -> Option<FixPanelState> {
+        if !BRAND.features.uses_fix_list() {
+            return None;
+        }
         let fix = self.fix_for(app_id)?;
         let denuvo = fix.denuvo.as_ref()?;
         // The Denuvo fix's applied status needs the Steam folder to inspect the plug-in Lua.
@@ -4991,6 +5195,9 @@ impl DrydockApp {
 
     /// Builds the repack Download-button panel for the details page when the app has repack sources.
     fn details_repack_panel(&self, app_id: Option<u32>) -> Option<RepackPanelState> {
+        if !BRAND.features.repacks {
+            return None;
+        }
         let repack = self.repack_for(app_id?)?;
         Some(RepackPanelState {
             repackers: repack
@@ -5304,7 +5511,7 @@ impl DrydockApp {
                 let short_request = is_short_activation_code(&self.activation_request_code);
                 ui.add_space(18.0);
                 egui::Frame::new()
-                    .fill(Color32::from_rgb(18, 21, 24))
+                    .fill(SURFACE_SUNKEN)
                     .corner_radius(12)
                     .inner_margin(18)
                     .show(ui, |ui| {
@@ -5459,7 +5666,7 @@ impl DrydockApp {
             if !self.ubisoft_activation_code.is_empty() {
                 ui.add_space(18.0);
                 egui::Frame::new()
-                    .fill(Color32::from_rgb(18, 21, 24))
+                    .fill(SURFACE_SUNKEN)
                     .corner_radius(12)
                     .inner_margin(18)
                     .show(ui, |ui| {
@@ -5933,7 +6140,7 @@ impl DrydockApp {
             panel(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
-                        section_label(ui, "DRYDOCK AUTO UPDATE");
+                        section_label(ui, branded!(upper "{product} AUTO UPDATE"));
                         ui.add_space(4.0);
                         let channel = if AppUpdater::configured_repository().is_some() {
                             "Verified downloads on launch"
@@ -5952,7 +6159,9 @@ impl DrydockApp {
                                 AppUpdater::can_self_update() && self.update_receiver.is_none(),
                                 ghost_button("CHECK NOW"),
                             )
-                            .on_hover_text("Check the release channel for a verified Drydock update")
+                            .on_hover_text(branded!(
+                                "Check the release channel for a verified {product} update"
+                            ))
                             .clicked()
                         {
                             self.start_update_check(false);
@@ -5964,9 +6173,9 @@ impl DrydockApp {
                 match self.persist_settings() {
                     Ok(()) => {
                         self.status = if self.settings.auto_update_drydock {
-                            "Drydock auto update enabled".into()
+                            branded!("{product} auto update enabled").into()
                         } else {
-                            "Drydock auto update disabled".into()
+                            branded!("{product} auto update disabled").into()
                         };
                         self.status_error = false;
                     }
@@ -6035,7 +6244,7 @@ impl DrydockApp {
                 ui.add_sized(
                     [ui.available_width(), 42.0],
                     egui::TextEdit::singleline(&mut self.games_directory_draft)
-                        .hint_text("Install folder for games downloaded in Drydock")
+                        .hint_text(branded!("Install folder for games downloaded in {product}"))
                         .margin(egui::Margin::symmetric(12, 10)),
                 );
                 let draft = self.games_directory_draft.trim().to_owned();
@@ -6323,9 +6532,6 @@ impl DrydockApp {
             }
             });
 
-            ui.add_space(16.0);
-            self.self_hosting_panel(ui);
-
             // Only shown when the settings file on disk could not be parsed at startup. Until the
             // user decides, every save is blocked so their real library is not replaced by defaults.
             if self.settings_read_only {
@@ -6357,98 +6563,6 @@ impl DrydockApp {
         });
     }
 
-    /// Settings panel for pointing this build at a self-hosted proxy or a fork's release channel.
-    ///
-    /// Drydock's proxy is open source and meant to be run by anyone, so the address, the shared
-    /// secret and the update repository must be changeable **without rebuilding**. Each field is
-    /// blank by default, which means "use whatever this build was compiled with"; an environment
-    /// variable of the same name still wins over anything entered here (see `drydock_core::config`).
-    fn self_hosting_panel(&mut self, ui: &mut egui::Ui) {
-        panel(ui, |ui| {
-            section_label(ui, "PROXY / SELF-HOSTING");
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(
-                    "Leave these empty to use the values this build ships with. Fill them in to \
-                     point Drydock at your own proxy — see proxy/README.md for running one.",
-                )
-                .size(11.0)
-                .color(MUTED),
-            );
-            ui.add_space(10.0);
-
-            let mut changed = false;
-            let mut field = |ui: &mut egui::Ui, label: &str, hint: &str, value: &mut String, secret: bool| {
-                ui.label(RichText::new(label).size(9.5).strong().color(ACCENT));
-                ui.add_space(3.0);
-                let edit = egui::TextEdit::singleline(value)
-                    .hint_text(hint)
-                    .password(secret)
-                    .desired_width(f32::INFINITY);
-                if ui.add(edit).changed() {
-                    changed = true;
-                }
-                ui.add_space(10.0);
-            };
-            field(
-                ui,
-                "PROXY BASE URL",
-                "https://proxy.example  (origin only, no path)",
-                &mut self.settings.proxy_base_url,
-                false,
-            );
-            field(
-                ui,
-                "PROXY HMAC SECRET",
-                "must match one of the proxy's DRYDOCK_HMAC_SECRET values",
-                &mut self.settings.proxy_hmac_secret,
-                true,
-            );
-            field(
-                ui,
-                "UPDATE REPOSITORY",
-                "owner/repo  (leave empty unless you run your own release channel)",
-                &mut self.settings.update_repository,
-                false,
-            );
-
-            if changed {
-                // Apply immediately so the next request uses the new address — no restart needed.
-                self.settings.apply_config_overrides();
-                let _ = self.persist_settings();
-            }
-
-            // Show what actually resolved, so a typo or a stray environment variable is visible
-            // rather than presenting as "the proxy is down".
-            ui.add_space(2.0);
-            ui.separator();
-            ui.add_space(8.0);
-            ui.label(RichText::new("RESOLVED").size(9.5).strong().color(ACCENT));
-            ui.add_space(4.0);
-            for entry in drydock_core::describe_config() {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("{}:", entry.name)).size(10.5).color(MUTED));
-                    ui.label(RichText::new(&entry.value).size(10.5).color(TEXT));
-                    ui.label(
-                        RichText::new(format!("({})", entry.source.label()))
-                            .size(10.0)
-                            .color(if entry.source == ConfigSource::Unset {
-                                DANGER
-                            } else {
-                                MUTED
-                            }),
-                    );
-                });
-            }
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new("Run `Drydock --config` for the same report on the command line.")
-                    .size(10.0)
-                    .color(MUTED),
-            );
-        });
-    }
-
     /// Deletes the on-disk cache and drops the in-memory caches derived from it so they refill.
     fn clear_drydock_cache(&mut self) {
         match self.paths.clear_cache() {
@@ -6477,7 +6591,7 @@ impl DrydockApp {
 
         // Segmented switch between the two walkthroughs.
         egui::Frame::new()
-            .fill(Color32::from_rgb(18, 21, 24))
+            .fill(SURFACE_SUNKEN)
             .stroke(Stroke::new(1.0, BORDER))
             .corner_radius(11)
             .inner_margin(4)
@@ -6487,7 +6601,9 @@ impl DrydockApp {
                     if guide_tab(ui, "ACTIVATION", self.guide_flow == GuideFlow::Activation).clicked() {
                         self.guide_flow = GuideFlow::Activation;
                     }
-                    if guide_tab(ui, "FIXES", self.guide_flow == GuideFlow::Fixes).clicked() {
+                    if BRAND.features.denuvo_fix
+                        && guide_tab(ui, "FIXES", self.guide_flow == GuideFlow::Fixes).clicked()
+                    {
                         self.guide_flow = GuideFlow::Fixes;
                     }
                 });
@@ -6504,7 +6620,7 @@ impl DrydockApp {
                 &[
                     (
                         "Set your Steam folder",
-                        "Open Settings, point Drydock at your Steam folder, and it reads your installed games.",
+                        "Open Settings, point {product} at your Steam folder, and it reads your installed games.",
                     ),
                     (
                         "Install the Steam Service",
@@ -6540,7 +6656,7 @@ impl DrydockApp {
                 &[
                     (
                         "Automatic verification",
-                        "Drydock checks the signature, device, machine, App ID, lifetime, and payload integrity.",
+                        "{product} checks the signature, device, machine, App ID, lifetime, and payload integrity.",
                     ),
                     (
                         "Keep updates paused",
@@ -6556,7 +6672,7 @@ impl DrydockApp {
                 &[
                     (
                         "Set your Steam folder",
-                        "Open Settings and point Drydock at your Steam folder so it can see your installed games.",
+                        "Open Settings and point {product} at your Steam folder so it can see your installed games.",
                     ),
                     (
                         "Install the Steam Service",
@@ -6578,11 +6694,11 @@ impl DrydockApp {
                     ),
                     (
                         "Select Apply Fix",
-                        "Drydock installs the matching unlock and downloads the fix files over your game install.",
+                        "{product} installs the matching unlock and downloads the fix files over your game install.",
                     ),
                     (
                         "Let it finish",
-                        "Large fixes take a while to download and unpack — keep Drydock open until it reports success.",
+                        "Large fixes take a while to download and unpack — keep {product} open until it reports success.",
                     ),
                 ],
             ),
@@ -7019,8 +7135,7 @@ impl DrydockApp {
             .fixed_pos(screen.min)
             .show(context, |ui| {
                 let (rect, _) = ui.allocate_exact_size(screen.size(), Sense::click_and_drag());
-                ui.painter()
-                    .rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(4, 5, 13, 220));
+                ui.painter().rect_filled(rect, 0.0, BRAND.palette.overlay);
                 ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                     ui.centered_and_justified(|ui| {
                         ui.vertical_centered(|ui| {
@@ -7075,7 +7190,7 @@ impl DrydockApp {
                 self.page = Page::Home;
                 self.store_tab = StoreTab::DenuvoWatch;
             }
-            "repacks" => {
+            "repacks" if BRAND.features.repacks => {
                 self.page = Page::Home;
                 self.store_tab = StoreTab::Repacks;
             }
@@ -7084,8 +7199,8 @@ impl DrydockApp {
                 self.add_game_folder = Some(PathBuf::from("D:\\Games\\Onimusha Way of the Sword"));
             }
             "library" => self.page = Page::Library,
-            "tools" => self.page = Page::Tools,
-            "cloud" => self.page = Page::Cloud,
+            "tools" if BRAND.features.tools => self.page = Page::Tools,
+            "cloud" if BRAND.features.cloud => self.page = Page::Cloud,
             "activation" => self.page = Page::Activation,
             "updates" => self.page = Page::Updates,
             "settings" => self.page = Page::Settings,
@@ -7093,7 +7208,7 @@ impl DrydockApp {
                 self.guide_flow = GuideFlow::Activation;
                 self.page = Page::Guide;
             }
-            "guide-fixes" => {
+            "guide-fixes" if BRAND.features.denuvo_fix => {
                 self.guide_flow = GuideFlow::Fixes;
                 self.page = Page::Guide;
             }
@@ -7229,7 +7344,7 @@ impl eframe::App for DrydockApp {
             IDLE_FRAME
         };
         context.request_repaint_after(next_frame);
-        self.top_nav(ui);
+        self.navigation(ui);
         self.status_bar(ui);
         egui::CentralPanel::default()
             // No side inner-margin: the scroll area spans the full width so its bar sits at the true
@@ -7259,6 +7374,11 @@ impl eframe::App for DrydockApp {
                                 Layout::top_down(Align::Min),
                                 |ui| {
                                     ui.set_width(content_w);
+                                    // A page this product does not have is never shown, however it
+                                    // was reached.
+                                    if !self.page.offered() {
+                                        self.page = Page::Home;
+                                    }
                                     match self.page {
                                         Page::Home => self.home_page(ui),
                                         Page::Library => self.library_page(ui),
@@ -7312,7 +7432,7 @@ fn install_style(context: &egui::Context) {
     style.visuals.window_fill = SURFACE;
     style.visuals.window_stroke = Stroke::new(1.0, BORDER);
     style.visuals.window_corner_radius = egui::CornerRadius::same(16);
-    style.visuals.extreme_bg_color = Color32::from_rgb(24, 28, 32);
+    style.visuals.extreme_bg_color = INPUT_FILL;
     style.visuals.faint_bg_color = SURFACE_RAISED;
     style.visuals.widgets.inactive.bg_fill = SURFACE_RAISED;
     style.visuals.widgets.inactive.weak_bg_fill = SURFACE_RAISED;
@@ -7386,7 +7506,7 @@ fn paint_backdrop(ui: &mut egui::Ui, seconds: f32) {
     painter.circle_filled(
         egui::pos2(rect.left() + 240.0 - drift, rect.bottom() - 60.0),
         150.0,
-        Color32::from_rgba_unmultiplied(VERDIGRIS.r(), VERDIGRIS.g(), VERDIGRIS.b(), 10),
+        Color32::from_rgba_unmultiplied(AMBIENT.r(), AMBIENT.g(), AMBIENT.b(), 10),
     );
 }
 
@@ -7421,6 +7541,43 @@ fn nav_link(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
             egui::pos2(rect.right() - 6.0, rect.bottom() - 2.0),
         ],
         Stroke::new(2.0, underline),
+    );
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response
+}
+
+/// One destination in the side navigation: a full-width row, the active one filled with the deep
+/// accent and marked by a bar at its left edge, the others lighting up on hover.
+fn side_nav_entry(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
+    let size = Vec2::new(ui.available_width(), 38.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let hover = ui.ctx().animate_bool(response.id, response.hovered());
+    let fill = if active {
+        lerp_color(SIDEBAR_FILL, ACCENT_DEEP, 0.55)
+    } else {
+        lerp_color(SIDEBAR_FILL, SURFACE_RAISED, hover)
+    };
+    ui.painter().rect_filled(rect, egui::CornerRadius::same(8), fill);
+    if active {
+        let bar = egui::Rect::from_min_size(
+            egui::pos2(rect.left(), rect.top() + 9.0),
+            Vec2::new(3.0, rect.height() - 18.0),
+        );
+        ui.painter().rect_filled(bar, egui::CornerRadius::same(2), ACCENT);
+    }
+    let color = if active {
+        Color32::WHITE
+    } else {
+        lerp_color(MUTED, TEXT, hover)
+    };
+    ui.painter().text(
+        egui::pos2(rect.left() + 18.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(12.0),
+        color,
     );
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -7710,9 +7867,9 @@ impl egui::Widget for PillButton {
                 lerp_color(TEXT, Color32::WHITE, hover),
             ),
             ButtonKind::Success => (
-                lerp_color(VERDIGRIS, Color32::from_rgb(110, 199, 168), hover),
+                lerp_color(VERDIGRIS, VERDIGRIS_HOVER, hover),
                 Stroke::NONE,
-                Color32::from_rgb(16, 26, 22),
+                ON_VERDIGRIS,
             ),
         };
         let (fill, stroke, text_color) = if enabled {
@@ -8422,7 +8579,7 @@ fn store_banner(
         painter.rect_filled(
             egui::Rect::from_min_max(egui::pos2(x0, rect.top()), egui::pos2(x1, rect.bottom())),
             round,
-            Color32::from_rgba_unmultiplied(8, 12, 18, alpha),
+            scrim(alpha),
         );
     }
     painter.rect_stroke(
@@ -8435,7 +8592,7 @@ fn store_banner(
     // Rank + Activatable eyebrow line.
     let mut eyebrow = format!("#{rank} TOP SELLER");
     if activatable {
-        eyebrow.push_str("   ·   ACTIVATABLE IN DRYDOCK");
+        eyebrow.push_str(branded!(upper "   ·   ACTIVATABLE IN {product}"));
     }
     painter.text(
         egui::pos2(left, rect.top() + 40.0),
@@ -8459,7 +8616,7 @@ fn store_banner(
     }
     // The CTA button, anchored bottom-left.
     let (label, primary) = if activatable {
-        ("ACTIVATE IN DRYDOCK", true)
+        (branded!(upper "ACTIVATE IN {product}"), true)
     } else {
         ("VIEW IN STORE", false)
     };
@@ -8576,7 +8733,7 @@ fn list_row_base(
 /// supports it, and a right-hand Activate/View control. No price (the store list is price-free).
 fn store_list_row(ui: &mut egui::Ui, capsule: &StoreCapsule, activatable: bool) -> Option<StoreAction> {
     let (meta, meta_color) = if activatable {
-        ("Activatable in Drydock", ACCENT_SOFT)
+        (branded!("Activatable in {product}"), ACCENT_SOFT)
     } else {
         ("", MUTED)
     };
@@ -8919,12 +9076,14 @@ fn library_overview(
                     let amber = AMBER;
                     let (status, color) = match entry.source {
                         LibrarySource::SteamInstalled => ("Installed in Steam — ready to play", VERDIGRIS),
-                        LibrarySource::DrydockInstalled if entry.launch_path.is_some() => {
-                            ("Installed by Drydock · launches from a linked .exe", ACCENT_SOFT)
-                        }
-                        LibrarySource::DrydockInstalled => {
-                            ("Installed by Drydock · link a launcher to play", amber)
-                        }
+                        LibrarySource::DrydockInstalled if entry.launch_path.is_some() => (
+                            branded!("Installed by {product} · launches from a linked .exe"),
+                            ACCENT_SOFT,
+                        ),
+                        LibrarySource::DrydockInstalled => (
+                            branded!("Installed by {product} · link a launcher to play"),
+                            amber,
+                        ),
                         LibrarySource::Available => ("Lua ready in Steam · not installed yet", amber),
                     };
                     ui.horizontal(|ui| {
@@ -9766,8 +9925,8 @@ fn guide_stage(
             );
             ui.add_space(12.0);
             ui.vertical(|ui| {
-                ui.label(RichText::new(title).size(16.0).strong().color(TEXT));
-                ui.label(RichText::new(subtitle).size(10.5).color(ACCENT));
+                ui.label(RichText::new(with_product(title)).size(16.0).strong().color(TEXT));
+                ui.label(RichText::new(with_product(subtitle)).size(10.5).color(ACCENT));
             });
         });
         ui.add_space(16.0);
@@ -9788,11 +9947,19 @@ fn guide_stage(
                     ui.add_space(rail_width);
                     let content = ui.vertical(|ui| {
                         ui.add(
-                            egui::Label::new(RichText::new(*step_title).size(12.5).strong().color(TEXT))
-                                .wrap(),
+                            egui::Label::new(
+                                RichText::new(with_product(step_title))
+                                    .size(12.5)
+                                    .strong()
+                                    .color(TEXT),
+                            )
+                            .wrap(),
                         );
                         ui.add_space(2.0);
-                        ui.add(egui::Label::new(RichText::new(*detail).size(10.5).color(MUTED)).wrap());
+                        ui.add(
+                            egui::Label::new(RichText::new(with_product(detail)).size(10.5).color(MUTED))
+                                .wrap(),
+                        );
                     });
                     nodes.push(content.response.rect.top() + 9.0);
                 });
@@ -10000,7 +10167,7 @@ fn details_store_sidebar(
                 } else if depot.installed {
                     "DOWNLOAD / REPAIR"
                 } else {
-                    "DOWNLOAD IN DRYDOCK"
+                    branded!(upper "DOWNLOAD IN {product}")
                 };
                 let download_hint = if depot.busy {
                     "Queue this game — it starts once the current download finishes"
@@ -10125,9 +10292,9 @@ fn details_features(ui: &mut egui::Ui, details: &SteamStoreDetails, activation_r
         let drm = if activation_required {
             let notice = details.drm_notice.trim();
             if notice.is_empty() {
-                "Denuvo Anti-Tamper — Drydock activation required".to_owned()
+                branded!("Denuvo Anti-Tamper — {product} activation required").to_owned()
             } else {
-                format!("{notice} — Drydock activation required")
+                format!("{notice} — {product} activation required", product = BRAND.name)
             }
         } else {
             "None — no activation needed".to_owned()
@@ -10284,7 +10451,8 @@ fn steam_button_row(
     let mut action = DetailsAction::None;
     let installed = panels.fix.is_some_and(|fix| fix.installed);
     let busy_fix = panels.fix.is_some_and(|fix| fix.busy);
-    let has_denuvo = panels.fix.is_some_and(|fix| fix.denuvo.is_some());
+    // The cracked variant needs a Denuvo fix to pin to, and a product that offers it at all.
+    let has_denuvo = BRAND.features.cracked_version && panels.fix.is_some_and(|fix| fix.denuvo.is_some());
 
     // The whole Add-to-Steam workflow plus the repack sources, collapsed into one split button:
     // adding (or, once added, updating) the latest unlock is the primary action and everything else
@@ -10342,7 +10510,7 @@ fn steam_button_row(
         }
     }
 
-    if let Some(fix) = panels.fix {
+    if let Some(fix) = panels.fix.filter(|_| BRAND.features.denuvo_fix) {
         // Denuvo fix (GitHub build-locked Lua + zip), labelled with its installed status.
         if let Some(status) = fix.denuvo {
             let text = match status {
@@ -10802,7 +10970,8 @@ fn payload_backup_note(
     match store.save(app_id, lua, manifests) {
         Ok(()) => String::new(),
         Err(error) => format!(
-            " Drydock could not keep its own copy ({error}), so reinstalling it will need the network."
+            " {product} could not keep its own copy ({error}), so reinstalling it will need the network.",
+            product = BRAND.name
         ),
     }
 }
@@ -11020,6 +11189,55 @@ mod ui_tests {
         assert!(is_short_activation_code("AB12CD34"));
         assert!(!is_short_activation_code("AB12-CD34"));
         assert!(!is_short_activation_code("CSL1.long.request"));
+    }
+
+    #[test]
+    fn the_store_shows_exactly_the_tabs_this_product_offers() {
+        // CI runs the tests for Drydock and again with the example brand, which leaves Repacks out,
+        // so this checks both ways — the core tabs are there in either.
+        let shown: Vec<&str> = StoreTab::ALL
+            .into_iter()
+            .filter(|(tab, _)| tab.offered())
+            .map(|(_, label)| label)
+            .collect();
+        assert_eq!(shown.contains(&"Repacks"), BRAND.features.repacks);
+        for core in ["Featured", "New Releases", "Denuvo"] {
+            assert!(shown.contains(&core), "{core} is part of every product");
+        }
+    }
+
+    #[test]
+    fn the_navigation_leaves_out_the_pages_this_product_does_not_have() {
+        let shown: Vec<Page> = PRIMARY_DESTINATIONS
+            .into_iter()
+            .filter(|(page, _)| page.offered())
+            .map(|(page, _)| page)
+            .collect();
+        assert_eq!(shown.contains(&Page::Tools), BRAND.features.tools);
+        assert_eq!(shown.contains(&Page::Cloud), BRAND.features.cloud);
+        for core in [Page::Home, Page::Library, Page::Activation] {
+            assert!(shown.contains(&core), "{core:?} is part of every product");
+        }
+    }
+
+    #[test]
+    fn product_names_reach_every_branded_text() {
+        assert_eq!(
+            branded!("Installed in {product}"),
+            format!("Installed in {}", BRAND.name)
+        );
+        assert_eq!(
+            branded!(upper "ADD GAME TO {product}"),
+            format!("ADD GAME TO {}", BRAND.name.to_uppercase())
+        );
+        assert_eq!(
+            with_product("point {product} at your Steam folder"),
+            format!("point {} at your Steam folder", BRAND.name)
+        );
+        assert!(matches!(
+            with_product("no placeholder"),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 
     #[test]

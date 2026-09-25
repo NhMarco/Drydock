@@ -12,6 +12,10 @@ crates/drydock-core    portable core: all logic, I/O, networking, crypto
 proxy/                 Fastify service in front of the upstream APIs (deployed separately)
 ```
 
+Drydock can also be built under another name and look: a white-label build is this repository plus
+one `brand/` folder, and stays current with a plain `git pull`. See
+[docs/branding.md](docs/branding.md).
+
 ## What it does
 
 - **Library** — discovers games installed by Steam and by Drydock, grouped and searchable, with
@@ -36,7 +40,8 @@ it, and run it. There is no installer; the executable is self-contained.
 Get-FileHash .\Drydock-windows-x64.exe -Algorithm SHA256
 ```
 
-Per-user data lives in `%LOCALAPPDATA%\Drydock` on Windows and `$XDG_DATA_HOME/Drydock` elsewhere.
+Per-user data lives in `%LOCALAPPDATA%\Drydock` on Windows and `$XDG_DATA_HOME/Drydock` elsewhere
+(a white-label build uses its own name there).
 Regenerable caches sit in a `cache/` subfolder and can be deleted at any time.
 
 ## Build from source
@@ -53,14 +58,13 @@ proxy to enable the rest.
 
 ## Configuration
 
-Every value a deployment can change is resolved by `drydock-core::config` from three layers,
+Every value a deployment can change is resolved by `drydock-core::config` from two layers,
 **highest priority first**:
 
 | Layer | Where | Use it for |
 | --- | --- | --- |
 | 1. Environment variable | the process environment | scripting, CI, development |
-| 2. Settings | Settings ▸ **Proxy / Self-hosting**, stored in `settings.json` | pointing a released build at your own proxy, without rebuilding |
-| 3. Build-time default | `build.rs`, from an env var or a git-ignored `*.secret` file | what official release builds ship with |
+| 2. Build-time default | `build.rs`, from an env var or a git-ignored `*.secret` file | what official release builds ship with |
 
 A blank value at one layer falls through to the next rather than blanking out what is below it.
 
@@ -97,8 +101,8 @@ openssl rand -hex 32          # generate DRYDOCK_HMAC_SECRET
 docker compose up -d --build
 ```
 
-Put the same secret and your proxy's URL into Drydock under Settings ▸ Proxy / Self-hosting, or set
-the environment variables. [`proxy/README.md`](proxy/README.md) documents the endpoints and the
+Build Drydock with the same secret and your proxy's URL (below), or set the environment variables
+when you run it. [`proxy/README.md`](proxy/README.md) documents the endpoints and the
 request-signing scheme.
 
 To bake your own defaults into a binary instead:

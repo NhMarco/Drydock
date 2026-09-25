@@ -1,0 +1,56 @@
+# A white-label brand: copy this folder to `brand/` at the repository root and edit it.
+# docs/branding.md explains every key. Anything left out is Drydock's, so a brand only lists what
+# it changes. Unknown keys fail the build, so a typo never falls back silently.
+#
+# CI builds and tests Drydock once with this file (DRYDOCK_BRAND_DIR=docs/brand-template), which is
+# why it deliberately leaves some colours and features out: that path has to keep working too.
+
+# The product's name: window title, headings, executable (`Example.exe`), release assets
+# (`Example-windows-x64.exe`, …) and data directory (`%LOCALAPPDATA%\Example`).
+# A letter first, then letters, digits, `-` or `_`; at most 32 characters.
+name = "Example"
+
+# A short line under the name in the side navigation.
+tagline = "Games, ready to play"
+
+# Explorer's "File description". Defaults to "<name> — <tagline>".
+description = "Example — Games, ready to play"
+
+# Whether logo.png already spells the name (and tagline); the side navigation then shows it alone.
+logo_is_wordmark = false
+
+# "top" (a storefront bar across the window) or "side" (a column down the left edge).
+navigation = "side"
+
+# Optional features; everything else is part of every product. Left out = Drydock's (on).
+[features]
+cloud = false
+repacks = false
+# tools = true
+# denuvo_fix = true
+# cracked_version = true
+
+# Every colour the interface paints with, as "#RRGGBB" or "#RRGGBBAA". The tests check text contrast
+# against WCAG AA, so an unreadable palette fails `cargo test`.
+[palette]
+background = "#10161F"
+surface = "#17202C"
+surface_raised = "#212C3B"
+surface_sunken = "#0C1118"
+border = "#2E3C4F"
+edge = "#080B10"
+text = "#E6ECF2"
+muted = "#95A3B5"
+accent = "#3FA7D6"
+accent_soft = "#8FD0EE"
+accent_deep = "#1F6F99"
+success = "#5CB88A"
+success_hover = "#7FD3A7"
+on_success = "#0D1F16"
+# warning = "#F2C94C"
+# danger = "#C75C5C"
+chrome = "#0B1017"
+scrim = "#05080D"
+overlay = "#02040AE0"
+input = "#131B25"
+ambient = "#6A5ACD"

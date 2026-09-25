@@ -44,6 +44,13 @@ const MAXIMUM_GATE_WAIT: Duration = Duration::from_secs(10);
 const CARD_FAILURE_CACHE_LIFETIME: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 /// Marker written to a header cache file when Steam had no usable header for the app.
 const CARD_FAILURE_MARKER: &str = "-";
+/// Where resolved header URLs are kept. Versioned: the previous folder (`headers`) is full of failure
+/// markers written while Steam's changed `appdetails` keys made every lookup look like a failure
+/// (see [`app_entry`]), and each would otherwise have kept a game's artwork blank for three days
+/// after the fix. A new folder starts clean, and the startup sweep removes the old one.
+const HEADER_CACHE_DIRECTORY: &str = "headers-v2";
+/// The header folder before [`HEADER_CACHE_DIRECTORY`], removed by the startup sweep.
+const RETIRED_HEADER_CACHE_DIRECTORY: &str = "headers";
 /// Cached store files older than this are swept on startup. Generous, because a sweep only reclaims
 /// disk: the per-entry TTLs above already decide what is *served*.
 const CACHE_SWEEP_MAX_AGE: Duration = Duration::from_secs(60 * 24 * 60 * 60);
@@ -250,7 +257,10 @@ impl SteamStoreClient {
         if app_id == 0 {
             return Err(SteamStoreError::InvalidAppId);
         }
-        let cache_path = self.cache_directory.join("headers").join(format!("{app_id}.txt"));
+        let cache_path = self
+            .cache_directory
+            .join(HEADER_CACHE_DIRECTORY)
+            .join(format!("{app_id}.txt"));
         // Both outcomes are cached. A *failure* has to be remembered too: without it every launch
         // re-requested the same delisted/region-locked apps, and since only rows whose cheap CDN
         // guesses failed get here, that was a steady drip of pointless `appdetails` traffic against
@@ -291,9 +301,7 @@ impl SteamStoreClient {
     /// to cache based on which error came back.
     fn fetch_header_image(&self, app_id: u32, url: &str) -> Result<String, SteamStoreError> {
         let document = load_json(&self.client, url)?;
-        let app = document
-            .get(app_id.to_string())
-            .ok_or(SteamStoreError::Unavailable(app_id))?;
+        let app = app_entry(&document, app_id).ok_or(SteamStoreError::Unavailable(app_id))?;
         if app.get("success").and_then(Value::as_bool) != Some(true) {
             return Err(SteamStoreError::Unavailable(app_id));
         }
@@ -315,7 +323,17 @@ impl SteamStoreClient {
     /// Best-effort: anything that cannot be read or deleted is skipped.
     pub fn sweep_stale_cache(cache_directory: &Path) -> usize {
         let mut removed = 0;
-        let directories = [cache_directory.to_path_buf(), cache_directory.join("headers")];
+        // The retired header folder holds nothing worth keeping (see `HEADER_CACHE_DIRECTORY`); it goes
+        // as a whole rather than waiting for its entries to age out.
+        let retired = cache_directory.join(RETIRED_HEADER_CACHE_DIRECTORY);
+        if let Ok(entries) = fs::read_dir(&retired) {
+            removed += entries.flatten().count();
+            let _ = fs::remove_dir_all(&retired);
+        }
+        let directories = [
+            cache_directory.to_path_buf(),
+            cache_directory.join(HEADER_CACHE_DIRECTORY),
+        ];
         for directory in directories {
             let Ok(entries) = fs::read_dir(&directory) else {
                 continue;
@@ -710,10 +728,39 @@ fn write_cache(path: &Path, details: &SteamStoreDetails) -> Result<(), SteamStor
     Ok(())
 }
 
+/// The entry for `app_id` in an `appdetails` answer.
+///
+/// Steam used to key the answer by the App ID that was asked for. Since September 2026 it keys it by
+/// some other number — `appids=730` comes back under `"2678630"`, `570` under `"2120612"` — and only
+/// `data.steam_appid` still names the app. Looked up by the requested ID, the answer then had nothing
+/// in it for *any* app, so every store page read "Store information is currently unavailable" and
+/// every header lookup was recorded as a failure. So: the requested key if Steam uses it again, else
+/// the entry that says it is this app, else — one app was asked for, one entry came back — that one.
+fn app_entry(document: &Value, app_id: u32) -> Option<&Value> {
+    if let Some(entry) = document.get(app_id.to_string()) {
+        return Some(entry);
+    }
+    let entries = document.as_object()?;
+    entries
+        .values()
+        .find(|entry| {
+            entry
+                .get("data")
+                .and_then(|data| data.get("steam_appid"))
+                .and_then(Value::as_u64)
+                == Some(u64::from(app_id))
+        })
+        .or_else(|| {
+            if entries.len() == 1 {
+                entries.values().next()
+            } else {
+                None
+            }
+        })
+}
+
 fn parse_details(app_id: u32, document: &Value) -> Result<SteamStoreDetails, SteamStoreError> {
-    let app = document
-        .get(app_id.to_string())
-        .ok_or(SteamStoreError::Unavailable(app_id))?;
+    let app = app_entry(document, app_id).ok_or(SteamStoreError::Unavailable(app_id))?;
     if app.get("success").and_then(Value::as_bool) != Some(true) {
         return Err(SteamStoreError::Unavailable(app_id));
     }
@@ -1016,6 +1063,57 @@ mod tests {
         assert_eq!(details.platforms, ["Windows", "Linux"]);
         assert_eq!(details.short_description, "Fast & fun\nAlways");
         assert_eq!(details.requirements.minimum, "CPU: Any");
+    }
+
+    #[test]
+    fn an_answer_keyed_by_another_id_is_still_this_apps() {
+        // What Steam sends since September 2026: `appids=730` comes back under "2678630", and only
+        // `steam_appid` names the app. Every store page read "unavailable" until this was handled.
+        let answer = |key: &str, app: u64| {
+            serde_json::json!({
+                key: {
+                    "success": true,
+                    "data": {
+                        "type": "game",
+                        "name": "Counter-Strike 2",
+                        "steam_appid": app,
+                        "header_image": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/730/header.jpg"
+                    }
+                }
+            })
+        };
+        let rekeyed = answer("2678630", 730);
+        assert_eq!(
+            parse_details(730, &rekeyed).expect("details").name,
+            "Counter-Strike 2"
+        );
+        assert!(app_entry(&rekeyed, 730).is_some());
+        // The old shape still works, should Steam go back to it.
+        assert!(parse_details(730, &answer("730", 730)).is_ok());
+        // A single entry is the answer to the single app asked for, even without a steam_appid —
+        // e.g. an unavailable app, which must come out as unavailable rather than missing.
+        let unavailable = serde_json::json!({ "9999999": { "success": false } });
+        assert!(matches!(
+            parse_details(4242, &unavailable),
+            Err(SteamStoreError::Unavailable(4242))
+        ));
+        // Several entries and none of them this app: nothing is guessed.
+        let others = serde_json::json!({
+            "1": { "success": true, "data": { "steam_appid": 1, "name": "One" } },
+            "2": { "success": true, "data": { "steam_appid": 2, "name": "Two" } }
+        });
+        assert!(app_entry(&others, 730).is_none());
+    }
+
+    #[test]
+    fn the_sweep_drops_the_header_folder_full_of_false_failures() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let retired = directory.path().join(RETIRED_HEADER_CACHE_DIRECTORY);
+        fs::create_dir_all(&retired).expect("old folder");
+        fs::write(retired.join("730.txt"), CARD_FAILURE_MARKER).expect("stale failure");
+        fs::write(retired.join("570.txt"), CARD_FAILURE_MARKER).expect("stale failure");
+        assert!(SteamStoreClient::sweep_stale_cache(directory.path()) >= 2);
+        assert!(!retired.exists(), "no false failure outlives the fix");
     }
 
     #[test]
