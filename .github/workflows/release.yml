@@ -73,9 +73,14 @@ jobs:
           fi
           echo "DRYDOCK_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
           # The release is named after the product: Drydock, or a white-label repository's brand
-          # (the build picks the brand up by itself; only the file names need it here).
-          product=$(sed -n 's/^name *= *"\([A-Za-z0-9_-]*\)".*/\1/p' brand/brand.toml 2>/dev/null | head -n 1)
-          product="${product:-Drydock}"
+          # (the build picks the brand up by itself; only the file names need it here). Test for the
+          # file first: Actions runs bash with `-e -o pipefail`, so a sed on a missing file would end
+          # the step instead of falling back to Drydock.
+          product=Drydock
+          if [[ -f brand/brand.toml ]]; then
+            name=$(sed -n 's/^name *= *"\([A-Za-z0-9_-]*\)".*/\1/p' brand/brand.toml | head -n 1)
+            product="${name:-Drydock}"
+          fi
           echo "BINARY=target/release/Drydock${{ matrix.extension }}" >> "$GITHUB_ENV"
           echo "ASSET=${product}-${{ matrix.platform }}" >> "$GITHUB_ENV"
       - name: Install Linux desktop dependencies
