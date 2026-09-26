@@ -15,6 +15,9 @@
 *.pem
 *.key
 !**/public*.pem
+# A white-label product's activation bot key (docs/branding.md). Public by definition: the build
+# refuses to embed a private key from this file.
+!/brand/activation-key.pem
 
 # Proxy runtime configuration. `.env.example` is the committed template; `.env` holds real
 # upstream keys and the shared HMAC secret.

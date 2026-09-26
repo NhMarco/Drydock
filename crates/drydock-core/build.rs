@@ -21,7 +21,9 @@ fn main() {
     // Only for an update repository that is private (a white-label product under test): a
     // read-only token for it. Drydock's releases are public, so its builds embed none.
     embed_secret("DRYDOCK_UPDATE_TOKEN", "update-token.secret");
-    let white_label = embed_product_name();
+    let brand = brand_directory();
+    let white_label = embed_product_name(brand.as_deref());
+    embed_activation_key(brand.as_deref());
     embed_update_repository(white_label);
     // `version.rs` reads this with `option_env!` rather than the build script setting it, so declare
     // the dependency here: without it cargo can reuse a cached `drydock-core` compiled against a
@@ -33,9 +35,8 @@ fn main() {
 
 /// The product this build is, for `src/brand.rs`: the `name` from a white-label brand file (see
 /// `docs/branding.md`), or Drydock. Returns whether the build is white-label.
-fn embed_product_name() -> bool {
-    let brand = brand_directory();
-    let name = match &brand {
+fn embed_product_name(brand: Option<&Path>) -> bool {
+    let name = match brand {
         Some(directory) => brand_name(&directory.join("brand.toml")),
         None => "Drydock".to_owned(),
     };
@@ -46,11 +47,50 @@ fn embed_product_name() -> bool {
     brand.is_some()
 }
 
+/// The activation authority's public key, for a white-label product that activates through a bot
+/// of its own: `activation-key.pem` in its brand folder. The app encrypts its requests to this key
+/// and checks the responses' signatures against it, so it has to be that bot's key. Without the
+/// file the product uses Drydock's bot, whose key `activation.rs` has built in.
+fn embed_activation_key(brand: Option<&Path>) {
+    let Some(file) = brand
+        .map(|directory| directory.join("activation-key.pem"))
+        .filter(|file| file.is_file())
+    else {
+        return;
+    };
+    let text = fs::read_to_string(&file).unwrap_or_else(|error| panic!("{}: {error}", file.display()));
+    assert!(
+        !text.contains("PRIVATE KEY"),
+        "{} is a PRIVATE key. Delete it from the brand folder at once — it must never be in a \
+         repository or a build. The app needs only the public key: \
+         `openssl pkey -in private.pem -pubout -out activation-key.pem`",
+        file.display()
+    );
+    let body: String = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("-----"))
+        .collect();
+    let usable = text.contains("-----BEGIN PUBLIC KEY-----")
+        && !body.is_empty()
+        && body.len() <= 4096
+        && body
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='));
+    assert!(
+        usable,
+        "{} must be a public key in PEM form (-----BEGIN PUBLIC KEY----- …)",
+        file.display()
+    );
+    println!("cargo:rustc-env=DRYDOCK_ACTIVATION_KEY={body}");
+}
+
 /// The white-label brand directory, if this build has one: `DRYDOCK_BRAND_DIR` when set (relative
 /// paths from the workspace root), else `brand/` at the workspace root. Drydock itself has neither.
 ///
-/// Only an existing brand file is watched for changes: telling Cargo to watch a path that does not
-/// exist makes it rerun the build script — and rebuild the crate — on every single build.
+/// Only an existing brand folder is watched for changes: telling Cargo to watch a path that does not
+/// exist makes it rerun the build script — and rebuild the crate — on every single build. The whole
+/// folder is watched, so adding a file to it (`activation-key.pem`) is noticed too.
 fn brand_directory() -> Option<std::path::PathBuf> {
     println!("cargo:rerun-if-env-changed=DRYDOCK_BRAND_DIR");
     let manifest = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
@@ -64,7 +104,7 @@ fn brand_directory() -> Option<std::path::PathBuf> {
     if !file.is_file() {
         return None;
     }
-    println!("cargo:rerun-if-changed={}", file.display());
+    println!("cargo:rerun-if-changed={}", directory.display());
     Some(directory)
 }
 

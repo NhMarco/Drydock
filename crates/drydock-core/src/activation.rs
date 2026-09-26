@@ -41,7 +41,16 @@ const MAXIMUM_TOKEN_FILES: usize = 50_000;
 /// Hidden folder in the game directory that records a successful activation. A token payload may
 /// not write into it.
 const MARKER_DIRECTORY: &str = ".Drydock";
-const SIGNING_PUBLIC_KEY_SPKI: &str = "MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAltx1ISsLBDtHDIrcX7pTBbgmD95eBo8d/tsPZ5kQdGGKn0mOq990nI1y38d7pYgLkEixBcI15X/TjMlOXgfPRZv0+Q3KzrGc7kc7rted9YyxfYbfSCk3BRYyJnQIfgT46ujPKp0WBr2kkqx2IjHB1UurwWHLAzb1OrLQ8bt32kLgCyq2XsLmyo/Nz4zNiKYcZDVnClFRZX4ddbbsoSUZ4r1eBtRBLWynyQsv2J886XVY3LkwFPSM3JOstwSdaSsNnv0vlB3+h9syuR6vT50Oqb7U8abXvddlD/JoS3K/2XH4ISY1sVDKYXyxM1jpVtsIg5o9EAp7/F+A8QYE7X2uGzrGS+0K5o5uZjuYjJL8kSKhbRNyqehBXoXps9MWZ+wFrBdvIntxubgv1sbCz8cacLlf1v94oGv3xxcuNgF6kYCmDSrjQE2DF80EE6y8VfAnZyV9XkQvbTnlBwEn9P7yjHxVP6c4C+RJQmChqn3eAxIGa6Hat2D5la/i5x15dpudAgMBAAE=";
+/// The activation authority's public key (SPKI DER, base64): requests are encrypted to it and
+/// response tokens must carry its signature. Drydock's bot's, unless a white-label product
+/// activates through a bot of its own and ships that bot's key as `brand/activation-key.pem`
+/// (`build.rs`). Only the key differs then — the wire constants above stay as they are.
+const SIGNING_PUBLIC_KEY_SPKI: &str = match option_env!("DRYDOCK_ACTIVATION_KEY") {
+    Some(key) => key,
+    None => DRYDOCK_SIGNING_PUBLIC_KEY_SPKI,
+};
+/// The key of Drydock's own activation bot.
+const DRYDOCK_SIGNING_PUBLIC_KEY_SPKI: &str = "MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAltx1ISsLBDtHDIrcX7pTBbgmD95eBo8d/tsPZ5kQdGGKn0mOq990nI1y38d7pYgLkEixBcI15X/TjMlOXgfPRZv0+Q3KzrGc7kc7rted9YyxfYbfSCk3BRYyJnQIfgT46ujPKp0WBr2kkqx2IjHB1UurwWHLAzb1OrLQ8bt32kLgCyq2XsLmyo/Nz4zNiKYcZDVnClFRZX4ddbbsoSUZ4r1eBtRBLWynyQsv2J886XVY3LkwFPSM3JOstwSdaSsNnv0vlB3+h9syuR6vT50Oqb7U8abXvddlD/JoS3K/2XH4ISY1sVDKYXyxM1jpVtsIg5o9EAp7/F+A8QYE7X2uGzrGS+0K5o5uZjuYjJL8kSKhbRNyqehBXoXps9MWZ+wFrBdvIntxubgv1sbCz8cacLlf1v94oGv3xxcuNgF6kYCmDSrjQE2DF80EE6y8VfAnZyV9XkQvbTnlBwEn9P7yjHxVP6c4C+RJQmChqn3eAxIGa6Hat2D5la/i5x15dpudAgMBAAE=";
 
 pub struct ActivationRequestService {
     settings_directory: PathBuf,
@@ -927,6 +936,24 @@ pub enum ActivationError {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    /// Drydock's key, or the one a white-label brand ships in `brand/activation-key.pem`: either
+    /// way every request is encrypted to it, so a key that does not parse would break activation
+    /// for the whole product. This makes that a failed test in the product's CI instead.
+    #[test]
+    fn the_activation_authority_key_is_a_usable_rsa_key() {
+        use rsa::traits::PublicKeyParts as _;
+        let der = STANDARD.decode(SIGNING_PUBLIC_KEY_SPKI).expect("base64");
+        let key = RsaPublicKey::from_public_key_der(&der).expect("an RSA public key");
+        assert!(
+            key.size() * 8 >= 2048,
+            "an activation key of {} bits is too weak",
+            key.size() * 8
+        );
+        if option_env!("DRYDOCK_ACTIVATION_KEY").is_none() {
+            assert_eq!(SIGNING_PUBLIC_KEY_SPKI, DRYDOCK_SIGNING_PUBLIC_KEY_SPKI);
+        }
+    }
 
     fn signed_token(
         service: &ActivationRequestService,

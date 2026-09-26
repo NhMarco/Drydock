@@ -15,16 +15,18 @@ conflict-free pull (see [Keeping it current](#keeping-it-current)).
 | The Discord button and where it leads | |
 | The developer credited in the About dialog | The About dialog's "Built on Drydock" line (see below) |
 | Every colour of the interface (`[palette]`) | The `settings.json` format |
-| Logo, window icon, Windows file icon (`brand/*.png`, `brand/app-icon.ico`) | Activation: request codes, response verification, the `.Drydock` marker |
-| Navigation: top bar or left column | The depot engine, downloads, verify, Steam integration |
-| Optional features: Tools, Cloud, Repacks, Denuvo fix, cracked version | `DRYDOCK_*` environment variables, the user agent |
+| Logo, window icon, Windows file icon (`brand/*.png`, `brand/app-icon.ico`) | The activation protocol: request and token format, the `.Drydock` marker |
+| The activation bot's public key, for a product with a bot of its own (`brand/activation-key.pem`) | The depot engine, downloads, verify, Steam integration |
+| Navigation: top bar or left column | `DRYDOCK_*` environment variables, the user agent |
+| Optional features: Tools, Cloud, the Denuvo tab, Repacks, Denuvo fix, cracked version | |
 | Release assets (`<name>-windows-x64.exe`, …) and the Windows file details | The crate and binary names inside the build (`target/release/Drydock.exe`) |
 | Update channel: the product repository's own releases | |
 | Data directory: `%LOCALAPPDATA%\<name>` (settings, library, cache) | |
 
 Because the backend is identical, a white-label build and Drydock are interchangeable towards the
-proxy, the activation bot and Steam. Each keeps its own data directory, so both can live on one
-machine without seeing or clearing each other's settings, library or cache.
+proxy and Steam — and towards the activation bot, unless the product brings a bot of its own (see
+below). Each keeps its own data directory, so both can live on one machine without seeing or
+clearing each other's settings, library or cache.
 
 ## The brand folder
 
@@ -33,10 +35,19 @@ brand/
 ├── brand.toml     required — name, colours, navigation, features
 ├── logo.png       optional — the logo in the navigation (square, transparent outside the mark)
 ├── app-icon.png   optional — the window and taskbar icon (256 px)
-└── app-icon.ico   optional — the Windows file icon (16–256 px)
+├── app-icon.ico   optional — the Windows file icon (16–256 px)
+└── activation-key.pem  optional — the public key of the product's own activation bot
 ```
 
-Missing artwork falls back to Drydock's. [`docs/brand-template/brand.toml`](brand-template/brand.toml)
+Missing artwork falls back to Drydock's.
+
+**`activation-key.pem`** is for a product whose Discord runs an activation bot of its own, with its
+own key pair. The app encrypts every request code to this key and accepts only response tokens
+signed by the matching private key, so it must be *that bot's* public key
+(`-----BEGIN PUBLIC KEY-----`, RSA, at least 2048 bits; `openssl pkey -in private.pem -pubout`
+prints it). Without the file the product activates through Drydock's bot. The bot has to speak
+Drydock's protocol unchanged — only the key differs. A private key in the folder fails the build:
+it must never be in a repository. [`docs/brand-template/brand.toml`](brand-template/brand.toml)
 is a complete, commented example: copy the folder to `brand/` and edit it.
 
 ### `brand.toml`
