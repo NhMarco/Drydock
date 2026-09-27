@@ -99,6 +99,20 @@ defaults to `ryu`; set it to `ryu,depotbox,steamtools` to use all three. Depot k
 code, sent as a query parameter); DepotBox/SteamTools use their existing `DEPOTBOX_API_KEY` /
 `STEAMTOOLS_API_KEY`.
 
+### Lua cleaning
+
+Every provider decorates its Luas differently — banners, links to its site or Discord, timestamps,
+commented-out `setManifestid` lines. The proxy strips all comments from the Lua it serves, whether
+from `/v1/lua/:appid` or inside a depot package, drops the lines left empty, and puts its own two-line
+header on top (`-- Drydock unlock | App <appid>` and the repository link; `src/luaClean.ts`). The code
+itself is untouched: comments are found by a small Lua lexer, so `--` inside a string stays. Keyless
+depot lines are still dropped first (`src/luaSanitize.ts`), since that check reads the commented-out
+pins. In a package only the `.lua` entry is rewritten; manifests and everything else keep their exact
+bytes, and an archive the rewriter does not fully understand (ZIP64, encrypted) is served unchanged.
+The result is deterministic and cleaning it twice changes nothing, so packages cached before the
+cleaning existed are cleaned as they are served until they are replaced. Denuvo fix files are never
+touched: the client verifies them by hash.
+
 `/v1/gamelist` sets `Content-Encoding: gzip` and returns the compressed bytes directly, plus
 `ETag`, `X-Gamelist-Count`, and `X-Gamelist-Updated` (Unix seconds). Fix file responses set
 `X-Content-Git-Sha` so the client can verify against the manifest.

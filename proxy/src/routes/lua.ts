@@ -7,6 +7,7 @@ import type { Config } from "../config.js";
 import type { LuaSource } from "../depotbox.js";
 import { UpstreamError } from "../upstream.js";
 import { sanitizeLua } from "../luaSanitize.js";
+import { cleanLua } from "../luaClean.js";
 
 interface CachedLua {
   body: string;
@@ -61,8 +62,12 @@ export function registerLuaRoute(
       try {
         const result = await client.fetchLua(appid);
         // Drop broken keyless `addappid(<depotid>)` depot lines the upstream sometimes emits; they
-        // make the whole unlock fail. The cached + served copy is the cleaned one.
-        const { body, removed } = sanitizeLua(result.body);
+        // make the whole unlock fail. Then the provider's comments go and Drydock's header goes on —
+        // in that order, since the sanitizer reads commented-out `setManifestid` lines. The cached +
+        // served copy is the cleaned one.
+        const sanitized = sanitizeLua(result.body);
+        const { removed } = sanitized;
+        const body = cleanLua(sanitized.body, appid);
         if (removed > 0) {
           req.log.info({ appid, removed }, "Stripped keyless addappid depot line(s) from upstream Lua.");
         }

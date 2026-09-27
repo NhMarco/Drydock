@@ -30,6 +30,9 @@ pub struct SearchQuery {
     /// The same without spaces, so `fc27` finds `FC™ 27`.
     compact: Vec<char>,
     compact_skip: Vec<usize>,
+    /// The two needles as text, for a [`SearchIndex`].
+    needle_text: String,
+    compact_text: String,
 }
 
 impl SearchQuery {
@@ -41,6 +44,8 @@ impl SearchQuery {
             raw: text.trim().to_lowercase(),
             needle_skip: skip_table(&needle),
             compact_skip: skip_table(&compact),
+            needle_text: needle.iter().collect(),
+            compact_text: compact.iter().collect(),
             needle,
             compact,
         }
@@ -82,6 +87,104 @@ impl SearchQuery {
                 &self.compact,
                 &self.compact_skip,
             )
+    }
+}
+
+/// The whole catalogue, prepared once so a search over it is a single substring search.
+///
+/// [`SearchQuery::matches`] normalises each title as it reads it, which is right for one title but
+/// costs about 150 ms across a quarter of a million of them — far too much for every keystroke, let
+/// alone every frame. Here each title is normalised once, when the catalogue arrives, and all of them
+/// are laid end to end, one per line; a search is then one scan of that text for the normalised
+/// needle, and a hit's line is its title. The same is kept without spaces (so `fc27` finds
+/// `FC™ 27`) and for the App IDs. It finds what [`SearchQuery::matches`] (or a typed App ID) finds —
+/// save for a query of nothing but marks and punctuation, which has no plain form and finds nothing.
+#[derive(Clone, Debug, Default)]
+pub struct SearchIndex {
+    plain: Lines,
+    compact: Lines,
+    ids: Lines,
+}
+
+/// Lines laid end to end, each ended by `\n`, with where each one starts.
+#[derive(Clone, Debug, Default)]
+struct Lines {
+    text: String,
+    starts: Vec<usize>,
+}
+
+impl Lines {
+    fn push(&mut self, line: impl Iterator<Item = char>) {
+        self.starts.push(self.text.len());
+        self.text.extend(line);
+        self.text.push('\n');
+    }
+
+    /// Marks the lines `needle` occurs in. A needle never holds a line break, so a hit never spans
+    /// two lines, and once a line has a hit the scan moves straight on to the next one.
+    fn mark(&self, needle: &str, found: &mut [bool]) {
+        if needle.is_empty() {
+            return;
+        }
+        let mut from = 0;
+        let mut line = 0;
+        while let Some(offset) = self.text[from..].find(needle) {
+            let at = from + offset;
+            // Hits come in order, so the line only ever moves forwards.
+            while line + 1 < self.starts.len() && self.starts[line + 1] <= at {
+                line += 1;
+            }
+            found[line] = true;
+            match self.starts.get(line + 1) {
+                Some(next) => from = *next,
+                None => break,
+            }
+        }
+    }
+}
+
+impl SearchIndex {
+    /// Indexes titles with their App IDs, in the order they will be looked up by.
+    pub fn new<'a>(apps: impl IntoIterator<Item = (&'a str, u32)>) -> Self {
+        let mut index = Self::default();
+        for (name, app_id) in apps {
+            index.plain.push(Normalized::new(name));
+            index.compact.push(Normalized::new(name).filter(|c| *c != ' '));
+            index.ids.push(app_id.to_string().chars());
+        }
+        index
+    }
+
+    /// How many titles are indexed.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.plain.starts.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The positions of the titles `query` finds by name or by App ID, in catalogue order. An empty
+    /// query finds everything.
+    #[must_use]
+    pub fn search(&self, query: &SearchQuery) -> Vec<usize> {
+        if query.is_empty() {
+            return (0..self.len()).collect();
+        }
+        let mut found = vec![false; self.len()];
+        self.plain.mark(&query.needle_text, &mut found);
+        self.compact.mark(&query.compact_text, &mut found);
+        // App IDs are digits only, so anything else typed cannot be one.
+        if query.raw.bytes().all(|byte| byte.is_ascii_digit()) {
+            self.ids.mark(&query.raw, &mut found);
+        }
+        found
+            .iter()
+            .enumerate()
+            .filter_map(|(position, hit)| hit.then_some(position))
+            .collect()
     }
 }
 
@@ -301,5 +404,71 @@ mod tests {
         assert_eq!(normalize("Straße 27"), "strasse 27");
         // A script with no Latin base letter keeps itself rather than vanishing.
         assert_eq!(normalize("ペルソナ5"), "ペルソナ5");
+    }
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::*;
+
+    const TITLES: &[(&str, u32)] = &[
+        ("EA SPORTS FC™ 27", 3_405_690),
+        ("Marvel's Spider-Man Remastered", 1_817_070),
+        ("Yakuza: Like a Dragon", 1_235_140),
+        ("Ōkami HD", 587_620),
+        ("Counter-Strike 2", 730),
+        ("The Witcher® 3: Wild Hunt", 292_030),
+        ("Köln Simulator", 1_730),
+        ("ペルソナ5", 1_687_950),
+        ("Half-Life 2", 220),
+    ];
+
+    fn index() -> SearchIndex {
+        SearchIndex::new(TITLES.iter().map(|(name, id)| (*name, *id)))
+    }
+
+    /// The index is only an accelerator: for every query it must find the titles the per-title
+    /// match finds, no more and no fewer, in catalogue order.
+    #[test]
+    fn the_index_finds_what_the_per_title_match_finds() {
+        let index = index();
+        for typed in [
+            "fc 27",
+            "fc27",
+            "ea sports fc 27",
+            "spider man",
+            "marvels",
+            "yakuza like",
+            "okami",
+            "strike",
+            "witcher 3",
+            "koln",
+            "ペルソナ",
+            "2",
+            "e",
+            "730",
+            "17",
+            "zzz",
+            "half life 2",
+        ] {
+            let query = SearchQuery::new(typed);
+            let expected: Vec<usize> = TITLES
+                .iter()
+                .enumerate()
+                .filter(|(_, (name, id))| query.matches(name) || id.to_string().contains(query.typed()))
+                .map(|(position, _)| position)
+                .collect();
+            assert_eq!(index.search(&query), expected, "query {typed:?}");
+        }
+    }
+
+    #[test]
+    fn an_app_id_is_found_and_an_empty_query_finds_everything() {
+        let index = index();
+        // 730 is Counter-Strike 2's ID and part of Köln Simulator's (1730).
+        assert_eq!(index.search(&SearchQuery::new("730")), vec![4, 6]);
+        assert_eq!(index.search(&SearchQuery::new("  ")).len(), TITLES.len());
+        assert_eq!(index.len(), TITLES.len());
+        assert!(SearchIndex::default().search(&SearchQuery::new("a")).is_empty());
     }
 }

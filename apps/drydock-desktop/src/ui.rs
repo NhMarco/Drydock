@@ -3,7 +3,7 @@ use crate::downloads::{
     DownloadJob, DownloadKind, DownloadUpdate, JOB_PREPARING, JobLimits, claim_abandoned, human_bytes,
     run_depot_job,
 };
-use crate::unlocks::{UnlockUpdateSweep, UnlockWrites};
+use crate::unlocks::UnlockWrites;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,19 +19,20 @@ use drydock_core::{
     CRACK_ARTIFACT_NAMES, CatalogApp, CloudProvider, CloudRedirect, CloudSettings, ConflictingSoftwareStatus,
     DenuvoWatchClient, DepotData, DownloadProgress, DownloadedDll, EmuTemplateInput, FixEntry, FixStatus,
     GameLanguageOptions, LoadOutcome, OpenSteamTool, PeArch, PortablePaths, PreparedUpdate, ProxyClient,
-    QueueEffect, QueuedDownload, RepackApp, S3Credentials, SearchQuery, Settings, SteamDiscovery,
-    SteamManifest, SteamServiceState, SteamServiceStatus, SteamStoreClient, SteamStoreDetails,
-    SteamUriAction, StoreCapsule, StoreFeatured, UnlockSource, VerifiedEntitlement, achievement_image_urls,
-    add_app_files, apply_denuvo_fix, apply_language, back_up_before_overwrite, clear_previous_token_files,
-    cloud, detect_conflicting_software, detect_pe_arch, discover_steam, download_queue, ensure_toolchain,
-    executable_relative_to, fetch_achievement_images, fetch_reframework_dll, fetch_windows_arch,
-    fetch_windows_executables, fix_status, install_depot_manifests, install_magicfiles, install_service,
-    installed_app_luas, is_steam_running, is_valid_steam_directory, launch_executables,
-    load_cached_denuvo_appids, load_catalog_apps, load_dll_files, load_manifests, missing_depot_manifests,
-    open_link, open_steam_uri, overlay_sound_bytes, read_denuvo_appids, read_language_options,
-    read_own_unlock, release_update_blocks, remove_app_files, remove_paths, resolve_game_root, restart_steam,
-    run_and_capture_token_request, save_catalog_apps, save_denuvo_appids, scan_crack_files, service_status,
-    start_steam, stop_steam, toolchain_dlls, uninstall_service,
+    QueueEffect, QueuedDownload, RepackApp, S3Credentials, SearchIndex, SearchQuery, Settings,
+    SteamDiscovery, SteamManifest, SteamServiceState, SteamServiceStatus, SteamStoreClient,
+    SteamStoreDetails, SteamUriAction, StoreCapsule, StoreFeatured, UnlockSource, VerifiedEntitlement,
+    achievement_image_urls, add_app_files, apply_denuvo_fix, apply_language, back_up_before_overwrite,
+    clear_previous_token_files, cloud, detect_conflicting_software, detect_pe_arch, discover_steam,
+    download_queue, ensure_toolchain, executable_relative_to, fetch_achievement_images,
+    fetch_reframework_dll, fetch_windows_arch, fetch_windows_executables, fix_status,
+    install_depot_manifests, install_magicfiles, install_service, installed_app_luas, is_steam_running,
+    is_valid_steam_directory, launch_executables, load_cached_denuvo_appids, load_catalog_apps,
+    load_dll_files, load_manifests, missing_depot_manifests, open_link, open_steam_uri, overlay_sound_bytes,
+    read_denuvo_appids, read_language_options, read_own_unlock, release_update_blocks, remove_app_files,
+    remove_paths, resolve_game_root, restart_steam, run_and_capture_token_request, save_catalog_apps,
+    save_denuvo_appids, scan_crack_files, service_status, start_steam, stop_steam, toolchain_dlls,
+    uninstall_service,
 };
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke, Vec2};
 
@@ -206,21 +207,10 @@ type ManifestGuardSweep = (usize, Vec<u32>, Option<u32>);
 
 /// Hover text of the library button that adds the user's own unlock files.
 const OWN_UNLOCK_HOVER: &str = "Pick a Lua and/or depot manifests from your disk and add them to Steam. The game is \
-                                taken from the Lua (its file name or first addappid line). Automatic updates leave \
-                                these files alone.";
+                                taken from the Lua (its file name or first addappid line).";
 
 const VERIFY_THREADS_HOVER: &str = "How many files a verify reads at once. Auto uses one on a hard disk, where parallel \
                                     reads only slow it down, and several on an SSD.";
-
-/// How often the unlocks of apps added with the latest version are compared with the provider's.
-/// The proxy caches a depot package for a day, so checking much more often finds nothing new.
-const UNLOCK_UPDATE_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
-
-/// How often the UI looks at whether an unlock update sweep is due.
-const UNLOCK_UPDATE_POLL: Duration = Duration::from_secs(5 * 60);
-
-/// The pause between two apps in a sweep: each fetch may make the provider build a package.
-const UNLOCK_UPDATE_SPACING: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Page {
@@ -350,7 +340,13 @@ pub struct DrydockApp {
     steam: SteamDiscovery,
     conflicts: ConflictingSoftwareStatus,
     manifests: Vec<SteamManifest>,
-    catalog: Vec<CatalogApp>,
+    /// Replaced whole, never changed in place — so a search index (built on another thread) can
+    /// hold the very list it indexes and tell when it no longer is the current one.
+    catalog: Arc<Vec<CatalogApp>>,
+    /// The search index of `catalog` once built (see `rebuild_search_index`), with the list it
+    /// indexes; an index of an older list is not used.
+    search_index: Option<(Arc<Vec<CatalogApp>>, Arc<SearchIndex>)>,
+    search_index_receiver: Option<Receiver<(Arc<Vec<CatalogApp>>, SearchIndex)>>,
     /// App IDs present in the catalog (proxy gamelist), for O(1) "is this game available?" checks —
     /// used to filter the storefront shelves down to games Drydock can actually get.
     catalog_ids: std::collections::HashSet<u32>,
@@ -401,12 +397,8 @@ pub struct DrydockApp {
     /// Session-only: a restart is a fair moment to try again, since the upstream may have finished
     /// packaging in the meantime.
     manifest_fetch_attempted: HashSet<u32>,
-    /// Serialises unlock writes between the user's actions and the automatic updater.
+    /// Serialises the unlock writes of actions running side by side.
     unlock_writes: Arc<UnlockWrites>,
-    /// The running automatic unlock update sweep, if any.
-    unlock_update_receiver: Option<Receiver<UnlockUpdateSweep>>,
-    /// When the UI last looked at whether a sweep is due.
-    last_unlock_update_check: Option<Instant>,
     last_manifest_check: Option<Instant>,
     /// Whether Steam was running at the previous guard tick — a flip means an account switch or a
     /// client restart may just have emptied `depotcache`, which is the moment worth re-checking.
@@ -784,7 +776,9 @@ impl DrydockApp {
             steam,
             conflicts,
             manifests,
-            catalog,
+            catalog: Arc::new(catalog),
+            search_index: None,
+            search_index_receiver: None,
             catalog_ids: std::collections::HashSet::new(),
             header_resolver,
             catalog_receiver: None,
@@ -816,8 +810,6 @@ impl DrydockApp {
             manifest_guard_receiver: None,
             manifest_fetch_attempted: HashSet::new(),
             unlock_writes: Arc::default(),
-            unlock_update_receiver: None,
-            last_unlock_update_check: None,
             last_manifest_check: None,
             steam_was_running: is_steam_running(),
             selected_app: None,
@@ -909,9 +901,10 @@ impl DrydockApp {
     /// Recomputes the genre filter options from the current catalog, keeping only tags that
     /// appear often enough to be useful and dropping a stale selection.
     fn recompute_tags(&mut self) {
+        self.rebuild_search_index();
         self.catalog_ids = self.catalog.iter().map(|app| app.app_id).collect();
         let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-        for app in &self.catalog {
+        for app in self.catalog.iter() {
             for tag in &app.tags {
                 *counts.entry(tag.as_str()).or_default() += 1;
             }
@@ -928,6 +921,38 @@ impl DrydockApp {
         {
             self.selected_tag = None;
         }
+    }
+
+    /// Builds the search index of the current catalogue on another thread: it takes about a tenth
+    /// of a second for the full list, which the interface should not stall for. Until it arrives
+    /// the search boxes say they are getting ready rather than scanning the list themselves.
+    fn rebuild_search_index(&mut self) {
+        let catalog = Arc::clone(&self.catalog);
+        let (sender, receiver) = mpsc::channel();
+        self.search_index_receiver = Some(receiver);
+        std::thread::spawn(move || {
+            let index = SearchIndex::new(catalog.iter().map(|app| (app.name.as_str(), app.app_id)));
+            let _ = sender.send((catalog, index));
+        });
+    }
+
+    fn poll_search_index(&mut self) {
+        let Some(receiver) = self.search_index_receiver.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok((catalog, index)) => {
+                self.search_index_receiver = None;
+                self.search_index = Some((catalog, Arc::new(index)));
+            }
+            Err(TryRecvError::Disconnected) => self.search_index_receiver = None,
+            Err(TryRecvError::Empty) => {}
+        }
+    }
+
+    /// The search index, if the one built is for the catalogue shown now.
+    fn current_search_index(&self) -> Option<&SearchIndex> {
+        index_for(&self.search_index, &self.catalog)
     }
 
     fn start_catalog_refresh(&mut self, force: bool) {
@@ -990,8 +1015,8 @@ impl DrydockApp {
                 if let Ok(apps) = result
                     && !apps.is_empty()
                 {
-                    let changed = apps != self.catalog;
-                    self.catalog = apps;
+                    let changed = apps != *self.catalog;
+                    self.catalog = Arc::new(apps);
                     self.recompute_tags();
                     if let Err(error) =
                         save_catalog_apps(&self.paths.cache_dir().join("games.json"), &self.catalog)
@@ -2422,7 +2447,6 @@ impl DrydockApp {
         self.busy_label = Some(format!("Adding {name} to Steam and caching its manifests…"));
         let store = self.payload_store.clone();
         let writes = Arc::clone(&self.unlock_writes);
-        writes.touch(app_id);
         std::thread::spawn(move || {
             let result = (|| {
                 let client = ProxyClient::new().map_err(|error| error.to_string())?;
@@ -2516,7 +2540,6 @@ impl DrydockApp {
         ));
         let store = self.payload_store.clone();
         let writes = Arc::clone(&self.unlock_writes);
-        writes.touch(app_id);
         std::thread::spawn(move || {
             let result = (|| {
                 let client = ProxyClient::new().map_err(|error| error.to_string())?;
@@ -2657,7 +2680,6 @@ impl DrydockApp {
         self.service_receiver = Some(receiver);
         self.busy_label = Some(format!("Removing {name} from Steam…"));
         let writes = Arc::clone(&self.unlock_writes);
-        writes.touch(app_id);
         std::thread::spawn(move || {
             let result = (|| {
                 // Fall back to the deterministic Ryuu file name when nothing was recorded.
@@ -2701,7 +2723,6 @@ impl DrydockApp {
         self.busy_label = Some(format!("Adding your files for {name} to Steam…"));
         let store = self.payload_store.clone();
         let writes = Arc::clone(&self.unlock_writes);
-        writes.touch(app_id);
         std::thread::spawn(move || {
             let result = (|| {
                 let manifest = OpenSteamTool::new()
@@ -2720,138 +2741,6 @@ impl DrydockApp {
             })();
             let _ = sender.send(result);
         });
-    }
-
-    /// Apps whose unlock follows the provider's latest version: added with the latest version. Apps
-    /// added before sources were recorded count too, once the fix list shows their installed Lua is
-    /// not a build-locked Denuvo fix.
-    fn apps_following_latest(&self) -> Vec<u32> {
-        let root = self.steam.root.as_deref();
-        self.settings
-            .added_apps
-            .iter()
-            .filter(|(app_id, state)| match state.source {
-                Some(UnlockSource::Latest) => true,
-                Some(UnlockSource::Cracked | UnlockSource::Own) => false,
-                None => {
-                    self.fixes_loaded
-                        && !self
-                            .fix_for(**app_id)
-                            .and_then(|fix| fix.denuvo.as_ref())
-                            .zip(root)
-                            .is_some_and(|(denuvo, root)| fix_status(root, denuvo) == FixStatus::Applied)
-                }
-            })
-            .map(|(app_id, _)| *app_id)
-            .collect()
-    }
-
-    /// Starts an automatic unlock update when one is due, bringing the apps that follow the latest
-    /// version to the provider's current Lua and manifests. Looked at every few minutes; a sweep runs
-    /// at most every [`UNLOCK_UPDATE_INTERVAL`], across restarts, and only with a current Steam Service.
-    fn maybe_update_unlocks(&mut self) {
-        if !self.settings.auto_update_unlocks || self.unlock_update_receiver.is_some() {
-            return;
-        }
-        if self
-            .last_unlock_update_check
-            .is_some_and(|at| at.elapsed() < UNLOCK_UPDATE_POLL)
-        {
-            return;
-        }
-        self.last_unlock_update_check = Some(Instant::now());
-        let Some(root) = self.steam.root.clone() else {
-            return;
-        };
-        if self
-            .service_status
-            .as_ref()
-            .is_none_or(|status| status.state != SteamServiceState::Current)
-        {
-            return;
-        }
-        let apps = self.apps_following_latest();
-        let marker = self.paths.cache_dir().join("unlock-update.marker");
-        if apps.is_empty() || refresh_marker_is_current(&marker, "v1", UNLOCK_UPDATE_INTERVAL) {
-            return;
-        }
-        if let Some(parent) = marker.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = fs::write(&marker, "v1");
-        let store = self.payload_store.clone();
-        let writes = Arc::clone(&self.unlock_writes);
-        let (sender, receiver) = mpsc::channel();
-        self.unlock_update_receiver = Some(receiver);
-        std::thread::spawn(move || {
-            let sweep = match ProxyClient::new() {
-                Ok(client) => crate::unlocks::update_unlocks(
-                    &root,
-                    &store,
-                    &apps,
-                    &writes,
-                    UNLOCK_UPDATE_SPACING,
-                    |app_id| match DepotData::fetch(&client, app_id) {
-                        // Only the package's own Lua is pinned to its manifests; without one the app
-                        // keeps what it has.
-                        Ok(data) => Ok(data.lua.map(|(_, lua)| (lua, data.raw_manifests))),
-                        Err(error) => Err(error.to_string()),
-                    },
-                ),
-                Err(_) => UnlockUpdateSweep {
-                    updated: Vec::new(),
-                    failed: apps.len(),
-                },
-            };
-            let _ = sender.send(sweep);
-        });
-    }
-
-    fn poll_unlock_updates(&mut self) {
-        let Some(receiver) = self.unlock_update_receiver.as_ref() else {
-            return;
-        };
-        match receiver.try_recv() {
-            Ok(sweep) => {
-                self.unlock_update_receiver = None;
-                if sweep.updated.is_empty() {
-                    return;
-                }
-                // An app recorded before sources were has now been updated as a latest-version one.
-                let mut recorded = false;
-                for app_id in &sweep.updated {
-                    if let Some(state) = self.settings.added_apps.get_mut(app_id)
-                        && state.source.is_none()
-                    {
-                        state.source = Some(UnlockSource::Latest);
-                        recorded = true;
-                    }
-                }
-                if recorded {
-                    let _ = self.persist_settings();
-                }
-                self.refresh_plugin_luas();
-                let names: Vec<String> = sweep
-                    .updated
-                    .iter()
-                    .take(3)
-                    .map(|app_id| self.app_display_name(*app_id))
-                    .collect();
-                let more = sweep.updated.len().saturating_sub(names.len());
-                self.status = format!(
-                    "Updated the Lua and manifests of {}{} to the latest version.",
-                    names.join(", "),
-                    if more > 0 {
-                        format!(" and {more} more")
-                    } else {
-                        String::new()
-                    }
-                );
-                self.status_error = false;
-            }
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => self.unlock_update_receiver = None,
-        }
     }
 
     fn app_display_name(&self, app_id: u32) -> String {
@@ -4191,18 +4080,26 @@ impl DrydockApp {
         ui.add_space(12.0);
         // Titles carry marks nobody types — "EA SPORTS FC™ 27" — so both sides are reduced to the
         // same plain form before they are compared (see `drydock_core::search`).
-        let query = SearchQuery::new(&self.search);
+        let Some(hits) = search_hits(
+            ui.ctx(),
+            egui::Id::new("store_search"),
+            &self.search,
+            &self.catalog,
+            self.current_search_index(),
+        ) else {
+            ui.label(RichText::new("Getting the search ready…").size(11.0).color(MUTED));
+            return;
+        };
         let open = {
             let repack_filter = self.repack_filter.clone();
             let fix_filter = self.fix_filter;
             let repackers = &self.repackers_by_app;
             let fix_flags = &self.fix_flags_by_app;
-            let matches: Vec<&CatalogApp> = self
-                .catalog
+            let matches: Vec<&CatalogApp> = hits
                 .iter()
+                .filter_map(|position| self.catalog.get(*position))
                 .filter(|entry| {
                     catalog_matches_filters(entry, &repack_filter, fix_filter, repackers, fix_flags)
-                        && (query.matches(&entry.name) || entry.app_id.to_string().contains(query.typed()))
                 })
                 .take(200)
                 .collect();
@@ -4257,6 +4154,9 @@ impl DrydockApp {
         // Installed (real) games first, then games activated in Drydock that Steam hasn't installed.
         let mut entries: Vec<LibraryEntry> = Vec::new();
         let mut seen: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        let has_lua = |app_id: u32| {
+            self.plugin_luas.contains(&app_id) || self.settings.added_apps.contains_key(&app_id)
+        };
         for manifest in &self.manifests {
             if is_real_game(manifest.app_id, &manifest.name) && seen.insert(manifest.app_id) {
                 entries.push(LibraryEntry {
@@ -4265,6 +4165,7 @@ impl DrydockApp {
                     installed: true,
                     launch_path: self.settings.launch_paths.get(&manifest.app_id).cloned(),
                     source: LibrarySource::SteamInstalled,
+                    has_lua: has_lua(manifest.app_id),
                 });
             }
         }
@@ -4278,6 +4179,7 @@ impl DrydockApp {
                     installed: true,
                     launch_path: self.settings.launch_paths.get(app_id).cloned(),
                     source: LibrarySource::DrydockInstalled,
+                    has_lua: has_lua(*app_id),
                 });
             }
         }
@@ -4310,6 +4212,7 @@ impl DrydockApp {
                 installed: false,
                 launch_path: self.settings.launch_paths.get(&app_id).cloned(),
                 source: LibrarySource::Available,
+                has_lua: true,
             });
         }
         entries.sort_by_key(|entry| entry.name.to_lowercase());
@@ -5154,6 +5057,7 @@ impl DrydockApp {
                     &mut self.add_game_search,
                     None,
                     &self.catalog,
+                    index_for(&self.search_index, &self.catalog),
                     &self.header_resolver,
                     width,
                     true,
@@ -5506,6 +5410,7 @@ impl DrydockApp {
                 &mut self.activation_search,
                 self.selected_app,
                 &self.catalog,
+                index_for(&self.search_index, &self.catalog),
                 &self.header_resolver,
                 selector_width,
                 false,
@@ -5696,6 +5601,7 @@ impl DrydockApp {
                 &mut self.activation_search,
                 self.selected_app,
                 &self.catalog,
+                index_for(&self.search_index, &self.catalog),
                 &self.header_resolver,
                 selector_width,
                 false,
@@ -6283,49 +6189,6 @@ impl DrydockApp {
                     }
                     Err(error) => {
                         self.settings.auto_update_drydock = previous_auto_update;
-                        self.status = format!("Auto-update setting could not be saved: {error}");
-                        self.status_error = true;
-                    }
-                }
-            }
-            ui.add_space(12.0);
-            let previous_unlock_updates = self.settings.auto_update_unlocks;
-            let mut unlock_updates_changed = false;
-            panel(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        section_label(ui, "LUA & MANIFEST AUTO UPDATE");
-                        ui.add_space(4.0);
-                        ui.label(
-                            RichText::new(
-                                "Games added with the latest version get new Lua and manifests twice a day. \
-                                 Cracked versions and your own files are left alone.",
-                            )
-                            .size(9.5)
-                            .color(ACCENT),
-                        );
-                    });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if toggle_switch(ui, &mut self.settings.auto_update_unlocks, ACCENT_SOFT).changed() {
-                            unlock_updates_changed = true;
-                        }
-                    });
-                });
-            });
-            if unlock_updates_changed {
-                match self.persist_settings() {
-                    Ok(()) => {
-                        // Turning it on checks at the next opportunity instead of in a few minutes.
-                        self.last_unlock_update_check = None;
-                        self.status = if self.settings.auto_update_unlocks {
-                            "Lua and manifest auto update enabled".into()
-                        } else {
-                            "Lua and manifest auto update disabled".into()
-                        };
-                        self.status_error = false;
-                    }
-                    Err(error) => {
-                        self.settings.auto_update_unlocks = previous_unlock_updates;
                         self.status = format!("Auto-update setting could not be saved: {error}");
                         self.status_error = true;
                     }
@@ -7454,8 +7317,9 @@ impl DrydockApp {
 #[cfg(feature = "screenshot")]
 impl DrydockApp {
     /// Ordered pages the screenshot harness walks through (see [`crate::screenshot`]).
-    pub const SCREENSHOT_PAGES: [&'static str; 16] = [
+    pub const SCREENSHOT_PAGES: [&'static str; 17] = [
         "home",
+        "search",
         "repacks",
         "denuvo",
         "library",
@@ -7476,6 +7340,8 @@ impl DrydockApp {
 
     /// Switches the visible page by key so the harness can capture each one.
     pub fn screenshot_goto(&mut self, key: &str) {
+        // Only the search page searches; everywhere else the query would cover the page.
+        self.search.clear();
         match key {
             "details" => {
                 // Prefer an installed game so the Play/Uninstall buttons are exercised;
@@ -7504,6 +7370,10 @@ impl DrydockApp {
                 self.add_game_folder = Some(PathBuf::from("D:\\Games\\Onimusha Way of the Sword"));
             }
             "library" => self.page = Page::Library,
+            "search" => {
+                self.page = Page::Home;
+                self.search = "counter".into();
+            }
             "about" => {
                 self.page = Page::Home;
                 self.about_open = true;
@@ -7576,6 +7446,7 @@ impl eframe::App for DrydockApp {
         self.image_textures.forget_retired(ui.ctx());
         self.poll_background_action();
         self.poll_catalog_refresh();
+        self.poll_search_index();
         self.poll_denuvo_refresh();
         self.poll_fixes_refresh();
         self.poll_repacks_refresh();
@@ -7594,8 +7465,6 @@ impl eframe::App for DrydockApp {
         self.poll_add_game();
         self.poll_download_install();
         self.poll_manifest_guard();
-        self.poll_unlock_updates();
-        self.maybe_update_unlocks();
         self.poll_cloud_download();
         self.poll_cloud_oauth();
         // Entering a new page re-checks installed games and the Service status, so the
@@ -7630,6 +7499,7 @@ impl eframe::App for DrydockApp {
             || self.repacks_receiver.is_some()
             || self.emu_receiver.is_some()
             || self.add_game_receiver.is_some()
+            || self.search_index_receiver.is_some()
             || !self.download_install_receiver.is_empty()
             || self.cloud_download_receiver.is_some()
             || self.cloud_oauth_receiver.is_some()
@@ -8386,6 +8256,44 @@ fn content_column(ui: &mut egui::Ui, max_width: f32, add_contents: impl FnOnce(&
     });
 }
 
+/// The positions in `catalog` of the titles `text` finds, remembered per search box (`id`) until
+/// the text or the catalogue changes. The interface redraws up to 60 times a second; searching a
+/// quarter of a million titles each time kept a core busy and the window stuttering, while
+/// the answer only changes with a keystroke. `None` until the catalogue's index is ready.
+/// `built` if it is the index of `catalog` (see `DrydockApp::current_search_index`). A free function
+/// so a caller holding another field mutably can still ask.
+fn index_for<'a>(
+    built: &'a Option<(Arc<Vec<CatalogApp>>, Arc<SearchIndex>)>,
+    catalog: &Arc<Vec<CatalogApp>>,
+) -> Option<&'a SearchIndex> {
+    built
+        .as_ref()
+        .filter(|(indexed, _)| Arc::ptr_eq(indexed, catalog))
+        .map(|(_, index)| index.as_ref())
+}
+
+fn search_hits(
+    context: &egui::Context,
+    id: egui::Id,
+    text: &str,
+    catalog: &Arc<Vec<CatalogApp>>,
+    index: Option<&SearchIndex>,
+) -> Option<Arc<[usize]>> {
+    // Which catalogue the hits are positions in: the pointer of the list itself, which is
+    // replaced (never changed) when the catalogue is.
+    let list = Arc::as_ptr(catalog) as usize;
+    let remembered = context.data(|data| data.get_temp::<(String, usize, Arc<[usize]>)>(id));
+    if let Some((query, of, hits)) = remembered
+        && of == list
+        && query == text
+    {
+        return Some(hits);
+    }
+    let hits: Arc<[usize]> = index?.search(&SearchQuery::new(text)).into();
+    context.data_mut(|data| data.insert_temp(id, (text.to_owned(), list, Arc::clone(&hits))));
+    Some(hits)
+}
+
 /// A dynamic game search: a heading-sized search field over a fixed-height results list. Returns the
 /// App ID the user clicked, if any. The results box is a constant height (never resizing with the
 /// match count), so neither it nor its scrollbar jumps as the query changes. When the query already
@@ -8396,7 +8304,8 @@ fn game_search_box(
     id: &str,
     search: &mut String,
     selected: Option<u32>,
-    catalog: &[CatalogApp],
+    catalog: &Arc<Vec<CatalogApp>>,
+    index: Option<&SearchIndex>,
     headers: &HeaderResolver,
     width: f32,
     // When true (a filter is active) the results stay open even with an empty query, so the user can
@@ -8430,12 +8339,12 @@ fn game_search_box(
         return None;
     }
 
-    let matches: Vec<&CatalogApp> = catalog
+    let hits = search_hits(ui.ctx(), egui::Id::new(id), search, catalog, index);
+    let matches: Vec<&CatalogApp> = hits
         .iter()
-        .filter(|entry| {
-            extra_filter(entry)
-                && (query.matches(&entry.name) || entry.app_id.to_string().contains(query.typed()))
-        })
+        .flat_map(|hits| hits.iter())
+        .filter_map(|position| catalog.get(*position))
+        .filter(|entry| extra_filter(entry))
         .take(100)
         .collect();
 
@@ -8671,6 +8580,10 @@ fn search_result_row(
 ) -> bool {
     let (slot, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), row_height), Sense::click());
+    // A list of results can be long; the rows scrolled out of view only take their space.
+    if !ui.is_rect_visible(slot) {
+        return false;
+    }
     // The card fills the top of the slot; the bottom LIST_ROW_GAP is left empty so rows separate the
     // same way the Featured cards do. Keeping the allocated slot at `row_height` means callers and
     // `show_rows` still advance by exactly one row.
@@ -9150,6 +9063,8 @@ struct LibraryEntry {
     launch_path: Option<String>,
     /// Which group/buttons this game belongs to.
     source: LibrarySource,
+    /// Whether Steam has an unlock Lua for it — on disk or recorded — so it can be removed again.
+    has_lua: bool,
 }
 
 /// What a Library card wants the page to do once the frame is laid out (applied after the borrow of
@@ -9185,40 +9100,40 @@ enum LibraryAction {
 /// everything here is the secondary set — maintenance, removal and the store link. Pure, so the
 /// composition can be checked without a frame.
 type LibraryMenuEntry = (&'static str, &'static str, LibraryAction);
-fn library_menu(source: LibrarySource, app_id: u32) -> (LibraryMenuEntry, Vec<LibraryMenuEntry>) {
+fn library_menu(
+    source: LibrarySource,
+    app_id: u32,
+    has_lua: bool,
+) -> (LibraryMenuEntry, Vec<LibraryMenuEntry>) {
     let store_page = (
         "STORE PAGE",
         "Open this game's details page",
         LibraryAction::Details(app_id),
     );
+    // Offered on every row whose game has a Lua in Steam, whether or not the game is installed.
+    let remove_lua = has_lua.then_some((
+        "REMOVE LUA FROM STEAM",
+        "Delete the unlock Lua from Steam (asks first; the game's files stay)",
+        LibraryAction::RemoveLua(app_id),
+    ));
+    let update_lua = (
+        "UPDATE LUA",
+        "Re-fetch and re-install the unlock Lua",
+        LibraryAction::UpdateLua(app_id),
+    );
     match source {
-        LibrarySource::Available => (
-            (
-                "UPDATE LUA",
-                "Re-fetch and re-install the unlock Lua",
-                LibraryAction::UpdateLua(app_id),
-            ),
-            vec![store_page],
-        ),
+        LibrarySource::Available => (update_lua, remove_lua.into_iter().chain([store_page]).collect()),
         LibrarySource::SteamInstalled => (
-            (
-                "UPDATE LUA",
-                "Re-fetch and re-install the unlock Lua",
-                LibraryAction::UpdateLua(app_id),
-            ),
-            vec![
-                (
-                    "UNINSTALL GAME",
-                    "Ask Steam to uninstall the game",
-                    LibraryAction::UninstallSteam(app_id),
-                ),
-                (
-                    "REMOVE LUA",
-                    "Delete the unlock Lua from Steam",
-                    LibraryAction::RemoveLua(app_id),
-                ),
-                store_page,
-            ],
+            update_lua,
+            [(
+                "UNINSTALL GAME",
+                "Ask Steam to uninstall the game",
+                LibraryAction::UninstallSteam(app_id),
+            )]
+            .into_iter()
+            .chain(remove_lua)
+            .chain([store_page])
+            .collect(),
         ),
         LibrarySource::DrydockInstalled => (
             (
@@ -9226,7 +9141,7 @@ fn library_menu(source: LibrarySource, app_id: u32) -> (LibraryMenuEntry, Vec<Li
                 "Check the depot for updated files and download them",
                 LibraryAction::UpdateDrydock(app_id),
             ),
-            vec![
+            [
                 (
                     "VERIFY FILES",
                     "Verify the downloaded files against the depot manifests",
@@ -9242,13 +9157,18 @@ fn library_menu(source: LibrarySource, app_id: u32) -> (LibraryMenuEntry, Vec<Li
                     "Point PLAY at a different executable",
                     LibraryAction::SetExe(app_id),
                 ),
+            ]
+            .into_iter()
+            .chain(remove_lua)
+            .chain([
                 (
                     "UNINSTALL",
                     "Delete the downloaded game folder",
                     LibraryAction::UninstallDrydock(app_id),
                 ),
                 store_page,
-            ],
+            ])
+            .collect(),
         ),
     }
 }
@@ -9463,7 +9383,7 @@ fn library_overview(
                                 }
                             }
                         }
-                        let (main, entries) = library_menu(entry.source, entry.app_id);
+                        let (main, entries) = library_menu(entry.source, entry.app_id, entry.has_lua);
                         let items: Vec<MenuItem> = entries
                             .iter()
                             .map(|(label, hover, _)| MenuItem { label, hover })
@@ -10734,7 +10654,7 @@ fn add_to_steam_extras(is_added: bool, has_denuvo: bool) -> Vec<(&'static str, &
     }
     extras.push((
         "ADD YOUR OWN LUA / MANIFESTS",
-        "Pick a Lua and/or depot manifests from your disk. Automatic updates leave them alone",
+        "Pick a Lua and/or depot manifests from your disk",
         DetailsAction::AddOwn,
     ));
     if is_added {
@@ -11481,13 +11401,19 @@ mod ui_tests {
     fn every_library_row_keeps_its_actions_reachable() {
         // Nothing may be dropped by the regrouping: each row's main action plus its dropdown has to
         // still cover everything that row can do.
-        for (source, expected) in [
+        for (source, has_lua, expected) in [
             (
                 LibrarySource::Available,
-                vec![LibraryAction::UpdateLua(7), LibraryAction::Details(7)],
+                true,
+                vec![
+                    LibraryAction::UpdateLua(7),
+                    LibraryAction::RemoveLua(7),
+                    LibraryAction::Details(7),
+                ],
             ),
             (
                 LibrarySource::SteamInstalled,
+                true,
                 vec![
                     LibraryAction::UpdateLua(7),
                     LibraryAction::UninstallSteam(7),
@@ -11495,8 +11421,32 @@ mod ui_tests {
                     LibraryAction::Details(7),
                 ],
             ),
+            // A game Steam has without a Lua (one the user owns) has none to remove.
+            (
+                LibrarySource::SteamInstalled,
+                false,
+                vec![
+                    LibraryAction::UpdateLua(7),
+                    LibraryAction::UninstallSteam(7),
+                    LibraryAction::Details(7),
+                ],
+            ),
             (
                 LibrarySource::DrydockInstalled,
+                true,
+                vec![
+                    LibraryAction::UpdateDrydock(7),
+                    LibraryAction::VerifyDrydock(7),
+                    LibraryAction::CrackDrydock(7),
+                    LibraryAction::SetExe(7),
+                    LibraryAction::RemoveLua(7),
+                    LibraryAction::UninstallDrydock(7),
+                    LibraryAction::Details(7),
+                ],
+            ),
+            (
+                LibrarySource::DrydockInstalled,
+                false,
                 vec![
                     LibraryAction::UpdateDrydock(7),
                     LibraryAction::VerifyDrydock(7),
@@ -11507,7 +11457,7 @@ mod ui_tests {
                 ],
             ),
         ] {
-            let (main, extras) = library_menu(source, 7);
+            let (main, extras) = library_menu(source, 7, has_lua);
             let mut actions = vec![main.2];
             actions.extend(extras.iter().map(|(_, _, action)| *action));
             assert_eq!(actions, expected);

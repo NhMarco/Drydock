@@ -24,19 +24,34 @@
 //
 // `X-Cache` says which of the three a response came from: `MISS` (fetched now), `HIT` (cached
 // normally) or `KEPT` (the retained copy from a day-limited source).
+//
+// The `.lua` in a package loses the provider's comments and gets Drydock's header (luaClean.ts)
+// before it is cached, so every client gets the same clean file whichever provider served it.
 
-import type { Readable } from "node:stream";
+import { Readable } from "node:stream";
 import type { FastifyInstance, FastifyBaseLogger, FastifyReply, preHandlerHookHandler } from "fastify";
 import { isLastResort, orderedSources, type DepotPackageSourceName } from "../config.js";
 import { UpstreamError, type SteamToolsClient } from "../upstream.js";
 import type { DepotBoxClient, RawStream } from "../depotbox.js";
 import type { RyuClient } from "../ryu.js";
 import type { HubcapClient } from "../hubcap.js";
-import type { FileCache } from "../fileCache.js";
+import type { CacheHit, FileCache } from "../fileCache.js";
 import type { ProviderCooldown } from "../merged.js";
 import { MAXIMUM_PACKAGE_BYTES, requireZip } from "../packageCheck.js";
+import { cleanPackageLuas } from "../luaClean.js";
 
 const APPID_PATTERN = /^[0-9]{1,10}$/;
+
+// A package cached before this process started may predate Lua cleaning. Such a copy is cleaned as
+// it is served — cleaning is idempotent, so one already clean passes unchanged — until a fresh fetch
+// replaces it (within a day, or for a kept copy whenever an ordinary provider has the app again).
+const STARTED_AT = Date.now();
+
+async function collect(stream: NodeJS.ReadableStream): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) chunks.push(Buffer.from(chunk as Uint8Array));
+  return Buffer.concat(chunks);
+}
 
 /// A depot-package upstream: a name for `X-Depot-Source` and a function that opens its ZIP stream.
 interface PackageSource {
@@ -101,6 +116,13 @@ export function registerDepotRoutes(
         return reply.code(503).send({ error: "no_source" });
       }
 
+      // A cached copy from before this process started, cleaned on the way out (see STARTED_AT).
+      const serveCached = async (hit: CacheHit, source: string, cacheState: "HIT" | "MISS" | "KEPT") => {
+        if (hit.storedAt >= STARTED_AT) return sendZip(hit.stream(), hit.contentLength, source, cacheState);
+        const cleaned = cleanPackageLuas(await collect(hit.stream()), appid);
+        return sendZip(Readable.from([cleaned]), cleaned.length, source, cacheState);
+      };
+
       const sendZip = (
         body: NodeJS.ReadableStream,
         length: number | null,
@@ -148,8 +170,10 @@ export function registerDepotRoutes(
               MAXIMUM_PACKAGE_BYTES,
               true,
             );
+            // Read whole (requireZip bounds it) so the Lua inside can be cleaned before caching.
+            const cleaned = cleanPackageLuas(await collect(stream), appid);
             source = candidate.name;
-            return stream;
+            return Readable.from([cleaned]);
           } catch (error) {
             cooldown.noteFailure(candidate.name, error);
             lastError = error;
@@ -183,7 +207,7 @@ export function registerDepotRoutes(
       try {
         const { hit, cached } = await cache.getOrFetch(cacheKey, "application/zip", openUpstream);
         const state = cached ? (hit.kept ? "KEPT" : "HIT") : hit.kept ? "KEPT" : "MISS";
-        return sendZip(hit.stream(), hit.contentLength, cached ? "cache" : source, state);
+        return await serveCached(hit, cached ? "cache" : source, state);
       } catch (error) {
         // Every provider failed. A copy on disk — an expired one, or one kept from a day-limited
         // source — is a better answer than an error, and it costs nobody anything.
@@ -193,7 +217,7 @@ export function registerDepotRoutes(
             { appid, kept: stale.kept, storedAt: stale.storedAt },
             "No provider served the package; serving the copy on disk.",
           );
-          return sendZip(stale.stream(), stale.contentLength, "cache", stale.kept ? "KEPT" : "HIT");
+          return await serveCached(stale, "cache", stale.kept ? "KEPT" : "HIT");
         }
         // Deliberately *not* falling back to piping `raw.stream` here: by the time a cache write
         // fails its pipeline has already consumed part (or all) of the upstream stream, so replaying
