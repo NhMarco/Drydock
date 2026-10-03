@@ -3,7 +3,6 @@ use thiserror::Error;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SteamUriAction {
     Install,
-    Uninstall,
     Run,
 }
 
@@ -18,7 +17,6 @@ pub fn open_steam_uri(app_id: u32, action: SteamUriAction) -> Result<(), SteamUr
 fn steam_uri(app_id: u32, action: SteamUriAction) -> String {
     let command = match action {
         SteamUriAction::Install => "install",
-        SteamUriAction::Uninstall => "uninstall",
         SteamUriAction::Run => "run",
     };
     format!("steam://{command}/{app_id}")
@@ -41,10 +39,6 @@ mod tests {
         assert_eq!(
             steam_uri(111_300, SteamUriAction::Install),
             "steam://install/111300"
-        );
-        assert_eq!(
-            steam_uri(111_300, SteamUriAction::Uninstall),
-            "steam://uninstall/111300"
         );
         assert_eq!(steam_uri(111_300, SteamUriAction::Run), "steam://run/111300");
     }

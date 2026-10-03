@@ -4151,26 +4151,15 @@ impl DrydockApp {
             self.render_add_game_panel(ui);
             return;
         }
-        // Installed (real) games first, then games activated in Drydock that Steam hasn't installed.
+        // Two groups (see `LibraryGroup`): the games this app downloaded, and the games that are in
+        // Steam through a Lua. A game in both is the download, so it is listed once, under the app.
+        // A game Steam has without a Lua — one bought there — is Steam's own and not listed.
         let mut entries: Vec<LibraryEntry> = Vec::new();
         let mut seen: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
         let has_lua = |app_id: u32| {
             self.plugin_luas.contains(&app_id) || self.settings.added_apps.contains_key(&app_id)
         };
-        for manifest in &self.manifests {
-            if is_real_game(manifest.app_id, &manifest.name) && seen.insert(manifest.app_id) {
-                entries.push(LibraryEntry {
-                    app_id: manifest.app_id,
-                    name: manifest.name.clone(),
-                    installed: true,
-                    launch_path: self.settings.launch_paths.get(&manifest.app_id).cloned(),
-                    source: LibrarySource::SteamInstalled,
-                    has_lua: has_lua(manifest.app_id),
-                });
-            }
-        }
-        // Games Drydock downloaded through its own depot engine into the games folder (not the Steam
-        // library) — shown alongside the Steam-detected ones.
+        // Games downloaded through the app's own depot engine into the games folder.
         for (app_id, game) in &self.settings.installed_games {
             if seen.insert(*app_id) {
                 entries.push(LibraryEntry {
@@ -4180,6 +4169,22 @@ impl DrydockApp {
                     launch_path: self.settings.launch_paths.get(app_id).cloned(),
                     source: LibrarySource::DrydockInstalled,
                     has_lua: has_lua(*app_id),
+                });
+            }
+        }
+        // Games with a Lua that Steam has installed.
+        for manifest in &self.manifests {
+            if has_lua(manifest.app_id)
+                && is_real_game(manifest.app_id, &manifest.name)
+                && seen.insert(manifest.app_id)
+            {
+                entries.push(LibraryEntry {
+                    app_id: manifest.app_id,
+                    name: manifest.name.clone(),
+                    installed: true,
+                    launch_path: self.settings.launch_paths.get(&manifest.app_id).cloned(),
+                    source: LibrarySource::SteamInstalled,
+                    has_lua: true,
                 });
             }
         }
@@ -4341,18 +4346,14 @@ impl DrydockApp {
                                 .show(ui, |ui| {
                                     let selected = self.library_selected;
                                     // Steam-style collapsible groups, all open by default.
-                                    for (title, source) in [
-                                        ("Installed in Steam", LibrarySource::SteamInstalled),
-                                        (
-                                            branded!("Installed in {product}"),
-                                            LibrarySource::DrydockInstalled,
-                                        ),
-                                        ("Available", LibrarySource::Available),
+                                    for (title, group) in [
+                                        ("STEAM", LibraryGroup::Steam),
+                                        (branded!(upper "{product}"), LibraryGroup::Downloaded),
                                     ] {
                                         if let Some(id) = library_rail_group(
                                             ui,
                                             title,
-                                            source,
+                                            group,
                                             &entries,
                                             selected,
                                             &self.header_resolver,
@@ -4391,7 +4392,6 @@ impl DrydockApp {
             Some(LibraryAction::Launch(app_id)) => self.launch_library_game(app_id),
             Some(LibraryAction::SetExe(app_id)) => self.set_library_launch_path(app_id),
             Some(LibraryAction::InstallSteam(app_id)) => self.install_steam_game(app_id),
-            Some(LibraryAction::UninstallSteam(app_id)) => self.uninstall_steam_game(app_id),
             Some(LibraryAction::UpdateLua(app_id)) => self.add_app_to_steam(app_id),
             Some(LibraryAction::RemoveLua(app_id)) => self.remove_lua_confirmed(app_id),
             Some(LibraryAction::VerifyDrydock(app_id)) => {
@@ -4698,19 +4698,6 @@ impl DrydockApp {
 
     /// Asks Steam to uninstall a Steam-installed game (`steam://uninstall`); Steam shows its own
     /// confirmation, so no extra dialog here.
-    fn uninstall_steam_game(&mut self, app_id: u32) {
-        match open_steam_uri(app_id, SteamUriAction::Uninstall) {
-            Ok(()) => {
-                self.status = "Asking Steam to uninstall the game".into();
-                self.status_error = false;
-            }
-            Err(error) => {
-                self.status = error.to_string();
-                self.status_error = true;
-            }
-        }
-    }
-
     /// Removes a game's unlock Lua from Steam after a confirmation prompt.
     fn remove_lua_confirmed(&mut self, app_id: u32) {
         let name = self.app_display_name(app_id);
@@ -7344,7 +7331,7 @@ impl DrydockApp {
         self.search.clear();
         match key {
             "details" => {
-                // Prefer an installed game so the Play/Uninstall buttons are exercised;
+                // Prefer an installed game so the Play buttons are exercised;
                 // otherwise fall back to the first catalog app.
                 let app_id = self
                     .manifests
@@ -9043,14 +9030,31 @@ struct AddGameOutcome {
 }
 
 /// Where a Library game comes from — decides its rail group and which management buttons it gets.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LibrarySource {
-    /// Steam has it installed (a Steam `appmanifest.acf`).
+    /// Its unlock Lua is in Steam, and Steam has it installed (a Steam `appmanifest.acf`).
     SteamInstalled,
     /// Drydock downloaded it through its own depot engine.
     DrydockInstalled,
     /// Its unlock Lua is in Steam, but the game itself isn't installed yet.
     Available,
+}
+
+impl LibrarySource {
+    fn group(self) -> LibraryGroup {
+        match self {
+            Self::SteamInstalled | Self::Available => LibraryGroup::Steam,
+            Self::DrydockInstalled => LibraryGroup::Downloaded,
+        }
+    }
+}
+
+/// The Library's two groups: every game that is in Steam through a Lua, installed or not, and every
+/// game the app downloaded itself (titled with the product's name).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LibraryGroup {
+    Steam,
+    Downloaded,
 }
 
 /// One row of the Library page: a game the user owns, with enough state to render its Play button.
@@ -9078,8 +9082,6 @@ enum LibraryAction {
     SetExe(u32),
     /// Ask Steam to install a game whose Lua is already in place (`steam://install`).
     InstallSteam(u32),
-    /// Ask Steam to uninstall a Steam-installed game (`steam://uninstall`).
-    UninstallSteam(u32),
     /// Re-fetch and re-install the game's unlock Lua (latest version).
     UpdateLua(u32),
     /// Delete the game's unlock Lua from Steam (confirmed first).
@@ -9122,19 +9124,10 @@ fn library_menu(
         LibraryAction::UpdateLua(app_id),
     );
     match source {
-        LibrarySource::Available => (update_lua, remove_lua.into_iter().chain([store_page]).collect()),
-        LibrarySource::SteamInstalled => (
-            update_lua,
-            [(
-                "UNINSTALL GAME",
-                "Ask Steam to uninstall the game",
-                LibraryAction::UninstallSteam(app_id),
-            )]
-            .into_iter()
-            .chain(remove_lua)
-            .chain([store_page])
-            .collect(),
-        ),
+        // Uninstalling a Steam game is done in Steam; here its Lua is updated or removed.
+        LibrarySource::Available | LibrarySource::SteamInstalled => {
+            (update_lua, remove_lua.into_iter().chain([store_page]).collect())
+        }
         LibrarySource::DrydockInstalled => (
             (
                 "UPDATE",
@@ -9176,18 +9169,21 @@ fn library_menu(
 /// Height of one game row in the Library rail.
 const RAIL_ROW_H: f32 = 44.0;
 
-/// One collapsible Library rail group (e.g. "Installed in Steam"): a header with the game count and,
+/// One collapsible Library rail group ("STEAM" or the product's): a header with the game count and,
 /// when expanded, the group's rows. Always rendered (even empty), open by default. Returns the App ID
 /// of a row the user clicked, if any.
 fn library_rail_group(
     ui: &mut egui::Ui,
     title: &str,
-    source: LibrarySource,
+    group: LibraryGroup,
     entries: &[LibraryEntry],
     selected: Option<u32>,
     headers: &HeaderResolver,
 ) -> Option<u32> {
-    let group: Vec<&LibraryEntry> = entries.iter().filter(|entry| entry.source == source).collect();
+    let group: Vec<&LibraryEntry> = entries
+        .iter()
+        .filter(|entry| entry.source.group() == group)
+        .collect();
     let mut clicked = None;
     let header = format!("{title}  ({})", group.len());
     egui::CollapsingHeader::new(RichText::new(header).size(12.0).strong().color(TEXT))
@@ -9594,6 +9590,32 @@ fn build_emu_crack(
         files.push((format!("{prefix_bs}dinput8.dll"), dll));
     }
 
+    // The interface versions the game's own steam_api used, read before the crack replaces it
+    // (`drydock_core::steam_interfaces`). Only an installed game has that DLL; a ZIP is built
+    // without one, and says so.
+    let interfaces_note = match output {
+        EmuOutput::Deploy(folder) => {
+            let exe_dir = drydock_core::join_within(folder, &prefix);
+            match drydock_core::steam_interfaces::original_steam_api(folder, &exe_dir, arch) {
+                Some((_, original)) => match drydock_core::steam_interfaces::steam_interfaces(&original) {
+                    Some(text) => {
+                        let count = text.lines().count();
+                        files.push((format!("{ss}steam_interfaces.txt"), text.into_bytes()));
+                        format!(" steam_interfaces.txt lists {count} interface(s).")
+                    }
+                    None => " The game's steam_api names no interfaces, so there is no steam_interfaces.txt."
+                        .to_owned(),
+                },
+                None => " No original steam_api was found in the game folder, so there is no \
+                         steam_interfaces.txt — newer games do not need one."
+                    .to_owned(),
+            }
+        }
+        EmuOutput::Zip(_) => " steam_interfaces.txt needs the installed game's steam_api, so the ZIP \
+                             has none — deploy into the game folder to get one."
+            .to_owned(),
+    };
+
     // Achievement icon images, mirrored locally so the overlay shows them offline (best-effort).
     let images = fetch_achievement_images(&achievement_image_urls(&input.achievements_json));
     let image_count = images.len();
@@ -9651,7 +9673,8 @@ fn build_emu_crack(
             };
             Ok(format!(
                 "Cracked App {app_id} ({}) into {folder_name} — {config_count} configs + \
-                 {dll_count} DLLs{extras_note}, {achievements_count} achievement(s).{backup_note}",
+                 {dll_count} DLLs{extras_note}, {achievements_count} achievement(s).{backup_note}\
+                 {interfaces_note}",
                 arch.folder(),
             ))
         }
@@ -9660,7 +9683,8 @@ fn build_emu_crack(
             std::fs::write(zip_path, &bytes).map_err(|error| format!("{}: {error}", zip_path.display()))?;
             Ok(format!(
                 "Crack ZIP for App {app_id} ({}) saved to {} — {config_count} config files + \
-                 {dll_count} DLLs{extras_note}. {} depot(s), {} DLC(s), {achievements_count} achievement(s).",
+                 {dll_count} DLLs{extras_note}. {} depot(s), {} DLC(s), {achievements_count} achievement(s).\
+                 {interfaces_note}",
                 arch.folder(),
                 zip_path.display(),
                 depots.len(),
@@ -11416,18 +11440,7 @@ mod ui_tests {
                 true,
                 vec![
                     LibraryAction::UpdateLua(7),
-                    LibraryAction::UninstallSteam(7),
                     LibraryAction::RemoveLua(7),
-                    LibraryAction::Details(7),
-                ],
-            ),
-            // A game Steam has without a Lua (one the user owns) has none to remove.
-            (
-                LibrarySource::SteamInstalled,
-                false,
-                vec![
-                    LibraryAction::UpdateLua(7),
-                    LibraryAction::UninstallSteam(7),
                     LibraryAction::Details(7),
                 ],
             ),
@@ -11458,6 +11471,11 @@ mod ui_tests {
             ),
         ] {
             let (main, extras) = library_menu(source, 7, has_lua);
+            assert!(
+                source.group() == LibraryGroup::Downloaded
+                    || !extras.iter().any(|entry| entry.0.contains("UNINSTALL")),
+                "uninstalling a Steam game is left to Steam"
+            );
             let mut actions = vec![main.2];
             actions.extend(extras.iter().map(|(_, _, action)| *action));
             assert_eq!(actions, expected);

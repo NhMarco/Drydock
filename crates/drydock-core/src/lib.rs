@@ -31,6 +31,7 @@ pub mod self_test;
 pub mod settings;
 pub mod steam;
 pub mod steam_appinfo;
+pub mod steam_interfaces;
 pub mod steam_process;
 pub mod steam_service;
 pub mod steam_uri;

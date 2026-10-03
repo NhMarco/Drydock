@@ -30,6 +30,9 @@ const GENERATED_BASENAMES: &[&str] = &[
     "configs.overlay.ini",
     "configs.main.ini",
     "controls.txt",
+    // Per game, made from the game's own steam_api (`steam_interfaces`) — a skeleton's copy
+    // belongs to whatever game the skeleton was cut from.
+    "steam_interfaces.txt",
 ];
 
 /// Static gbe_fork overlay config: keep the (experimental) overlay off by default. Matches the
@@ -417,7 +420,8 @@ mod tests {
                 zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
             for (name, content) in [
                 ("Launcher\\steamclient64.dll", &b"DLL"[..]),
-                ("Launcher\\steam_settings\\steam_interfaces.txt", &b"IFACE"[..]), // shared → copied
+                ("Launcher\\steam_settings\\steam_interfaces.txt", &b"IFACE"[..]), // per game → skipped
+                ("Launcher\\steam_settings\\force_language.txt", &b"english"[..]), // shared → copied
                 ("Launcher\\steam_settings\\depots.txt", &b"SKELETON"[..]),        // regenerated → skipped
                 ("Launcher\\steam_settings\\image/logo.jpg", &b"IMG"[..]),         // image → skipped
             ] {
@@ -440,7 +444,9 @@ mod tests {
 
         // Skeleton DLL + shared config re-rooted at the exe folder.
         assert_eq!(files["Bin64\\steamclient64.dll"], b"DLL");
-        assert_eq!(files["Bin64\\steam_settings\\steam_interfaces.txt"], b"IFACE");
+        assert_eq!(files["Bin64\\steam_settings\\force_language.txt"], b"english");
+        // Another game's interface list is never carried over.
+        assert!(!files.contains_key("Bin64\\steam_settings\\steam_interfaces.txt"));
         // depots.txt comes from the generator, not the skeleton.
         assert_eq!(files["Bin64\\steam_settings\\depots.txt"], b"10\n");
         // The game image was dropped.
