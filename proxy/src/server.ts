@@ -1,7 +1,7 @@
 // Drydock proxy entry point. Wires configuration, security middleware, the gamelist cache,
 // and the routes, then starts listening. See README.md for the full request contract.
 
-import Fastify from "fastify";
+import Fastify, { type FastifyServerOptions } from "fastify";
 import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import { isLastResort, loadConfig, orderedSources, type OrdinarySourceName } from "./config.js";
@@ -17,7 +17,8 @@ import { ServiceCache } from "./serviceCache.js";
 import { EmuCache } from "./emuCache.js";
 import { DenuvoFixesCache } from "./denuvoFixesCache.js";
 import { RepacksCache } from "./repacksCache.js";
-import { createAuthHook } from "./auth.js";
+import { attachSession, clientKey, createAuthHook } from "./auth.js";
+import { DiscordClient, registerDiscordAuthRoutes } from "./discordAuth.js";
 import { FileCache } from "./fileCache.js";
 import { registerHealthRoute } from "./routes/health.js";
 import { registerGamelistRoute } from "./routes/gamelist.js";
@@ -35,7 +36,7 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const isProduction = process.env.NODE_ENV === "production";
 
-  const app = Fastify({
+  const options: FastifyServerOptions = {
     trustProxy: config.trustProxy,
     // A gzipped gamelist can be a few MB; keep the body limit tiny since we only accept GETs.
     bodyLimit: 4096,
@@ -43,16 +44,21 @@ async function main(): Promise<void> {
       level: process.env.LOG_LEVEL ?? "info",
       ...(isProduction ? {} : { transport: { target: "pino-pretty" } }),
     },
-  });
+  };
+  const app = Fastify(options);
 
   await app.register(helmet, { contentSecurityPolicy: false });
 
-  // Global per-IP limiter. Individual routes tighten or disable this via their own config.
+  // Before the limiter: a logged-in request is counted against its account, not its address.
+  attachSession(app, config);
+
+  // Global per-client limiter (per account when logged in, else per address). Individual routes
+  // tighten or disable this via their own config.
   await app.register(rateLimit, {
     global: true,
     max: config.globalRateMax,
     timeWindow: config.globalRateWindowSeconds * 1000,
-    keyGenerator: (req) => req.ip,
+    keyGenerator: clientKey,
   });
 
   const client = new SteamToolsClient(config);
@@ -92,6 +98,8 @@ async function main(): Promise<void> {
   // once a day.
   const fileCache = new FileCache(config.dataDir, config.fileCacheTtlSeconds * 1000, app.log);
   const authHook = createAuthHook(config);
+  // The login routes themselves: signed by the app, but it has no session yet.
+  const loginAuthHook = createAuthHook(config, { allowWithoutLogin: true });
 
   registerHealthRoute(app, cache);
   registerGamelistRoute(app, config, cache, authHook);
@@ -104,11 +112,20 @@ async function main(): Promise<void> {
   // App info comes from SteamTools alone and spends its quota, so it exists only while SteamTools is on.
   if (config.providerSources.includes("steamtools")) registerAppInfoRoute(app, config, client, authHook);
   registerSchemaRoute(app, config, fileCache, authHook);
-  registerDepotRoutes(app, providerRegistry, config.providerSources, fileCache, authHook, cooldown);
+  registerDepotRoutes(app, providerRegistry, config.providerSources, fileCache, authHook, cooldown, {
+    rateMax: config.depotRateMax,
+    rateWindowMs: config.depotRateWindowSeconds * 1000,
+    lastResortPerClientDaily: config.hubcapPerClientDaily,
+  });
+  registerDiscordAuthRoutes(app, config, new DiscordClient(config), loginAuthHook);
 
   if (!config.requireAuth) {
     app.log.warn("REQUIRE_AUTH is disabled — HMAC verification is OFF. Use this only for local testing.");
   }
+  app.log.info(
+    { available: config.discordClientId.length > 0, required: config.requireLogin, trustProxy: config.trustProxy },
+    "Discord login.",
+  );
   if (!config.githubToken) {
     // Not fatal: the gamelist, Lua and depot routes work without it. Say so explicitly, because the
     // alternative is a self-hoster discovering it as four endpoints mysteriously returning 404.

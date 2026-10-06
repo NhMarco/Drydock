@@ -30,6 +30,32 @@ function boolean(name: string, fallback: boolean): boolean {
   throw new Error(`Invalid boolean for ${name}: ${raw}`);
 }
 
+// Which reverse proxies in front of this one to believe about the client's address. The default
+// trusts addresses on private networks only — Nginx Proxy Manager reaches this container over Docker's
+// network — so the client address is the first public one counted from the right of
+// `X-Forwarded-For`: the one the proxy in front added itself. `true` believes every hop, i.e. the
+// left-most address, which any client can make up, so the per-IP limits could be dodged with a new
+// made-up address per request. (A hop count is no use: Fastify 5 treats it as "trust nobody", which
+// would put every user behind the one address of the proxy in front.)
+function trustProxySetting(name: string, fallback: string): boolean | string {
+  const raw = process.env[name]?.trim();
+  if (raw === undefined || raw === "") return fallback;
+  const lowered = raw.toLowerCase();
+  if (["1", "true", "yes"].includes(lowered)) return true;
+  if (["0", "false", "no"].includes(lowered)) return false;
+  // Addresses, CIDR ranges or proxy-addr's names (loopback, linklocal, uniquelocal), comma-separated.
+  if (!/^[0-9a-z.:/,\s]+$/i.test(raw)) throw new Error(`Invalid value for ${name}: ${raw}`);
+  return raw;
+}
+
+/** Comma-separated values, trimmed, empties dropped. */
+function list(name: string): string[] {
+  return (process.env[name] ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+}
+
 // The upstreams the depot-package route can draw from. Order in `DEPOT_PACKAGE_SOURCES` is the
 // try order; listing a name enables it, omitting it disables it.
 export const DEPOT_PACKAGE_SOURCE_NAMES = ["ryu", "depotbox", "steamtools", "hubcap"] as const;
@@ -81,8 +107,24 @@ function secretList(name: string): string[] {
 export interface Config {
   host: string;
   port: number;
-  trustProxy: boolean;
+  trustProxy: boolean | string;
   requireAuth: boolean;
+
+  // Discord login (see discordAuth.ts). The HMAC secret ships inside every app and can be read out of
+  // it; a login ties every request to a Discord account instead, which can be limited and banned.
+  // Off while `discordClientId` is empty.
+  discordClientId: string;
+  discordClientSecret: string;
+  /** Where Discord sends the user back: this proxy's `/v1/auth/discord/callback`, public URL. */
+  discordRedirectUri: string;
+  discordApiBase: string;
+  /** Keys that sign the session tokens (comma-separated, first signs, all verify). Server-only. */
+  sessionSecrets: string[];
+  sessionTtlDays: number;
+  /** Once on, a request without a valid session is refused — old app builds stop working. */
+  requireLogin: boolean;
+  /** Discord user IDs whose sessions are refused. */
+  bannedDiscordIds: Set<string>;
 
   upstreamBase: string;
   upstreamApiKey: string;
@@ -164,6 +206,11 @@ export interface Config {
   luaRateMax: number;
   globalRateWindowSeconds: number;
   globalRateMax: number;
+  // Depot packages make a provider build a package; a client needs one per game it downloads.
+  depotRateWindowSeconds: number;
+  depotRateMax: number;
+  /** Day-limited (Hubcap) fetches one client may cause per UTC day. */
+  hubcapPerClientDaily: number;
 
   dataDir: string;
 }
@@ -188,11 +235,37 @@ export function loadConfig(): Config {
     return value;
   };
 
+  const discordClientId = optional("DISCORD_CLIENT_ID", "");
+  const discordClientSecret = optional("DISCORD_CLIENT_SECRET", "");
+  const discordRedirectUri = optional("DISCORD_REDIRECT_URI", "");
+  const sessionSecrets = list("SESSION_SECRET");
+  const requireLogin = boolean("REQUIRE_LOGIN", false);
+  if (discordClientId) {
+    if (!discordClientSecret || !discordRedirectUri) {
+      throw new Error("DISCORD_CLIENT_ID is set, so DISCORD_CLIENT_SECRET and DISCORD_REDIRECT_URI are required");
+    }
+    if (sessionSecrets.length === 0 || sessionSecrets.some((secret) => secret.length < 32)) {
+      throw new Error("DISCORD_CLIENT_ID is set, so SESSION_SECRET needs at least one secret of 32+ characters");
+    }
+  }
+  if (requireLogin && !discordClientId) {
+    throw new Error("REQUIRE_LOGIN needs the Discord login configured (DISCORD_CLIENT_ID and friends)");
+  }
+
   return {
     host: optional("HOST", "0.0.0.0"),
     port: integer("PORT", 8080),
-    trustProxy: boolean("TRUST_PROXY", true),
+    trustProxy: trustProxySetting("TRUST_PROXY", "loopback,linklocal,uniquelocal"),
     requireAuth,
+
+    discordClientId,
+    discordClientSecret,
+    discordRedirectUri,
+    discordApiBase: optional("DISCORD_API_BASE", "https://discord.com/api").replace(/\/+$/, ""),
+    sessionSecrets,
+    sessionTtlDays: Math.max(integer("SESSION_TTL_DAYS", 7), 1),
+    requireLogin,
+    bannedDiscordIds: new Set(list("BANNED_DISCORD_IDS")),
 
     upstreamBase: optional("STEAMTOOLS_API_BASE", "https://api.steamtools.app").replace(/\/+$/, ""),
     upstreamApiKey: credential("STEAMTOOLS_API_KEY", "steamtools"),
@@ -248,6 +321,9 @@ export function loadConfig(): Config {
     luaRateMax: integer("LUA_RATE_MAX", 30),
     globalRateWindowSeconds: integer("GLOBAL_RATE_WINDOW_SECONDS", 60),
     globalRateMax: integer("GLOBAL_RATE_MAX", 120),
+    depotRateWindowSeconds: integer("DEPOT_RATE_WINDOW_SECONDS", 60),
+    depotRateMax: integer("DEPOT_RATE_MAX", 20),
+    hubcapPerClientDaily: integer("HUBCAP_PER_CLIENT_DAILY", 5),
 
     dataDir: resolve(optional("DATA_DIR", "./data")),
   };

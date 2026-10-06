@@ -161,7 +161,7 @@ pub const DRYDOCK: Brand = Brand {
     navigation: Navigation::Top,
     features: Features {
         tools: true,
-        cloud: true,
+        cloud: false,
         denuvo_tab: true,
         repacks: false,
         denuvo_fix: false,

@@ -14,7 +14,10 @@ services:
       PORT: 8080
       NODE_ENV: production
       DATA_DIR: /app/data
-      TRUST_PROXY: "true"
+      # Believe only the reverse proxy in front (it reaches the container from a private network)
+      # about the client address — never "true", which believes whatever a client writes into
+      # X-Forwarded-For and so defeats every per-IP limit. See .env.example.
+      TRUST_PROXY: "loopback,linklocal,uniquelocal"
     volumes:
       - gamelist-data:/app/data
     # Expose to the host only for local testing; comment out when a reverse proxy fronts it.

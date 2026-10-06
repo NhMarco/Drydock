@@ -26,9 +26,8 @@ one `brand/` folder, and stays current with a plain `git pull`. See
   available catalog.
 - **Emulator toolchain** — generates a complete local configuration (DLCs, languages, achievements
   with mirrored icons) and deploys the matching binaries for the detected architecture.
-- **Cloud saves** — optional CloudRedirect integration with folder, S3/R2, Google Drive and OneDrive
-  providers.
-- **Self-updating** — SHA-256-verified releases for Windows and Linux on x64 and ARM64.
+- **Self-updating** — every start looks for a SHA-256-verified release (Windows and Linux, x64 and
+  ARM64) and asks before installing it.
 
 ## Install
 

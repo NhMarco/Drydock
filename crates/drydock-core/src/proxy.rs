@@ -22,12 +22,13 @@ use hmac::{Hmac, Mac};
 use rand::RngCore;
 use reqwest::StatusCode;
 use reqwest::blocking::{Client, RequestBuilder, Response};
-use reqwest::header::USER_AGENT;
+use reqwest::header::{AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
 use sha2::Sha256;
 use thiserror::Error;
 
 use crate::catalog::CatalogApp;
+use crate::login::{Session, current_token, note_login_required};
 use crate::mfb::{
     DenuvoFix, RepositoryFile, SteamServiceManifest, SteamServicePackage, matches_git_blob_sha,
 };
@@ -260,8 +261,47 @@ impl ProxyClient {
         Ok(bytes)
     }
 
+    /// The proxy page that starts a Discord sign-in, opened in the browser (see `crate::login`).
+    #[must_use]
+    pub fn discord_login_url(&self, port: u16, state: &str) -> String {
+        format!(
+            "{}/v1/auth/discord/login?port={port}&state={state}",
+            self.base_url
+        )
+    }
+
+    /// Trades the one-time ticket the browser brought back for the session token.
+    pub fn redeem_discord_login(&self, ticket: &str, state: &str) -> Result<Session, ProxyError> {
+        // Both are base64url, so the path the proxy verifies is the one signed here.
+        if !is_url_safe(ticket) || !is_url_safe(state) {
+            return Err(ProxyError::Signing);
+        }
+        let response =
+            self.send(self.signed_get(&format!("/v1/auth/discord/redeem?ticket={ticket}&state={state}"))?)?;
+        let redeemed: RedeemDto = serde_json::from_slice(&read_capped(response, 64 * 1024)?)?;
+        Ok(Session {
+            token: redeemed.token,
+            user_id: redeemed.user.id,
+            user_name: redeemed.user.name,
+            expires_at: redeemed.expires_at,
+        })
+    }
+
+    /// Whether the proxy offers or requires a Discord login, and whom the current session (if any)
+    /// belongs to — `user` is `None` when no session was sent or the proxy no longer accepts it.
+    pub fn login_status(&self) -> Result<LoginStatus, ProxyError> {
+        let response = self.send(self.signed_get("/v1/auth/session")?)?;
+        let status: SessionDto = serde_json::from_slice(&read_capped(response, 64 * 1024)?)?;
+        Ok(LoginStatus {
+            available: status.login.available,
+            required: status.login.required,
+            user: status.user.map(|user| user.name),
+        })
+    }
+
     /// Builds a signed GET request for a proxy-relative path (`/v1/…`). The signature covers the
-    /// exact path the proxy receives, so a captured request cannot be replayed or retargeted.
+    /// exact path the proxy receives, so a captured request cannot be replayed or retargeted. A
+    /// signed-in session goes along as a bearer token.
     fn signed_get(&self, path: &str) -> Result<RequestBuilder, ProxyError> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -274,13 +314,17 @@ impl ProxyClient {
         mac.update(signing_string.as_bytes());
         let signature = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
 
-        Ok(self
+        let request = self
             .client
             .get(format!("{}{path}", self.base_url))
             .header(USER_AGENT, user_agent())
             .header("X-Drydock-Timestamp", timestamp)
             .header("X-Drydock-Nonce", nonce)
-            .header("X-Drydock-Signature", signature))
+            .header("X-Drydock-Signature", signature);
+        Ok(match current_token() {
+            Some(token) => request.header(AUTHORIZATION, format!("Bearer {token}")),
+            None => request,
+        })
     }
 
     fn send(&self, request: RequestBuilder) -> Result<Response, ProxyError> {
@@ -297,7 +341,16 @@ impl ProxyClient {
     fn check_status(response: Response) -> Result<Response, ProxyError> {
         match response.status() {
             StatusCode::TOO_MANY_REQUESTS => Err(ProxyError::RateLimited),
-            StatusCode::UNAUTHORIZED => Err(ProxyError::Unauthorized),
+            StatusCode::UNAUTHORIZED => {
+                // The proxy says which: a bad signature, or a missing Discord sign-in.
+                let body = response.text().unwrap_or_default();
+                if body.contains("login_required") {
+                    note_login_required();
+                    Err(ProxyError::LoginRequired)
+                } else {
+                    Err(ProxyError::Unauthorized)
+                }
+            }
             _ => Ok(response.error_for_status()?),
         }
     }
@@ -367,6 +420,51 @@ fn read_capped_cancellable(
         return Err(ProxyError::TooLarge);
     }
     Ok(bytes)
+}
+
+/// Whether a value is plain base64url, which goes into a signed path unencoded.
+fn is_url_safe(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+/// What the proxy says about signing in (see [`ProxyClient::login_status`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoginStatus {
+    /// The proxy offers a Discord login.
+    pub available: bool,
+    /// The proxy refuses requests without one.
+    pub required: bool,
+    /// The name of the account the current session belongs to, if the proxy accepts it.
+    pub user: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RedeemDto {
+    token: String,
+    user: SessionUserDto,
+    expires_at: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionUserDto {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionDto {
+    login: LoginOfferDto,
+    user: Option<SessionUserDto>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginOfferDto {
+    available: bool,
+    required: bool,
 }
 
 fn random_nonce() -> String {
@@ -496,6 +594,8 @@ pub enum ProxyError {
          are signed with a timestamp) — if it is, this Drydock build is too old and needs updating."
     )]
     Unauthorized,
+    #[error("Sign in with Discord first (Settings ▸ Discord login)")]
+    LoginRequired,
     #[error("The proxy offered a file with an unusable name: {0}")]
     UnsafeFileName(String),
     #[error("A proxy response exceeded the maximum allowed size")]

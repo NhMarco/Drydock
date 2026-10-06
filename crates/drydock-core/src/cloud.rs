@@ -798,7 +798,7 @@ fn capture_authorization_code(listener: &TcpListener, expected_state: &str) -> R
 }
 
 /// Read just the request line and return the request target (e.g. `/callback?code=…`).
-fn read_request_target(stream: &mut std::net::TcpStream) -> Option<String> {
+pub(crate) fn read_request_target(stream: &mut std::net::TcpStream) -> Option<String> {
     let mut buffer = [0_u8; 8192];
     let mut filled = 0;
     while filled < buffer.len() {
@@ -838,7 +838,7 @@ fn parse_oauth_query(target: &str) -> (Option<String>, Option<String>, Option<St
     (code, error, state)
 }
 
-fn write_http_response(
+pub(crate) fn write_http_response(
     stream: &mut std::net::TcpStream,
     status: &str,
     body_html: &str,
@@ -863,7 +863,7 @@ fn write_http_response(
 
 /// Random URL-safe token of `length` characters (base64url of `length` random bytes,
 /// truncated), matching the companion's PKCE verifier/state generation.
-fn random_url_string(length: usize) -> String {
+pub(crate) fn random_url_string(length: usize) -> String {
     let mut bytes = vec![0_u8; length];
     OsRng.fill_bytes(&mut bytes);
     let mut encoded = URL_SAFE_NO_PAD.encode(&bytes);
@@ -901,7 +901,7 @@ fn write_token_file(path: &Path, json: &[u8]) -> Result<(), CloudError> {
 }
 
 #[cfg(windows)]
-fn dpapi_protect(plain: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn dpapi_protect(plain: &[u8]) -> Option<Vec<u8>> {
     #[repr(C)]
     struct DataBlob {
         cb_data: u32,
@@ -954,6 +954,61 @@ fn dpapi_protect(plain: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
+/// The plain bytes of a blob [`dpapi_protect`] made, if this Windows user on this machine made it.
+#[cfg(windows)]
+pub(crate) fn dpapi_unprotect(blob: &[u8]) -> Option<Vec<u8>> {
+    #[repr(C)]
+    struct DataBlob {
+        cb_data: u32,
+        pb_data: *mut u8,
+    }
+    #[link(name = "crypt32")]
+    unsafe extern "system" {
+        fn CryptUnprotectData(
+            data_in: *const DataBlob,
+            data_descr: *mut *mut u16,
+            optional_entropy: *const DataBlob,
+            reserved: *mut core::ffi::c_void,
+            prompt_struct: *mut core::ffi::c_void,
+            flags: u32,
+            data_out: *mut DataBlob,
+        ) -> i32;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LocalFree(mem: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+    }
+
+    let mut input = blob.to_vec();
+    let data_in = DataBlob {
+        cb_data: input.len() as u32,
+        pb_data: input.as_mut_ptr(),
+    };
+    let mut data_out = DataBlob {
+        cb_data: 0,
+        pb_data: std::ptr::null_mut(),
+    };
+    // SAFETY: pointers are valid for the call; the output blob is copied out and freed.
+    unsafe {
+        if CryptUnprotectData(
+            &data_in,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+            &mut data_out,
+        ) == 0
+            || data_out.pb_data.is_null()
+        {
+            return None;
+        }
+        let plain = std::slice::from_raw_parts(data_out.pb_data, data_out.cb_data as usize).to_vec();
+        LocalFree(data_out.pb_data.cast());
+        Some(plain)
+    }
+}
+
 fn url_encode(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
     for byte in value.bytes() {
@@ -967,7 +1022,7 @@ fn url_encode(value: &str) -> String {
     output
 }
 
-fn url_decode(value: &str) -> String {
+pub(crate) fn url_decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut output = Vec::with_capacity(bytes.len());
     let mut index = 0;

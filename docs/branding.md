@@ -61,7 +61,7 @@ is a complete, commented example: copy the folder to `brand/` and edit it.
 | `developer` | Who made the product: "Developed by …" in the About dialog, and the Windows file's company. | `Drydock contributors` |
 | `discord` | The product's Discord invite, `https://discord.gg/…` (or a `discord.com` link). Shown as a button in the navigation and after an activation. | none — **not** Drydock's: no server of its own, no button |
 | `navigation` | `"top"` or `"side"`. | `"top"` |
-| `[features]` | `tools`, `cloud`, `denuvo_tab`, `repacks`, `denuvo_fix`, `cracked_version` — each `true` or `false`. | Drydock's: the first three on, the other three off |
+| `[features]` | `tools`, `cloud`, `denuvo_tab`, `repacks`, `denuvo_fix`, `cracked_version` — each `true` or `false`. | Drydock's: Tools and the Denuvo tab on, the others off |
 | `[palette]` | `background`, `surface`, `surface_raised`, `surface_sunken`, `border`, `edge`, `text`, `muted`, `accent`, `accent_soft`, `accent_deep`, `success`, `success_hover`, `on_success`, `warning`, `danger`, `chrome`, `scrim`, `overlay`, `input`, `ambient` — each `"#RRGGBB"` or `"#RRGGBBAA"`. `apps/drydock-desktop/src/brand.rs` documents where each one is used. | Drydock's |
 
 Anything left out is Drydock's. An unknown key, a malformed colour or an invalid name fails the

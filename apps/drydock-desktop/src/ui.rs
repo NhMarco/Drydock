@@ -18,9 +18,9 @@ use drydock_core::{
     APP_VERSION, ActivationRequestService, AddedAppState, AppCatalog, AppPayloadStore, AppUpdater,
     CRACK_ARTIFACT_NAMES, CatalogApp, CloudProvider, CloudRedirect, CloudSettings, ConflictingSoftwareStatus,
     DenuvoWatchClient, DepotData, DownloadProgress, DownloadedDll, EmuTemplateInput, FixEntry, FixStatus,
-    GameLanguageOptions, LoadOutcome, OpenSteamTool, PeArch, PortablePaths, PreparedUpdate, ProxyClient,
-    QueueEffect, QueuedDownload, RepackApp, S3Credentials, SearchIndex, SearchQuery, Settings,
-    SteamDiscovery, SteamManifest, SteamServiceState, SteamServiceStatus, SteamStoreClient,
+    GameLanguageOptions, LoadOutcome, LoginStatus, OpenSteamTool, PeArch, PortablePaths, PreparedUpdate,
+    ProxyClient, ProxyError, QueueEffect, QueuedDownload, RepackApp, S3Credentials, SearchIndex, SearchQuery,
+    Settings, SteamDiscovery, SteamManifest, SteamServiceState, SteamServiceStatus, SteamStoreClient,
     SteamStoreDetails, SteamUriAction, StoreCapsule, StoreFeatured, UnlockSource, VerifiedEntitlement,
     achievement_image_urls, add_app_files, apply_denuvo_fix, apply_language, back_up_before_overwrite,
     clear_previous_token_files, cloud, detect_conflicting_software, detect_pe_arch, discover_steam,
@@ -133,11 +133,7 @@ const PRIMARY_DESTINATIONS: [(Page, &str); 5] = [
 
 /// The secondary pages, kept apart from the main ones (right of the search in the top bar, at the
 /// foot of the side column), in reading order.
-const SECONDARY_DESTINATIONS: [(Page, &str); 3] = [
-    (Page::Guide, "HELP"),
-    (Page::Updates, "UPDATES"),
-    (Page::Settings, "SETTINGS"),
-];
+const SECONDARY_DESTINATIONS: [(Page, &str); 2] = [(Page::Guide, "HELP"), (Page::Settings, "SETTINGS")];
 const STATUS_BAR_HEIGHT: f32 = 30.0;
 const MIN_CONTENT_GUTTER: f32 = 24.0;
 /// Every tab's content is capped to this single width and centred, so all pages share one aligned
@@ -191,7 +187,7 @@ impl RateLimiter {
         Ok(())
     }
 }
-const UPDATE_CHECK_COOLDOWN: Duration = Duration::from_secs(15 * 60);
+
 /// Shortest gap between network-backed Steam Service status checks triggered by page
 /// switches, so rapidly flipping tabs does not hammer the payload repository.
 const SERVICE_RECHECK_COOLDOWN: Duration = Duration::from_secs(30);
@@ -220,7 +216,6 @@ enum Page {
     Activation,
     Tools,
     Cloud,
-    Updates,
     Settings,
     Guide,
     Downloads,
@@ -236,6 +231,19 @@ impl Page {
             _ => true,
         }
     }
+}
+
+/// What stands before the app at start-up.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LoginGate {
+    /// Asking the proxy whether it wants a sign-in.
+    Checking,
+    /// The Discord sign-in screen.
+    SignIn,
+    /// The proxy could not be asked; the user can try again or go on offline.
+    Offline(String),
+    /// In: the app itself.
+    Open,
 }
 
 /// The Store's sub-tabs, mirroring Steam's own storefront navigation. `DenuvoWatch` is the set of
@@ -479,6 +487,21 @@ pub struct DrydockApp {
     pending_update: Option<PreparedUpdate>,
     /// Whether the dialog asking to install [`Self::pending_update`] is showing.
     update_prompt_open: bool,
+    /// The signed-in Discord account (`drydock_core::login`), mirrored for display.
+    discord_session: Option<drydock_core::login::Session>,
+    /// What the proxy says about signing in, once asked.
+    login_offer: Option<LoginStatus>,
+    /// `Ok(None)`: this build has no proxy, so there is nothing to sign in to.
+    login_status_receiver: Option<Receiver<Result<Option<LoginStatus>, String>>>,
+    /// A sign-in running in the browser, and how to call it off.
+    login_receiver: Option<Receiver<Result<drydock_core::login::Session, String>>>,
+    login_cancel: Arc<AtomicBool>,
+    /// What stands before the app: the sign-in, until the user is in (see `LoginGate`).
+    login_gate: LoginGate,
+    /// Why the last sign-in failed, for the login screen.
+    login_error: Option<String>,
+    /// Whether the start-up work that needs the proxy has been started (it waits for the sign-in).
+    online_work_started: bool,
     exit_for_update: bool,
     // Cloud tab (CloudRedirect): provider form + the background DLL download / OAuth sign-in.
     cloud: CloudForm,
@@ -865,6 +888,14 @@ impl DrydockApp {
             update_receiver: None,
             pending_update: None,
             update_prompt_open: false,
+            discord_session: None,
+            login_offer: None,
+            login_status_receiver: None,
+            login_receiver: None,
+            login_cancel: Arc::new(AtomicBool::new(false)),
+            login_gate: LoginGate::Checking,
+            login_error: None,
+            online_work_started: false,
             exit_for_update: false,
             cloud: CloudForm::default(),
             cloud_download_receiver: None,
@@ -883,18 +914,16 @@ impl DrydockApp {
             started: Instant::now(),
         };
         app.release_old_update_blocks();
-        if app.settings.auto_update_drydock && AppUpdater::can_self_update() {
-            app.start_update_check(true);
-        }
+        // Every start looks for an update and asks before installing one (`update_prompt_window`).
+        app.start_update_check();
         app.recompute_tags();
-        app.start_catalog_refresh(false);
         app.start_denuvo_refresh(false);
-        app.start_fixes_refresh();
-        app.start_repacks_refresh();
-        app.refresh_service_status();
-        // Resume an unfinished download from a previous session (the depot engine continues from the
-        // chunks already on disk).
-        app.start_front_download();
+        // Nothing that talks to the proxy starts before the sign-in (`open_app`); first the proxy is
+        // asked whether it wants one. A session saved by an earlier start comes back here, and with it
+        // the login screen is skipped.
+        app.discord_session =
+            drydock_core::login::load_session(&drydock_core::login::session_path(&app.paths.settings_dir()));
+        app.start_login_status_check();
         app
     }
 
@@ -1636,29 +1665,12 @@ impl DrydockApp {
         }
     }
 
-    fn start_update_check(&mut self, automatic: bool) {
-        if self.pending_update.is_some() {
-            // Already downloaded and verified: ask again rather than fetch it a second time.
-            self.update_prompt_open = true;
+    /// Looks for a newer release in the background — at every start, without holding anything up.
+    /// A verified download ends in the update dialog; nothing installs without the user's word.
+    fn start_update_check(&mut self) {
+        if self.pending_update.is_some() || self.update_receiver.is_some() || !AppUpdater::can_self_update() {
             return;
         }
-        if self.update_receiver.is_some() || !AppUpdater::can_self_update() {
-            return;
-        }
-        let repository = AppUpdater::configured_repository().unwrap_or_default();
-        let access_mode = github_access_mode();
-        let marker_value = format!("{APP_VERSION}:{repository}:{access_mode}");
-        let marker = self.paths.cache_dir().join("update-check.marker");
-        if automatic && refresh_marker_is_current(&marker, &marker_value, UPDATE_CHECK_COOLDOWN) {
-            return;
-        }
-        if let Some(parent) = marker.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = fs::write(marker, marker_value);
-        self.status = branded!("Checking for a verified {product} update…").into();
-        self.status_error = false;
-        self.busy_label = Some("Checking the release channel…".into());
         let (sender, receiver) = mpsc::channel();
         self.update_receiver = Some(receiver);
         std::thread::spawn(move || {
@@ -1676,7 +1688,6 @@ impl DrydockApp {
         match receiver.try_recv() {
             Ok(result) => {
                 self.update_receiver = None;
-                self.busy_label = None;
                 match result {
                     // Installing closes the app, so it waits for the user's word (see
                     // `update_prompt_window`) instead of starting on its own.
@@ -1690,22 +1701,16 @@ impl DrydockApp {
                         self.pending_update = Some(update);
                         self.update_prompt_open = true;
                     }
-                    Ok(None) => {
-                        self.status = branded!("{product} is up to date").into();
-                        self.status_error = false;
-                    }
+                    // Up to date: nothing to say. A failed check (offline, say) is not worth an
+                    // error at start-up either; the next start tries again.
+                    Ok(None) => {}
                     Err(error) => {
-                        self.status = format!("Update check failed: {error}");
-                        self.status_error = true;
+                        self.status = format!("Could not check for updates: {error}");
+                        self.status_error = false;
                     }
                 }
             }
-            Err(TryRecvError::Disconnected) => {
-                self.update_receiver = None;
-                self.busy_label = None;
-                self.status = "The update check ended unexpectedly".into();
-                self.status_error = true;
-            }
+            Err(TryRecvError::Disconnected) => self.update_receiver = None,
             Err(TryRecvError::Empty) => {}
         }
     }
@@ -6112,82 +6117,20 @@ impl DrydockApp {
         });
     }
 
-    fn updates_page(&mut self, ui: &mut egui::Ui) {
-        page_heading(ui, "UPDATES");
-        ui.add_space(22.0);
-        content_column(ui, CONTENT_WIDTH, |ui| {
-            let previous_auto_update = self.settings.auto_update_drydock;
-            let mut auto_update_changed = false;
-            let pending_version = self
-                .pending_update
-                .as_ref()
-                .map(|update| update.version.to_string());
-            panel(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        section_label(ui, branded!(upper "{product} AUTO UPDATE"));
-                        ui.add_space(4.0);
-                        let channel = if AppUpdater::configured_repository().is_some() {
-                            "Verified downloads on launch"
-                        } else {
-                            "Release channel set in the official build"
-                        };
-                        ui.label(RichText::new(channel).size(9.5).color(ACCENT));
-                    });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if toggle_switch(ui, &mut self.settings.auto_update_drydock, ACCENT_SOFT).changed() {
-                            auto_update_changed = true;
-                        }
-                        ui.add_space(10.0);
-                        // An update that is already downloaded and verified waits here after a
-                        // Cancel in the update prompt; the button brings the prompt back.
-                        if let Some(version) = pending_version.as_deref() {
-                            if ui
-                                .add(primary_button("UPDATE"))
-                                .on_hover_text(format!("Install {} {version}", BRAND.name))
-                                .clicked()
-                            {
-                                self.update_prompt_open = true;
-                            }
-                        } else if ui
-                            .add_enabled(
-                                AppUpdater::can_self_update() && self.update_receiver.is_none(),
-                                ghost_button("CHECK NOW"),
-                            )
-                            .on_hover_text(branded!(
-                                "Check the release channel for a verified {product} update"
-                            ))
-                            .clicked()
-                        {
-                            self.start_update_check(false);
-                        }
-                    });
-                });
-            });
-            if auto_update_changed {
-                match self.persist_settings() {
-                    Ok(()) => {
-                        self.status = if self.settings.auto_update_drydock {
-                            branded!("{product} auto update enabled").into()
-                        } else {
-                            branded!("{product} auto update disabled").into()
-                        };
-                        self.status_error = false;
-                    }
-                    Err(error) => {
-                        self.settings.auto_update_drydock = previous_auto_update;
-                        self.status = format!("Auto-update setting could not be saved: {error}");
-                        self.status_error = true;
-                    }
-                }
-            }
-        });
-    }
-
     fn settings_page(&mut self, ui: &mut egui::Ui) {
         page_heading(ui, "SETTINGS");
         ui.add_space(22.0);
         content_column(ui, CONTENT_WIDTH, |ui| {
+            if self.discord_session.is_some()
+                || self.login_offer.as_ref().is_some_and(|offer| offer.available)
+            {
+                panel(ui, |ui| {
+                    section_label(ui, "DISCORD LOGIN");
+                    ui.add_space(8.0);
+                    self.login_controls(ui, false);
+                });
+                ui.add_space(16.0);
+            }
             // Where Drydock installs the games it downloads itself. Empty keeps the old behaviour
             // (Steam's own library), so an existing setup is unaffected until the user picks a folder.
             panel(ui, |ui| {
@@ -7088,9 +7031,328 @@ impl DrydockApp {
         }
     }
 
+    /// Asks the proxy whether a Discord login is offered or required and whether it still accepts
+    /// the saved session.
+    fn start_login_status_check(&mut self) {
+        if self.login_status_receiver.is_some() {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        self.login_status_receiver = Some(receiver);
+        std::thread::spawn(move || {
+            let result = match ProxyClient::new() {
+                Err(ProxyError::MissingConfig) => Ok(None),
+                Err(error) => Err(error.to_string()),
+                Ok(client) => client.login_status().map(Some).map_err(|error| error.to_string()),
+            };
+            let _ = sender.send(result);
+        });
+    }
+
+    /// Lets the user in: the login screen gives way to the app, and the start-up work that needs
+    /// the proxy begins — once.
+    fn open_app(&mut self) {
+        self.login_gate = LoginGate::Open;
+        if self.online_work_started {
+            return;
+        }
+        self.online_work_started = true;
+        self.start_catalog_refresh(false);
+        self.start_fixes_refresh();
+        self.start_repacks_refresh();
+        self.refresh_service_status();
+        // Resume an unfinished download from a previous session (the depot engine continues from the
+        // chunks already on disk).
+        self.start_front_download();
+    }
+
+    fn poll_login_status(&mut self) {
+        let Some(receiver) = self.login_status_receiver.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(result) => {
+                self.login_status_receiver = None;
+                match result {
+                    Ok(Some(offer)) => {
+                        // A session the proxy no longer takes (expired, revoked, the account blocked)
+                        // is dropped, so the user signs in afresh instead of every request failing.
+                        if offer.user.is_none() && self.discord_session.is_some() {
+                            drydock_core::login::forget_session(&drydock_core::login::session_path(
+                                &self.paths.settings_dir(),
+                            ));
+                            self.discord_session = None;
+                        }
+                        // Someone already let in stays in; a session the proxy refuses later still
+                        // brings the login back (`take_login_required`).
+                        let sign_in = offer.available
+                            && self.discord_session.is_none()
+                            && self.login_gate != LoginGate::Open;
+                        self.login_offer = Some(offer);
+                        if sign_in {
+                            self.login_gate = LoginGate::SignIn;
+                        } else {
+                            self.open_app();
+                        }
+                    }
+                    // A build without a proxy, or a proxy without the login: nothing to sign in to.
+                    Ok(None) => self.open_app(),
+                    Err(error) => {
+                        if self.login_gate != LoginGate::Open {
+                            self.login_gate = LoginGate::Offline(error);
+                        }
+                    }
+                }
+            }
+            Err(TryRecvError::Disconnected) => self.login_status_receiver = None,
+            Err(TryRecvError::Empty) => {}
+        }
+    }
+
+    /// Starts the Discord sign-in: the browser opens at the proxy's login page and comes back to
+    /// this machine when the user has allowed it (`drydock_core::login`).
+    fn start_discord_login(&mut self) {
+        if self.login_receiver.is_some() {
+            return;
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.login_cancel = Arc::clone(&cancel);
+        self.login_error = None;
+        let settings_dir = self.paths.settings_dir();
+        let (sender, receiver) = mpsc::channel();
+        self.login_receiver = Some(receiver);
+        self.status = "Waiting for Discord in your browser…".into();
+        self.status_error = false;
+        std::thread::spawn(move || {
+            let result = ProxyClient::new()
+                .map_err(drydock_core::login::LoginError::from)
+                .and_then(|client| {
+                    drydock_core::login::discord_login(&client, &settings_dir, &cancel, |url| {
+                        open_link(url).map_err(|error| std::io::Error::other(error.to_string()))
+                    })
+                })
+                .map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+    }
+
+    fn poll_login(&mut self) {
+        let Some(receiver) = self.login_receiver.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(result) => {
+                self.login_receiver = None;
+                match result {
+                    Ok(session) => {
+                        self.status = format!("Signed in with Discord as {}", session.user_name);
+                        self.status_error = false;
+                        self.discord_session = Some(session);
+                        self.login_error = None;
+                        self.open_app();
+                        self.start_login_status_check();
+                    }
+                    Err(error) if self.login_cancel.load(Ordering::Relaxed) => {
+                        let _ = error;
+                        self.status = "Discord sign-in cancelled".into();
+                        self.status_error = false;
+                    }
+                    Err(error) => {
+                        self.status = format!("Discord sign-in failed: {error}");
+                        self.status_error = true;
+                        self.login_error = Some(error);
+                    }
+                }
+            }
+            Err(TryRecvError::Disconnected) => self.login_receiver = None,
+            Err(TryRecvError::Empty) => {}
+        }
+    }
+
+    fn sign_out(&mut self) {
+        drydock_core::login::forget_session(&drydock_core::login::session_path(&self.paths.settings_dir()));
+        self.discord_session = None;
+        self.login_gate = LoginGate::SignIn;
+        self.status = "Signed out of Discord".into();
+        self.status_error = false;
+    }
+
+    /// Who is signed in and the buttons to change it, for the Settings panel and the dialog.
+    /// `in_dialog` puts the buttons on the right, as dialogs have them.
+    fn login_controls(&mut self, ui: &mut egui::Ui, in_dialog: bool) {
+        let required = self.login_offer.as_ref().is_some_and(|offer| offer.required);
+        match &self.discord_session {
+            Some(session) => {
+                let days = session.expires_at.saturating_sub(
+                    SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .map_or(0, |elapsed| elapsed.as_secs()),
+                ) / 86_400;
+                ui.label(
+                    RichText::new(format!("Signed in as {}", session.user_name))
+                        .size(13.0)
+                        .color(VERDIGRIS),
+                );
+                ui.label(
+                    RichText::new(format!(
+                        "Valid for {days} more day(s); sign in again when it runs out."
+                    ))
+                    .size(11.0)
+                    .color(MUTED),
+                );
+                ui.add_space(10.0);
+                if ui.add(ghost_button("SIGN OUT")).clicked() {
+                    self.sign_out();
+                }
+            }
+            None => {
+                ui.label(
+                    RichText::new(if required {
+                        branded!("{product} needs a Discord sign-in to reach its servers.")
+                    } else {
+                        branded!("Sign in with Discord — {product} will soon need it to reach its servers.")
+                    })
+                    .size(12.0)
+                    .color(TEXT),
+                );
+                ui.label(
+                    RichText::new(
+                        "Only your Discord ID and name are used — no password, no server to join. It \
+                         keeps the servers from being misused by people who are not using the app.",
+                    )
+                    .size(11.0)
+                    .color(MUTED),
+                );
+                ui.add_space(10.0);
+                let layout = if in_dialog {
+                    Layout::right_to_left(Align::Center)
+                } else {
+                    Layout::left_to_right(Align::Center)
+                };
+                ui.allocate_ui_with_layout(Vec2::new(ui.available_width(), 34.0), layout, |ui| {
+                    if self.login_receiver.is_some() {
+                        if ui.add(ghost_button("CANCEL")).clicked() {
+                            self.login_cancel.store(true, Ordering::Relaxed);
+                        }
+                        ui.add_space(8.0);
+                        ui.add(egui::Spinner::new().size(16.0).color(ACCENT));
+                        ui.label(
+                            RichText::new("Waiting for Discord in your browser…")
+                                .size(11.5)
+                                .color(ACCENT_SOFT),
+                        );
+                    } else if ui.add(primary_button("SIGN IN WITH DISCORD")).clicked() {
+                        self.start_discord_login();
+                    }
+                });
+            }
+        }
+    }
+
+    /// The first thing on screen: the product, and the Discord sign-in that lets the user in. Also
+    /// says when the server cannot be reached, with a way to go on offline (installed games still
+    /// play; downloads and activation wait for the server).
+    fn login_gate_screen(&mut self, ui: &mut egui::Ui) {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(BACKGROUND))
+            .show(ui, |ui| {
+                const WIDTH: f32 = 420.0;
+                ui.add_space((ui.available_height() * 0.5 - 250.0).max(24.0));
+                ui.vertical_centered(|ui| {
+                    ui.set_max_width(WIDTH);
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(128.0), Sense::hover());
+                    let glow = Color32::from_rgba_unmultiplied(ACCENT.r(), ACCENT.g(), ACCENT.b(), 30);
+                    ui.painter().circle_filled(rect.center(), 72.0, glow);
+                    egui::Image::new(brand::logo()).corner_radius(64).paint_at(ui, rect);
+                    // A logo that already spells the name and tagline is not captioned with them again.
+                    if !BRAND.logo_is_wordmark {
+                        ui.add_space(18.0);
+                        ui.label(RichText::new(BRAND.name).size(30.0).strong().color(TEXT));
+                        ui.label(RichText::new(BRAND.tagline).size(12.5).color(MUTED));
+                    }
+                    ui.add_space(30.0);
+                    match self.login_gate.clone() {
+                        LoginGate::Checking => {
+                            ui.add(egui::Spinner::new().size(22.0).color(ACCENT));
+                            ui.add_space(8.0);
+                            ui.label(RichText::new("Connecting…").size(12.0).color(MUTED));
+                        }
+                        LoginGate::Offline(error) => {
+                            ui.label(
+                                RichText::new("The server could not be reached.")
+                                    .size(14.0)
+                                    .color(TEXT),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(RichText::new(ellipsize(&error, 140)).size(11.0).color(MUTED));
+                            ui.add_space(18.0);
+                            if ui
+                                .add(primary_button("TRY AGAIN").min_size(Vec2::new(240.0, 40.0)))
+                                .clicked()
+                            {
+                                self.login_gate = LoginGate::Checking;
+                                self.start_login_status_check();
+                            }
+                            ui.add_space(8.0);
+                            if ui
+                                .add(ghost_button("CONTINUE OFFLINE").min_size(Vec2::new(240.0, 34.0)))
+                                .on_hover_text("Play installed games; downloads and activation wait for the server")
+                                .clicked()
+                            {
+                                self.open_app();
+                            }
+                        }
+                        LoginGate::SignIn | LoginGate::Open => {
+                            ui.label(
+                                RichText::new("Sign in with Discord to continue")
+                                    .size(15.0)
+                                    .color(TEXT),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(
+                                    "Only your Discord ID and name are used — no password, no server to join.",
+                                )
+                                .size(11.0)
+                                .color(MUTED),
+                            );
+                            ui.add_space(20.0);
+                            if self.login_receiver.is_some() {
+                                ui.add(egui::Spinner::new().size(20.0).color(ACCENT));
+                                ui.add_space(6.0);
+                                ui.label(
+                                    RichText::new("Waiting for Discord in your browser…")
+                                        .size(12.0)
+                                        .color(ACCENT_SOFT),
+                                );
+                                ui.add_space(12.0);
+                                if ui
+                                    .add(ghost_button("CANCEL").min_size(Vec2::new(160.0, 34.0)))
+                                    .clicked()
+                                {
+                                    self.login_cancel.store(true, Ordering::Relaxed);
+                                }
+                            } else if ui
+                                .add(primary_button("SIGN IN WITH DISCORD").min_size(Vec2::new(260.0, 44.0)))
+                                .clicked()
+                            {
+                                self.start_discord_login();
+                            }
+                            if let Some(error) = &self.login_error {
+                                ui.add_space(12.0);
+                                ui.label(RichText::new(error).size(11.5).color(DANGER));
+                            }
+                        }
+                    }
+                    ui.add_space(40.0);
+                    ui.label(RichText::new(format!("v{APP_VERSION}")).size(10.0).color(MUTED));
+                });
+            });
+    }
+
     /// Asks before installing a downloaded, verified update. Installing closes the app, which used to
     /// happen without a word the moment the update was ready; now the user picks the moment, and
-    /// Cancel leaves it waiting on the Updates page.
+    /// Cancel leaves it for now; the next start asks again.
     fn update_prompt_window(&mut self, context: &egui::Context) {
         if !self.update_prompt_open {
             return;
@@ -7166,7 +7428,7 @@ impl DrydockApp {
         } else if cancel || response.should_close() {
             self.update_prompt_open = false;
             self.status = format!(
-                "{product} {version} is ready — install it from Updates whenever it suits you",
+                "{product} {version} is available — you will be asked again at the next start",
                 product = BRAND.name
             );
             self.status_error = false;
@@ -7315,7 +7577,6 @@ impl DrydockApp {
         "cloud",
         "details",
         "activation",
-        "updates",
         "settings",
         "guide",
         "guide-fixes",
@@ -7323,12 +7584,21 @@ impl DrydockApp {
         // Last: the dialogs stay open over whatever comes after them.
         "about",
         "update",
+        "login",
     ];
 
     /// Switches the visible page by key so the harness can capture each one.
     pub fn screenshot_goto(&mut self, key: &str) {
         // Only the search page searches; everywhere else the query would cover the page.
         self.search.clear();
+        if key == "login" {
+            self.about_open = false;
+            self.update_prompt_open = false;
+            self.login_gate = LoginGate::SignIn;
+            return;
+        }
+        // Every other page is the app itself, past the sign-in.
+        self.open_app();
         match key {
             "details" => {
                 // Prefer an installed game so the Play buttons are exercised;
@@ -7378,7 +7648,6 @@ impl DrydockApp {
             "tools" if BRAND.features.tools => self.page = Page::Tools,
             "cloud" if BRAND.features.cloud => self.page = Page::Cloud,
             "activation" => self.page = Page::Activation,
-            "updates" => self.page = Page::Updates,
             "settings" => self.page = Page::Settings,
             "guide" => {
                 self.guide_flow = GuideFlow::Activation;
@@ -7448,6 +7717,17 @@ impl eframe::App for DrydockApp {
         self.poll_emu_template();
         self.pick_pending_executable();
         self.poll_update();
+        self.poll_login_status();
+        self.poll_login();
+        // A proxy answer that a sign-in is needed, from whichever request ran into it: the session
+        // ran out or was revoked, so the user signs in again.
+        if drydock_core::login::take_login_required() && self.login_receiver.is_none() {
+            drydock_core::login::forget_session(&drydock_core::login::session_path(
+                &self.paths.settings_dir(),
+            ));
+            self.discord_session = None;
+            self.login_gate = LoginGate::SignIn;
+        }
         self.poll_download();
         self.poll_add_game();
         self.poll_download_install();
@@ -7487,6 +7767,8 @@ impl eframe::App for DrydockApp {
             || self.emu_receiver.is_some()
             || self.add_game_receiver.is_some()
             || self.search_index_receiver.is_some()
+            || self.login_receiver.is_some()
+            || self.login_status_receiver.is_some()
             || !self.download_install_receiver.is_empty()
             || self.cloud_download_receiver.is_some()
             || self.cloud_oauth_receiver.is_some()
@@ -7520,6 +7802,13 @@ impl eframe::App for DrydockApp {
             IDLE_FRAME
         };
         context.request_repaint_after(next_frame);
+        // Nothing of the app shows before the sign-in.
+        if self.login_gate != LoginGate::Open {
+            self.login_gate_screen(ui);
+            self.update_prompt_window(&context);
+            self.busy_overlay(&context);
+            return;
+        }
         self.navigation(ui);
         self.status_bar(ui);
         egui::CentralPanel::default()
@@ -7562,7 +7851,6 @@ impl eframe::App for DrydockApp {
                                         Page::Activation => self.activation_page(ui),
                                         Page::Tools => self.tools_page(ui),
                                         Page::Cloud => self.cloud_page(ui),
-                                        Page::Updates => self.updates_page(ui),
                                         Page::Settings => self.settings_page(ui),
                                         Page::Guide => self.guide_page(ui),
                                         Page::Downloads => self.downloads_page(ui),
@@ -11183,14 +11471,6 @@ fn refresh_marker_is_current(path: &Path, expected: &str, maximum_age: Duration)
             .ok()
             .and_then(|modified| SystemTime::now().duration_since(modified).ok())
             .is_some_and(|age| age <= maximum_age)
-}
-
-fn github_access_mode() -> &'static str {
-    if std::env::var("DRYDOCK_GITHUB_TOKEN").is_ok_and(|token| !token.trim().is_empty()) {
-        "authenticated"
-    } else {
-        "anonymous"
-    }
 }
 
 /// Fetches the app's depot package and copies its manifests into `<steam>/depotcache`.

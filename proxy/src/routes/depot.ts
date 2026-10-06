@@ -39,6 +39,7 @@ import type { CacheHit, FileCache } from "../fileCache.js";
 import type { ProviderCooldown } from "../merged.js";
 import { MAXIMUM_PACKAGE_BYTES, requireZip } from "../packageCheck.js";
 import { cleanPackageLuas } from "../luaClean.js";
+import { clientKey } from "../auth.js";
 
 const APPID_PATTERN = /^[0-9]{1,10}$/;
 
@@ -63,6 +64,39 @@ interface PackageSource {
   allowed: () => Promise<boolean>;
 }
 
+export interface DepotLimits {
+  /** Packages one client may ask for per window. */
+  rateMax: number;
+  rateWindowMs: number;
+  /**
+   * Requests to a day-limited source (Hubcap) one client may cause per UTC day; 0 for no cap. The
+   * allowance is shared by everyone, and without this a single client could spend all of it.
+   */
+  lastResortPerClientDaily: number;
+}
+
+/** Counts per client and UTC day, starting over at midnight. */
+class DailyBudget {
+  private day = "";
+  private readonly used = new Map<string, number>();
+
+  constructor(private readonly perClient: number) {}
+
+  /** Whether `key` may spend one more today; spends it if so. */
+  take(key: string): boolean {
+    if (this.perClient <= 0) return true;
+    const today = new Date().toISOString().slice(0, 10);
+    if (today !== this.day) {
+      this.day = today;
+      this.used.clear();
+    }
+    const spent = this.used.get(key) ?? 0;
+    if (spent >= this.perClient) return false;
+    this.used.set(key, spent + 1);
+    return true;
+  }
+}
+
 export interface DepotUpstreams {
   ryu: RyuClient;
   depotbox: DepotBoxClient;
@@ -77,7 +111,9 @@ export function registerDepotRoutes(
   cache: FileCache,
   authHook: preHandlerHookHandler,
   cooldown: ProviderCooldown,
+  limits: DepotLimits = { rateMax: 20, rateWindowMs: 60_000, lastResortPerClientDaily: 0 },
 ): void {
+  const lastResortBudget = new DailyBudget(limits.lastResortPerClientDaily);
   // Map each configured source name to its fetch function, preserving the configured order. Sources
   // that aren't enabled simply aren't in this list.
   const factories: Record<DepotPackageSourceName, PackageSource["fetch"]> = {
@@ -106,7 +142,7 @@ export function registerDepotRoutes(
 
   app.get<{ Params: { appid: string } }>(
     "/v1/depot/package/:appid",
-    { preHandler: authHook },
+    { preHandler: authHook, config: { rateLimit: { max: limits.rateMax, timeWindow: limits.rateWindowMs } } },
     async (req, reply) => {
       const { appid } = req.params;
       if (!APPID_PATTERN.test(appid)) return reply.code(400).send({ error: "invalid_appid" });
@@ -157,6 +193,11 @@ export function registerDepotRoutes(
           if (!(await candidate.allowed())) {
             req.log.info({ appid, source: candidate.name }, "Depot source has no allowance left; skipping it.");
             lastError ??= new UpstreamError(429, `${candidate.name} has no allowance left`);
+            continue;
+          }
+          if (candidate.lastResort && !lastResortBudget.take(clientKey(req))) {
+            req.log.info({ appid, source: candidate.name, client: clientKey(req) }, "Client spent its daily share of a day-limited source.");
+            lastError ??= new UpstreamError(429, `${candidate.name}: this client's daily share is spent`);
             continue;
           }
           try {

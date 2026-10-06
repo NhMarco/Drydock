@@ -38,7 +38,6 @@ pub struct Settings {
     /// platform default" (resolved by the UI, e.g. `C:\Games` on Windows).
     pub games_directory: String,
     pub added_apps: BTreeMap<u32, AddedAppState>,
-    pub auto_update_drydock: bool,
     /// Verifies a game's files against its depot manifests before an activation request is made.
     pub verify_before_activation: bool,
     /// Per-app Steam update policy from the removed update block (App ID → updates enabled). Only
@@ -118,7 +117,6 @@ impl Default for Settings {
             steam_directory: String::new(),
             games_directory: String::new(),
             added_apps: BTreeMap::new(),
-            auto_update_drydock: true,
             verify_before_activation: false,
             legacy_update_blocks: BTreeMap::new(),
             installed_games: BTreeMap::new(),
@@ -406,7 +404,6 @@ mod tests {
         .expect("write settings");
 
         let settings = Settings::load(&path).expect("load settings");
-        assert!(!settings.auto_update_drydock);
         assert!(settings.added_apps.contains_key(&111_300));
         assert_eq!(settings.games_directory, "D:/Games");
     }

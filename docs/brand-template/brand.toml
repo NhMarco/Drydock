@@ -30,10 +30,10 @@ developer = "Example Studio"
 navigation = "side"
 
 # Optional features; everything else is part of every product. Left out = Drydock's choice:
-# Tools, Cloud and the Denuvo tab on; Repacks, Denuvo fix and cracked version off.
+# Tools and the Denuvo tab on; Cloud, Repacks, Denuvo fix and cracked version off.
 # (This example turns Drydock's choices around, so CI builds every feature both ways.)
 [features]
-cloud = false
+cloud = true
 denuvo_tab = false
 repacks = true
 denuvo_fix = true

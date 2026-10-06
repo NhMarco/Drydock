@@ -161,6 +161,31 @@ Reference implementation and a live tester: [`scripts/sign.mjs`](scripts/sign.mj
 DRYDOCK_HMAC_SECRET=yoursecret node scripts/sign.mjs GET /v1/app-info/730 http://localhost:8080 --send
 ```
 
+## Discord login
+
+The HMAC secret ships inside every app build, so anyone can read it out and sign requests as if they
+were the app. The Discord login ties requests to a person instead: the app signs in once through the
+browser, the proxy issues a session token signed with `SESSION_SECRET` (which never leaves the
+server), and every request carries it as `Authorization: Bearer …` next to the HMAC signature.
+Limits then count per account, and an account can be refused with `BANNED_DISCORD_IDS`.
+
+Only scope `identify` is requested — the Discord ID and name, no password, no server membership.
+There is no bot. Set up an application at https://discord.com/developers, add the redirect
+`https://<proxy>/v1/auth/discord/callback`, and set `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`,
+`DISCORD_REDIRECT_URI` and `SESSION_SECRET`.
+
+| Method | Path | Auth | Description |
+| --- | --- | --- | --- |
+| GET | `/v1/auth/session` | HMAC | `{ login: { available, required }, user }` — what the app shows. |
+| GET | `/v1/auth/discord/login?port=&state=` | none (browser) | Starts the login and redirects to Discord. |
+| GET | `/v1/auth/discord/callback` | none (Discord) | Issues the session and sends the browser back to `127.0.0.1:<port>` with a one-time ticket. |
+| GET | `/v1/auth/discord/redeem?ticket=&state=` | HMAC | The session token, once, for the state the app made up. |
+
+The session token never goes through the browser: the browser only carries a two-minute, one-time
+ticket to the app's own loopback port, and the ticket is worthless without the random `state` the
+app chose. `REQUIRE_LOGIN` stays off until the app builds with the login are out; switched on, a
+request without a valid session gets `401 {"error":"login_required"}` and the app asks to sign in.
+
 ## Configuration
 
 Copy `.env.example` to `.env`. What you must set depends on which providers you enable:
