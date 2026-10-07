@@ -183,29 +183,29 @@ pub enum LoginError {
     Banned,
     #[error("Discord could not be reached — try again in a moment")]
     Discord,
-    #[error("The browser could not be opened: {0}")]
-    Browser(String),
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
     Proxy(#[from] ProxyError),
 }
 
-/// Runs the whole Discord sign-in: opens the browser at the proxy's login page through
-/// `open_browser`, waits for the browser to come back to this machine, trades the ticket for a session
-/// and keeps it beside the settings in `settings_dir`. Returns early with [`LoginError::Cancelled`]
-/// once `cancel` is set.
+/// Runs the whole Discord sign-in: hands the proxy's login link to `show_link`, waits for a browser
+/// to come back to this machine, trades the ticket for a session and keeps it beside the settings in
+/// `settings_dir`. Returns early with [`LoginError::Cancelled`] once `cancel` is set.
+///
+/// `show_link` opens the link in a browser and also offers it to be copied: whether a browser came up
+/// does not end the sign-in, because the link works from any browser on this machine — the one a
+/// browser picker hands it to, or the one the user pastes it into.
 pub fn discord_login(
     client: &ProxyClient,
     settings_dir: &Path,
     cancel: &AtomicBool,
-    open_browser: impl FnOnce(&str) -> io::Result<()>,
+    show_link: impl FnOnce(&str),
 ) -> Result<Session, LoginError> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
     let state = random_url_string(43);
-    open_browser(&client.discord_login_url(port, &state))
-        .map_err(|error| LoginError::Browser(error.to_string()))?;
+    show_link(&client.discord_login_url(port, &state));
     let ticket = wait_for_ticket(&listener, &state, cancel)?;
     let session = client.redeem_discord_login(&ticket, &state)?;
     save_session(&session_path(settings_dir), &session)?;

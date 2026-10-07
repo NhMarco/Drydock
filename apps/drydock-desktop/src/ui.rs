@@ -246,6 +246,16 @@ enum LoginGate {
     Open,
 }
 
+/// The link of a running Discord sign-in, shown while it waits so it can go into any browser: the
+/// one a browser picker would choose, or the one the user is signed in to Discord with.
+#[derive(Clone, Debug, Default)]
+struct LoginLink {
+    url: String,
+    /// Why no browser came up by itself, if none did.
+    browser_error: Option<String>,
+    copied: bool,
+}
+
 /// The Store's sub-tabs, mirroring Steam's own storefront navigation. `DenuvoWatch` is the set of
 /// games that actually need activation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -496,6 +506,8 @@ pub struct DrydockApp {
     /// A sign-in running in the browser, and how to call it off.
     login_receiver: Option<Receiver<Result<drydock_core::login::Session, String>>>,
     login_cancel: Arc<AtomicBool>,
+    /// Its link, once the sign-in has one (filled from the sign-in's thread).
+    login_link: Arc<Mutex<Option<LoginLink>>>,
     /// What stands before the app: the sign-in, until the user is in (see `LoginGate`).
     login_gate: LoginGate,
     /// Why the last sign-in failed, for the login screen.
@@ -893,6 +905,7 @@ impl DrydockApp {
             login_status_receiver: None,
             login_receiver: None,
             login_cancel: Arc::new(AtomicBool::new(false)),
+            login_link: Arc::new(Mutex::new(None)),
             login_gate: LoginGate::Checking,
             login_error: None,
             online_work_started: false,
@@ -7117,6 +7130,8 @@ impl DrydockApp {
         }
         let cancel = Arc::new(AtomicBool::new(false));
         self.login_cancel = Arc::clone(&cancel);
+        let link = Arc::new(Mutex::new(None));
+        self.login_link = Arc::clone(&link);
         self.login_error = None;
         let settings_dir = self.paths.settings_dir();
         let (sender, receiver) = mpsc::channel();
@@ -7128,7 +7143,14 @@ impl DrydockApp {
                 .map_err(drydock_core::login::LoginError::from)
                 .and_then(|client| {
                     drydock_core::login::discord_login(&client, &settings_dir, &cancel, |url| {
-                        open_link(url).map_err(|error| std::io::Error::other(error.to_string()))
+                        let browser_error = open_link(url).err().map(|error| error.to_string());
+                        if let Ok(mut shown) = link.lock() {
+                            *shown = Some(LoginLink {
+                                url: url.to_owned(),
+                                browser_error,
+                                copied: false,
+                            });
+                        }
                     })
                 })
                 .map_err(|error| error.to_string());
@@ -7245,6 +7267,48 @@ impl DrydockApp {
                         self.start_discord_login();
                     }
                 });
+                if self.login_receiver.is_some() {
+                    ui.add_space(8.0);
+                    self.login_link_hint(ui);
+                }
+            }
+        }
+    }
+
+    /// While a sign-in waits: its link to copy into a browser, and why when no browser came up.
+    fn login_link_hint(&mut self, ui: &mut egui::Ui) {
+        let Some(link) = self.login_link.lock().ok().and_then(|link| link.clone()) else {
+            return;
+        };
+        if let Some(error) = &link.browser_error {
+            ui.label(
+                RichText::new(format!("⚠ {}", ellipsize(error, 120)))
+                    .size(11.0)
+                    .color(AMBER),
+            );
+            ui.add_space(4.0);
+        }
+        ui.label(
+            RichText::new("No browser, or the wrong one? Copy the link into the browser you use Discord in.")
+                .size(11.0)
+                .color(MUTED),
+        );
+        ui.add_space(6.0);
+        let label = if link.copied { "LINK COPIED" } else { "COPY LINK" };
+        if ui
+            .add(ghost_button(label).min_size(Vec2::new(160.0, 34.0)))
+            .on_hover_text("Copy the sign-in link to the clipboard")
+            .clicked()
+        {
+            ui.ctx().copy_text(link.url);
+            if let Some(shown) = self
+                .login_link
+                .lock()
+                .ok()
+                .as_mut()
+                .and_then(|link| link.as_mut())
+            {
+                shown.copied = true;
             }
         }
     }
@@ -7325,7 +7389,9 @@ impl DrydockApp {
                                         .size(12.0)
                                         .color(ACCENT_SOFT),
                                 );
-                                ui.add_space(12.0);
+                                ui.add_space(14.0);
+                                self.login_link_hint(ui);
+                                ui.add_space(8.0);
                                 if ui
                                     .add(ghost_button("CANCEL").min_size(Vec2::new(160.0, 34.0)))
                                     .clicked()
@@ -7566,7 +7632,7 @@ impl DrydockApp {
 #[cfg(feature = "screenshot")]
 impl DrydockApp {
     /// Ordered pages the screenshot harness walks through (see [`crate::screenshot`]).
-    pub const SCREENSHOT_PAGES: [&'static str; 17] = [
+    pub const SCREENSHOT_PAGES: [&'static str; 18] = [
         "home",
         "search",
         "repacks",
@@ -7585,16 +7651,33 @@ impl DrydockApp {
         "about",
         "update",
         "login",
+        "login-link",
     ];
 
     /// Switches the visible page by key so the harness can capture each one.
     pub fn screenshot_goto(&mut self, key: &str) {
         // Only the search page searches; everywhere else the query would cover the page.
         self.search.clear();
-        if key == "login" {
+        if key == "login" || key == "login-link" {
             self.about_open = false;
             self.update_prompt_open = false;
             self.login_gate = LoginGate::SignIn;
+            if key == "login-link" {
+                // A sign-in waiting on a browser that did not come up by itself.
+                let (sender, receiver) = mpsc::channel();
+                std::mem::forget(sender);
+                self.login_receiver = Some(receiver);
+                if let Ok(mut link) = self.login_link.lock() {
+                    *link = Some(LoginLink {
+                        url: "https://proxy.example/v1/auth/discord/login?port=50000&state=x".into(),
+                        browser_error: Some(
+                            "The link could not be opened: no program is set up in Windows to open this kind of link"
+                                .into(),
+                        ),
+                        copied: false,
+                    });
+                }
+            }
             return;
         }
         // Every other page is the app itself, past the sign-in.

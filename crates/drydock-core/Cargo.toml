@@ -18,7 +18,6 @@ reqwest.workspace = true
 hmac.workspace = true
 html-escape.workspace = true
 jiff.workspace = true
-open.workspace = true
 aes-gcm.workspace = true
 base64.workspace = true
 rand.workspace = true
@@ -49,11 +48,16 @@ cap-std = "4.0.3"
 sevenz-rust2 = { version = "0.22.2", default-features = false, features = ["compress"] }
 lzma-rust2 = { version = "0.20", default-features = false, features = ["std", "optimization", "encoder"] }
 
+# Opens links outside Windows; on Windows the shell is asked directly (opener.rs).
+[target.'cfg(not(windows))'.dependencies]
+open.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
 windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_Storage_FileSystem",
+    "Win32_System_Com",
     "Win32_System_IO",
     "Win32_System_Ioctl",
     "Win32_System_LibraryLoader",

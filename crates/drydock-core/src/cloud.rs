@@ -632,7 +632,7 @@ pub fn authorize<F: Fn(&str)>(provider: CloudProvider, log: F) -> Result<CloudSe
 
     let auth_url = build_auth_url(client, provider, &redirect_uri, &state, &challenge);
     log("Opening your browser to sign in…");
-    if open::that(&auth_url).is_err() {
+    if crate::opener::open_uri(&auth_url).is_err() {
         log(&format!(
             "Could not open a browser. Open this URL manually:\n{auth_url}"
         ));

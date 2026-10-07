@@ -11,7 +11,7 @@ pub fn open_steam_uri(app_id: u32, action: SteamUriAction) -> Result<(), SteamUr
         return Err(SteamUriError::InvalidAppId);
     }
     let uri = steam_uri(app_id, action);
-    open::that(uri).map_err(SteamUriError::Open)
+    crate::opener::open_uri(&uri).map_err(SteamUriError::Open)
 }
 
 fn steam_uri(app_id: u32, action: SteamUriAction) -> String {

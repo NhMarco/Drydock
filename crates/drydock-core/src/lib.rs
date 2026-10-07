@@ -20,6 +20,7 @@ pub mod login;
 pub mod mfb;
 pub mod models;
 pub mod open_steam_tool;
+mod opener;
 pub mod own_unlock;
 pub mod paths;
 pub mod proxy;

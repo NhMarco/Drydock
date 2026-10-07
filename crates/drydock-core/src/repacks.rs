@@ -28,7 +28,7 @@ pub fn open_link(url: &str) -> Result<(), LinkError> {
     if !is_http_url(url) {
         return Err(LinkError::UnsupportedScheme);
     }
-    open::that(url).map_err(LinkError::Open)
+    crate::opener::open_uri(url).map_err(LinkError::Open)
 }
 
 /// Whether `url` is a plain http(s) URL. Scheme matching is case-insensitive per RFC 3986; the
