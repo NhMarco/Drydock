@@ -10216,8 +10216,7 @@ fn build_emu_crack(
         files.push((format!("{prefix_bs}dinput8.dll"), dll));
     }
 
-    // The interface versions the game's own steam_api used, read before the crack replaces it
-    // (`drydock_core::steam_interfaces`). Only an installed game has that DLL; a ZIP is built
+    // The interface versions the game's own steam_api uses (`drydock_core::steam_interfaces`). Only an installed game has that DLL; a ZIP is built
     // without one, and says so.
     let interfaces_note = match output {
         EmuOutput::Deploy(folder) => {
@@ -10265,6 +10264,25 @@ fn build_emu_crack(
 
     match output {
         EmuOutput::Deploy(folder) => {
+            // The game keeps its own steam_api: where an earlier crack swapped in gbe_fork's, the
+            // original goes back first (`restore_original_steam_api`).
+            use drydock_core::steam_interfaces::{SteamApiRestore, restore_original_steam_api};
+            let exe_dir = drydock_core::join_within(folder, &prefix);
+            let steam_api_note = match restore_original_steam_api(folder, &exe_dir, arch)
+                .map_err(|error| format!("steam_api: {error}"))?
+            {
+                SteamApiRestore::Untouched => "",
+                SteamApiRestore::Restored => {
+                    " The game's own steam_api, replaced by an earlier crack, is back."
+                }
+                SteamApiRestore::Removed => {
+                    " An earlier crack's steam_api next to the exe is gone, so the game's own is used again."
+                }
+                SteamApiRestore::OriginalMissing => {
+                    " ⚠ The steam_api next to the exe is an earlier crack's and the game's own is missing — \
+                     verify the game files to get it back."
+                }
+            };
             let mut backed_up = 0usize;
             for (relative, contents) in &files {
                 // Skeleton-ZIP entries reach us as author-controlled relative paths, so every
@@ -10300,7 +10318,7 @@ fn build_emu_crack(
             Ok(format!(
                 "Cracked App {app_id} ({}) into {folder_name} — {config_count} configs + \
                  {dll_count} DLLs{extras_note}, {achievements_count} achievement(s).{backup_note}\
-                 {interfaces_note}",
+                 {interfaces_note}{steam_api_note}",
                 arch.folder(),
             ))
         }

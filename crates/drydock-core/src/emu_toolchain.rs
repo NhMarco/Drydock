@@ -7,7 +7,11 @@
 //!     version.dll or winmm.dll), `coldloader.dll`, and the SteamStub loader that goes into
 //!     `steam_settings\load_dlls\`
 //!   * gbe_fork's Windows release archive (from its latest GitHub release) → the experimental
-//!     `steamclient(64).dll` + `GameOverlayRenderer(64).dll` + `steam_api(64).dll`
+//!     `steamclient(64).dll` + `GameOverlayRenderer(64).dll`
+//!
+//! The game keeps its own `steam_api(64).dll`: the Cold Client Loader points it at gbe_fork's
+//! steamclient, and the game's own DLL asks for exactly the interface versions the game was built
+//! against. Replacing it with gbe_fork's made games fail at start with interface errors.
 //!
 //! Hosting the first group ourselves means a DLL can be swapped by pushing to the repo, without a
 //! Drydock release and without depending on a third party's release assets staying put.
@@ -60,7 +64,8 @@ const OVERLAY_SOUND_NAME: &str = "overlay_achievement_notification.wav";
 /// Written once the toolchain has been fully extracted, so a later run skips the download.
 // Bumped when the set/variant of extracted DLLs changes, so an existing cache re-extracts instead of
 // keeping stale files (v2: big `steamclient_experimental` steamclient + overlay; v3: added the gbe
-// experimental `steam_api`; v4: loader/coldloader now come from the Drydock repo, plus steamstub).
+// experimental `steam_api`, no longer used; v4: loader/coldloader now come from the Drydock repo,
+// plus steamstub).
 const READY_MARKER: &str = ".ready4";
 
 #[derive(Debug, Error)]
@@ -95,10 +100,8 @@ pub struct ToolchainDll {
 const CACHED_DLLS: &[(&str, &str)] = &[
     ("x64", "steamclient64.dll"),
     ("x64", "GameOverlayRenderer64.dll"),
-    ("x64", "steam_api64.dll"),
     ("x86", "steamclient.dll"),
     ("x86", "GameOverlayRenderer.dll"),
-    ("x86", "steam_api.dll"),
 ];
 
 /// Whether every cached emu DLL is present on disk (so an antivirus that removed one triggers a
@@ -302,17 +305,14 @@ fn pick_gbe_asset(assets: &[GitHubAsset]) -> Option<String> {
 }
 
 /// The DLLs to deploy for `arch`, in the order Cold Client Loader expects. `loader_name` is the
-/// proxy DLL's deployed name (`version.dll` or `winmm.dll`, depending on the game).
+/// proxy DLL's deployed name (`version.dll` or `winmm.dll`, depending on the game). The game's own
+/// `steam_api(64).dll` is never among them: it stays as the game shipped it.
 #[must_use]
 pub fn toolchain_dlls(root: &Path, arch: PeArch, loader_name: &str) -> Vec<ToolchainDll> {
     let dir = root.join(arch.folder());
-    let (steamclient, overlay, steam_api) = match arch {
-        PeArch::X64 => (
-            "steamclient64.dll",
-            "GameOverlayRenderer64.dll",
-            "steam_api64.dll",
-        ),
-        PeArch::X86 => ("steamclient.dll", "GameOverlayRenderer.dll", "steam_api.dll"),
+    let (steamclient, overlay) = match arch {
+        PeArch::X64 => ("steamclient64.dll", "GameOverlayRenderer64.dll"),
+        PeArch::X86 => ("steamclient.dll", "GameOverlayRenderer.dll"),
     };
     vec![
         ToolchainDll {
@@ -330,11 +330,6 @@ pub fn toolchain_dlls(root: &Path, arch: PeArch, loader_name: &str) -> Vec<Toolc
         ToolchainDll {
             deploy_name: overlay.to_owned(),
             source: dir.join(overlay),
-        },
-        // The gbe emulated Steamworks API, replacing the game's own steam_api next to the exe.
-        ToolchainDll {
-            deploy_name: steam_api.to_owned(),
-            source: dir.join(steam_api),
         },
     ]
 }
@@ -412,16 +407,6 @@ fn extract_gbe_steamclient(seven_z_bytes: &[u8], root: &Path) -> Result<(), EmuT
         (
             "steamclient_experimental/gameoverlayrenderer.dll",
             root.join("x86").join("gameoverlayrenderer.dll"),
-        ),
-        // The gbe emulated Steamworks API, deployed next to the game exe. The `experimental` variant
-        // is the one paired with the `steamclient_experimental` steamclient above.
-        (
-            "experimental/x64/steam_api64.dll",
-            root.join("x64").join("steam_api64.dll"),
-        ),
-        (
-            "experimental/x86/steam_api.dll",
-            root.join("x86").join("steam_api.dll"),
         ),
         (OVERLAY_SOUND_NAME, root.join("shared").join(OVERLAY_SOUND_NAME)),
     ];
@@ -582,8 +567,10 @@ mod tests {
             writer.push_archive_entries(entries, readers).unwrap();
             let archive = writer.finish().unwrap().into_inner();
             extract_gbe_steamclient(&archive, root.path()).unwrap();
-            assert!(root.path().join("x64/steam_api64.dll").is_file());
             assert!(root.path().join("x86/steamclient.dll").is_file());
+            // The game keeps its own steam_api; gbe_fork's is not even taken from the archive.
+            assert!(!root.path().join("x64/steam_api64.dll").exists());
+            assert!(!root.path().join("x86/steam_api.dll").exists());
             assert!(!root.path().join("ignored.txt").exists());
             assert_eq!(
                 root.path().join("shared").join(OVERLAY_SOUND_NAME).exists(),

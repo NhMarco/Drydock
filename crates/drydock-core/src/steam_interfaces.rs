@@ -1,16 +1,17 @@
 //! `steam_interfaces.txt` for gbe_fork: which Steamworks interface versions the game's own
 //! `steam_api` used.
 //!
-//! The emu crack replaces the game's `steam_api(64).dll` with gbe_fork's. Newer games name the
-//! interface version they want in every call, but older ones call version-less accessors such as
-//! `SteamUser()` and rely on the version their original `steam_api` had built in. With that DLL
-//! replaced, gbe_fork has to be told — otherwise it hands out its newest version, whose function
-//! table the game was not compiled against. gbe_fork's own guide says to always generate the file
-//! with its `generate_interfaces` tool; this is that tool, rebuilt so the crack needs no extra
-//! download. It reproduces the tool's output line for line: every pattern in the tool's order, every
-//! match in the order it occurs in the DLL, and its one special case for `SteamClient`.
+//! Newer games name the interface version they want in every call, but older ones call version-less
+//! accessors such as `SteamUser()` and rely on the version their original `steam_api` had built in.
+//! The emu crack keeps that original DLL (earlier cracks replaced it with gbe_fork's, and games
+//! failed at start with interface errors — [`restore_original_steam_api`] undoes that), and still
+//! writes the file, as gbe_fork's own guide says to always generate it with its
+//! `generate_interfaces` tool. This is that tool, rebuilt so the crack needs no extra download. It
+//! reproduces the tool's output line for line: every pattern in the tool's order, every match in the
+//! order it occurs in the DLL, and its one special case for `SteamClient`.
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
@@ -125,10 +126,10 @@ pub fn is_emulator_steam_api(contents: &[u8]) -> bool {
         .any(|marker| contents.windows(marker.len()).any(|window| window == *marker))
 }
 
-/// The game's own `steam_api(64).dll` for `arch`, read before the crack replaces it.
+/// The game's own `steam_api(64).dll` for `arch`.
 ///
-/// Looked for next to the executable first (where the crack puts gbe_fork's), then as the `.bak` an
-/// earlier crack left there, then anywhere in the game folder — Unreal games keep it under
+/// Looked for next to the executable first, then as the `.bak` an earlier crack left there (when it
+/// still put gbe_fork's in its place), then anywhere in the game folder — Unreal games keep it under
 /// `Engine\Binaries\ThirdParty\Steamworks\…`. An emulator's DLL is passed over wherever it is, so a
 /// game cracked before still yields its original. Returns the path and its contents.
 #[must_use]
@@ -161,6 +162,62 @@ pub fn original_steam_api(game_root: &Path, exe_dir: &Path, arch: PeArch) -> Opt
         .collect();
     candidates.sort();
     candidates.into_iter().find_map(|(_, path)| original(&path))
+}
+
+/// What [`restore_original_steam_api`] did next to the executable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SteamApiRestore {
+    /// The game's own DLL is there (or the game keeps none there): nothing to do.
+    Untouched,
+    /// An earlier crack's gbe_fork DLL made way for the original it had kept as `.bak`.
+    Restored,
+    /// An earlier crack's gbe_fork DLL is gone: the game's own lives elsewhere in its folder (Unreal
+    /// keeps it under `Engine\…`), and a copy next to the executable would be loaded instead of it.
+    Removed,
+    /// An earlier crack's gbe_fork DLL is there and the original is nowhere — verifying the game
+    /// files brings it back.
+    OriginalMissing,
+}
+
+/// Puts the game's own `steam_api(64).dll` back where an earlier crack replaced it with gbe_fork's.
+///
+/// The crack keeps the game's DLL now — the Cold Client Loader points it at gbe_fork's steamclient —
+/// because the emulator's in its place made games fail at start with interface errors. A game
+/// cracked before is mended by cracking it again, which runs this first.
+pub fn restore_original_steam_api(
+    game_root: &Path,
+    exe_dir: &Path,
+    arch: PeArch,
+) -> io::Result<SteamApiRestore> {
+    let name = match arch {
+        PeArch::X64 => "steam_api64.dll",
+        PeArch::X86 => "steam_api.dll",
+    };
+    let path = exe_dir.join(name);
+    let backup = exe_dir.join(format!("{name}.bak"));
+    let emulator = |path: &Path| fs::read(path).is_ok_and(|contents| is_emulator_steam_api(&contents));
+    let genuine = |path: &Path| {
+        fs::read(path).is_ok_and(|contents| !contents.is_empty() && !is_emulator_steam_api(&contents))
+    };
+    if path.exists() && !emulator(&path) {
+        return Ok(SteamApiRestore::Untouched);
+    }
+    if genuine(&backup) {
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+        fs::rename(&backup, &path)?;
+        return Ok(SteamApiRestore::Restored);
+    }
+    if !path.exists() {
+        return Ok(SteamApiRestore::Untouched);
+    }
+    if original_steam_api(game_root, exe_dir, arch).is_some() {
+        fs::remove_file(&path)?;
+        Ok(SteamApiRestore::Removed)
+    } else {
+        Ok(SteamApiRestore::OriginalMissing)
+    }
 }
 
 #[cfg(test)]
@@ -238,6 +295,51 @@ mod tests {
         let (path, contents) = original_steam_api(game.path(), &exe_dir, PeArch::X64).unwrap();
         assert_eq!(path, exe_dir.join("steam_api64.dll.bak"));
         assert_eq!(steam_interfaces(&contents).unwrap(), "SteamUser019\n");
+    }
+
+    #[test]
+    fn an_earlier_crack_gives_the_game_its_own_steam_api_back() {
+        let gbe = [
+            dll(&["SteamClient017", "SteamUser023"]),
+            b"steam_settings\\configs.user.ini".to_vec(),
+        ]
+        .concat();
+        let original = dll(&["SteamUser019"]);
+        let game = tempfile::tempdir().unwrap();
+        let exe_dir = game.path().join("Binaries").join("Win64");
+        fs::create_dir_all(&exe_dir).unwrap();
+        let next_to_exe = exe_dir.join("steam_api64.dll");
+
+        // Never cracked: the game's own DLL stays exactly as it is.
+        fs::write(&next_to_exe, &original).unwrap();
+        let restore = || restore_original_steam_api(game.path(), &exe_dir, PeArch::X64).unwrap();
+        assert_eq!(restore(), SteamApiRestore::Untouched);
+        assert_eq!(fs::read(&next_to_exe).unwrap(), original);
+
+        // Cracked before: gbe_fork's in place, the original kept as .bak — the original comes back.
+        fs::write(&next_to_exe, &gbe).unwrap();
+        fs::write(exe_dir.join("steam_api64.dll.bak"), &original).unwrap();
+        assert_eq!(restore(), SteamApiRestore::Restored);
+        assert_eq!(fs::read(&next_to_exe).unwrap(), original);
+        assert!(!exe_dir.join("steam_api64.dll.bak").exists());
+        assert_eq!(
+            restore(),
+            SteamApiRestore::Untouched,
+            "a second run changes nothing"
+        );
+
+        // gbe_fork's with nothing to put back: left for a verify to mend, not deleted.
+        fs::write(&next_to_exe, &gbe).unwrap();
+        assert_eq!(restore(), SteamApiRestore::OriginalMissing);
+        assert!(next_to_exe.exists());
+
+        // The original lives elsewhere (Unreal): gbe_fork's copy next to the exe would shadow it.
+        let steamworks = game.path().join("Engine/Binaries/ThirdParty/Steamworks/Win64");
+        fs::create_dir_all(&steamworks).unwrap();
+        fs::write(steamworks.join("steam_api64.dll"), &original).unwrap();
+        assert_eq!(restore(), SteamApiRestore::Removed);
+        assert!(!next_to_exe.exists());
+        assert_eq!(fs::read(steamworks.join("steam_api64.dll")).unwrap(), original);
     }
 
     #[test]

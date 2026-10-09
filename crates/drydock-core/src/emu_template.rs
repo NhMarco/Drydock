@@ -35,6 +35,11 @@ const GENERATED_BASENAMES: &[&str] = &[
     "steam_interfaces.txt",
 ];
 
+/// Whether `basename` is a `steam_api(64).dll`, which a crack never ships: the game keeps its own.
+fn is_steam_api(basename: &str) -> bool {
+    basename.eq_ignore_ascii_case("steam_api.dll") || basename.eq_ignore_ascii_case("steam_api64.dll")
+}
+
 /// Static gbe_fork overlay config: keep the (experimental) overlay off by default. Matches the
 /// DiscordActivator skeleton byte-for-byte (CRLF, trailing CRLF).
 const CONFIGS_OVERLAY_INI: &str = "[overlay::general]\r\nenable_experimental_overlay = 0\r\n";
@@ -226,8 +231,11 @@ impl EmuTemplateInput {
                 if basename.is_empty()
                     || GENERATED_BASENAMES.contains(&basename)
                     || lowered.contains("/image/")
+                    || is_steam_api(basename)
                 {
-                    continue; // regenerated below / drop any leftover game images
+                    // Regenerated below / leftover game images / a steam_api, which the game keeps
+                    // its own of (`emu_toolchain`).
+                    continue;
                 }
                 let mut content = Vec::with_capacity(crate::safe_path::capacity_hint(entry.size()));
                 entry
