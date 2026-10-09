@@ -1,6 +1,7 @@
 // Drydock proxy entry point. Wires configuration, security middleware, the gamelist cache,
 // and the routes, then starts listening. See README.md for the full request contract.
 
+import { join } from "node:path";
 import Fastify, { type FastifyServerOptions } from "fastify";
 import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
@@ -16,6 +17,7 @@ import { GamelistCache } from "./gamelistCache.js";
 import { ServiceCache } from "./serviceCache.js";
 import { EmuCache } from "./emuCache.js";
 import { DenuvoFixesCache } from "./denuvoFixesCache.js";
+import { LauncherIndex, steamStoreFacts } from "./launcherCheck.js";
 import { RepacksCache } from "./repacksCache.js";
 import { attachSession, clientKey, createAuthHook } from "./auth.js";
 import { DiscordClient, registerDiscordAuthRoutes } from "./discordAuth.js";
@@ -92,7 +94,13 @@ async function main(): Promise<void> {
   const cache = new GamelistCache(config, gamelistSource, app.log);
   const serviceCache = new ServiceCache(config, github, app.log);
   const emuCache = new EmuCache(config, github, app.log);
-  const denuvoFixesCache = new DenuvoFixesCache(config, github, app.log);
+  const launcherIndex = new LauncherIndex({
+    blocked: config.fixBlockedLaunchers,
+    file: join(config.dataDir, "fix-launchers.json"),
+    fetchFacts: steamStoreFacts(config.steamStoreBase),
+    log: app.log,
+  });
+  const denuvoFixesCache = new DenuvoFixesCache(config, github, app.log, launcherIndex);
   const repacksCache = new RepacksCache(config, github, app.log);
   // Disk cache (24h) for user-facing upstream files, so each is pulled from its provider at most
   // once a day.
@@ -141,6 +149,9 @@ async function main(): Promise<void> {
   // Begin evicting expired file-cache entries. Without this the depot ZIPs and magicfiles only ever
   // accumulated — an expired entry counted as a miss but its bytes stayed on disk forever.
   fileCache.start();
+  // Learn which fix games need a third-party launcher before the first client asks: until a game's
+  // store page has been read, its fix is held back.
+  void denuvoFixesCache.getFixes().catch((error) => app.log.warn({ err: error }, "Fix list warm-up failed."));
 
   const shutdown = async (signal: string): Promise<void> => {
     app.log.info({ signal }, "Shutting down.");

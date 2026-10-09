@@ -55,7 +55,13 @@ fn main() {
     );
     check(
         "denuvo-fixes",
-        client.denuvo_fixes().map(|list| format!("{} app(s)", list.len())),
+        client.denuvo_fixes().map(|list| {
+            format!(
+                "{} app(s), {} pinned manifest(s)",
+                list.fixes.len(),
+                list.manifests.len()
+            )
+        }),
     );
     check(
         "app-schema/730",

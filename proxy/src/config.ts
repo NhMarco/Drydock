@@ -2,6 +2,7 @@
 // environment so no secret is ever committed. Missing required values fail fast at boot.
 
 import { resolve } from "node:path";
+import { parseBlockedLaunchers, type Launcher } from "./launcherCheck.js";
 
 function required(name: string): string {
   const value = process.env[name]?.trim();
@@ -177,9 +178,14 @@ export interface Config {
   githubRepo: string;
   githubBranch: string;
   githubToken: string;
-  // Repo directory of the per-app fixes (`{appid}.lua` + `{appid}.zip[.NNN]`).
+  // Repo directory of the per-app fixes (`{appid}.lua` + `{appid}.zip[.NNN]`, and the
+  // `{depot}_{gid}.manifest` files of the builds they are locked to).
   fixDirectory: string;
   fixesManifestTtlSeconds: number;
+  // Fixes are only offered for games that run from Steam alone; these launchers are held back.
+  fixBlockedLaunchers: Launcher[];
+  // Where a fix game's store page is read from (its publisher and third-party account notice).
+  steamStoreBase: string;
   // Repo directory of the per-app Ubisoft "magicfiles" (`{appid}.zip`), relayed to the client.
   magicfilesDirectory: string;
   // Flat repo directory of the emulator DLLs the cracker deploys into a game folder.
@@ -298,6 +304,8 @@ export function loadConfig(): Config {
     githubToken: optional("GITHUB_TOKEN", ""),
     fixDirectory: optional("FIX_DIRECTORY", "Files/fix").replace(/^\/+|\/+$/g, ""),
     fixesManifestTtlSeconds: integer("FIXES_MANIFEST_TTL_SECONDS", 300),
+    fixBlockedLaunchers: parseBlockedLaunchers(process.env.FIX_BLOCKED_LAUNCHERS),
+    steamStoreBase: optional("STEAM_STORE_BASE", "https://store.steampowered.com").replace(/\/+$/, ""),
     magicfilesDirectory: optional("MAGICFILES_DIRECTORY", "Files/magicfiles").replace(/^\/+|\/+$/g, ""),
     emuDirectory: optional("EMU_DIRECTORY", "Files/dlls").replace(/^\/+|\/+$/g, ""),
     emuListingTtlSeconds: integer("EMU_LISTING_TTL_SECONDS", 300),

@@ -324,19 +324,19 @@ impl RepackFilter {
     }
 }
 
-/// Home-search filter that restricts results to apps with a fix of the given kind.
+/// Home-search filter that restricts results to apps with a fix available.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum FixFilter {
     #[default]
     Any,
-    Denuvo,
+    Available,
 }
 
 impl FixFilter {
     fn label(self) -> &'static str {
         match self {
             Self::Any => "Any",
-            Self::Denuvo => "Denuvo",
+            Self::Available => "Available",
         }
     }
 }
@@ -455,6 +455,10 @@ pub struct DrydockApp {
     status: String,
     status_error: bool,
     background_action: Option<Receiver<Result<String, String>>>,
+    /// The game whose fix the running background action applies, to record it once it succeeded.
+    fix_apply_app: Option<u32>,
+    /// A cracked download that finished and waits for its fix (applied once nothing else runs).
+    pending_fix_apply: Option<u32>,
     busy_label: Option<String>,
     details_app_id: Option<u32>,
     store_details: Option<SteamStoreDetails>,
@@ -867,6 +871,8 @@ impl DrydockApp {
             status,
             status_error,
             background_action: None,
+            fix_apply_app: None,
+            pending_fix_apply: None,
             busy_label: None,
             details_app_id: None,
             store_details: None,
@@ -1141,6 +1147,7 @@ impl DrydockApp {
                 let mut fixes: Vec<FixEntry> = client
                     .denuvo_fixes()
                     .map_err(|error| error.to_string())?
+                    .fixes
                     .into_iter()
                     .map(|(app_id, denuvo_fix)| FixEntry {
                         app_id,
@@ -1262,31 +1269,35 @@ impl DrydockApp {
             .collect();
     }
 
-    /// Downloads the GitHub Denuvo fix (build-locked Lua + zip parts, each SHA-verified), installs
-    /// the Lua into the plug-in folder — replacing any other Lua for the app — and extracts the zip
-    /// over the game's install folder, on a background thread.
-    fn apply_denuvo_fix_for(&mut self, app_id: u32) {
+    /// Downloads the game's fix (build-locked Lua + zip parts, each SHA-verified), installs the Lua
+    /// into the plug-in folder — replacing any other Lua for the app — and extracts the zip over the
+    /// game's install folder, on a background thread. The game may be installed by Steam or by the
+    /// app's own downloader.
+    fn apply_fix_for(&mut self, app_id: u32) {
         if self.background_action.is_some() {
+            self.status = "Another action is still running — apply the fix once it has finished.".into();
+            self.status_error = true;
             return;
         }
         let Some(root) = self.steam_root_or_error("Steam was not found. Select its folder in Settings.")
         else {
             return;
         };
-        let Some(install_dir) = self
-            .manifests
-            .iter()
-            .find(|manifest| manifest.app_id == app_id)
-            .map(SteamManifest::install_dir)
+        let Some(install_dir) =
+            crate::downloads::installed_directory(&self.settings, &self.manifests, app_id)
         else {
-            self.status = "Install the game through Steam before applying its fix.".into();
+            self.status =
+                branded!("Install the game through Steam or {product} before applying its fix.").into();
             self.status_error = true;
             return;
         };
         let Some(denuvo) = self.fix_for(app_id).and_then(|fix| fix.denuvo.clone()) else {
+            self.status = "No fix is offered for this game.".into();
+            self.status_error = true;
             return;
         };
-        self.status = "Downloading and applying the Denuvo fix…".into();
+        self.fix_apply_app = Some(app_id);
+        self.status = "Downloading and applying the fix…".into();
         self.status_error = false;
         self.busy_label = Some("Applying the fix (this can take a while for large fixes)…".into());
         let (sender, receiver) = mpsc::channel();
@@ -1314,7 +1325,7 @@ impl DrydockApp {
                 let _ = std::fs::remove_file(&zip_path);
                 let count = outcome?;
                 Ok(format!(
-                    "Denuvo fix applied — verified unlock installed, {count} game files replaced."
+                    "Fix applied — verified unlock installed, {count} game files replaced."
                 ))
             })();
             let _ = sender.send(result);
@@ -1515,7 +1526,12 @@ impl DrydockApp {
             return;
         }
         let name = self.app_display_name(app_id);
-        self.spawn_job(app_id, name, DownloadKind::Verify, Some(root.clone()));
+        let cracked = self
+            .settings
+            .installed_games
+            .get(&app_id)
+            .is_some_and(|game| game.cracked);
+        self.spawn_job(app_id, name, DownloadKind::Verify, cracked, Some(root.clone()));
         self.activation_verify = Some((app_id, root));
         self.status = "Verifying the game files before activation…".into();
         self.status_error = false;
@@ -1814,7 +1830,14 @@ impl DrydockApp {
     /// Spawns the background thread for one depot job and makes it the active `download_job`. Callers
     /// (queue start / verify) guarantee nothing else is running. `root` names the folder to use when it
     /// is already known; otherwise the game's known install is used, or a new folder is chosen.
-    fn spawn_job(&mut self, app_id: u32, name: String, kind: DownloadKind, root: Option<PathBuf>) {
+    fn spawn_job(
+        &mut self,
+        app_id: u32,
+        name: String,
+        kind: DownloadKind,
+        cracked: bool,
+        root: Option<PathBuf>,
+    ) {
         let steam_root = self.steam.root.clone();
         let installed_dir =
             root.or_else(|| crate::downloads::installed_directory(&self.settings, &self.manifests, app_id));
@@ -1843,6 +1866,7 @@ impl DrydockApp {
                 app_id,
                 &job_name,
                 kind,
+                cracked,
                 steam_root,
                 installed_dir,
                 games_directory,
@@ -1859,6 +1883,7 @@ impl DrydockApp {
             app_id,
             name,
             kind,
+            cracked,
             cancel,
             state,
             receiver,
@@ -1899,14 +1924,16 @@ impl DrydockApp {
     }
 
     /// Adds a game to the persistent download queue and starts it when nothing else is downloading.
-    /// A game already in the queue isn't added twice.
-    fn enqueue_download(&mut self, app_id: u32, name: String) {
+    /// A game already in the queue isn't added twice. `cracked` asks for the build the game's fix is
+    /// made for instead of the latest one.
+    fn enqueue_download(&mut self, app_id: u32, name: String, cracked: bool) {
         let busy = self.download_running() || self.download_paused;
         let effect = download_queue::enqueue(
             &mut self.settings.download_queue,
             QueuedDownload {
                 app_id,
                 name: name.clone(),
+                cracked,
             },
             busy,
         );
@@ -1935,8 +1962,18 @@ impl DrydockApp {
         };
         self.download_paused = false;
         self.download_error = None;
-        self.spawn_job(front.app_id, front.name.clone(), DownloadKind::Download, None);
-        self.status = format!("Downloading {}…", front.name);
+        self.spawn_job(
+            front.app_id,
+            front.name.clone(),
+            DownloadKind::Download,
+            front.cracked,
+            None,
+        );
+        self.status = if front.cracked {
+            format!("Downloading the cracked version of {}…", front.name)
+        } else {
+            format!("Downloading {}…", front.name)
+        };
         self.status_error = false;
     }
 
@@ -1947,7 +1984,13 @@ impl DrydockApp {
             self.status_error = true;
             return;
         }
-        self.spawn_job(app_id, name, DownloadKind::Verify, None);
+        // A cracked install is checked against the build it is, not the latest.
+        let cracked = self
+            .settings
+            .installed_games
+            .get(&app_id)
+            .is_some_and(|game| game.cracked);
+        self.spawn_job(app_id, name, DownloadKind::Verify, cracked, None);
         self.status = "Verifying files…".into();
         self.status_error = false;
     }
@@ -2145,23 +2188,32 @@ impl DrydockApp {
             if kind == Some(DownloadKind::Download) {
                 let was_pause = self.download_paused;
                 let switching = std::mem::take(&mut self.download_switch_pending);
-                let finished_game = self
-                    .download_job
-                    .as_ref()
-                    .map(|job| (job.app_id, job.name.clone(), job.install_root.clone()));
+                let finished_game = self.download_job.as_ref().map(|job| {
+                    (
+                        job.app_id,
+                        job.name.clone(),
+                        job.install_root.clone(),
+                        job.cracked,
+                    )
+                });
                 self.download_job = None; // the download thread has ended
                 match result {
                     Ok(_) => {
                         // Completed: drop it from the queue by App ID (robust to reordering) and register
                         // it in the Drydock library in one saved change, then resume the next one.
                         let mut unsaved = None;
-                        if let Some((id, name, Some(root))) = finished_game {
+                        if let Some((id, name, Some(root), cracked)) = finished_game {
                             drydock_core::download_queue::register_completed(
                                 &mut self.settings,
                                 id,
                                 &name,
                                 &root,
+                                cracked,
                             );
+                            // The cracked build is only half of it: its fix goes on next, by itself.
+                            if cracked && BRAND.features.denuvo_fix {
+                                self.pending_fix_apply = Some(id);
+                            }
                             if let Err(error) = self.write_settings() {
                                 // The registration stays in memory: reverting it would queue the finished
                                 // game again, forever while saving is disabled for an unreadable settings
@@ -2324,10 +2376,14 @@ impl DrydockApp {
             Ok(result) => {
                 self.background_action = None;
                 self.busy_label = None;
+                let fixed = self.fix_apply_app.take();
                 match result {
                     Ok(status) => {
                         self.status = status;
                         self.status_error = false;
+                        if let Some(app_id) = fixed {
+                            self.record_fix_applied(app_id);
+                        }
                     }
                     Err(error) => {
                         self.status = error;
@@ -2338,10 +2394,42 @@ impl DrydockApp {
             Err(TryRecvError::Disconnected) => {
                 self.background_action = None;
                 self.busy_label = None;
+                self.fix_apply_app = None;
                 self.status = "The background action ended unexpectedly".into();
                 self.status_error = true;
             }
             Err(TryRecvError::Empty) => {}
+        }
+    }
+
+    /// Notes that a game now runs on its fix's unlock — the cracked version — so the Library offers
+    /// re-applying the fix first and warns before an update replaces it.
+    fn record_fix_applied(&mut self, app_id: u32) {
+        let state = self.settings.added_apps.entry(app_id).or_default();
+        state.source = Some(UnlockSource::Cracked);
+        state.files.insert(format!("{app_id}.lua"), String::new());
+        if self.persist_settings().is_err() {
+            self.status_error = true;
+        }
+        self.refresh_plugin_luas();
+    }
+
+    /// Applies the fix a cracked download is waiting for, once nothing else runs in the background.
+    fn apply_pending_fix(&mut self) {
+        if self.background_action.is_some() || !self.fixes_loaded {
+            return;
+        }
+        let Some(app_id) = self.pending_fix_apply.take() else {
+            return;
+        };
+        if self.fix_for(app_id).is_some() {
+            self.apply_fix_for(app_id);
+        } else {
+            self.status = format!(
+                "The cracked version of {} is downloaded, but no fix is offered for it any more.",
+                self.app_display_name(app_id)
+            );
+            self.status_error = true;
         }
     }
 
@@ -2538,7 +2626,7 @@ impl DrydockApp {
             return;
         }
         let Some(denuvo) = self.fix_for(app_id).and_then(|fix| fix.denuvo.clone()) else {
-            self.status = "No cracked (Denuvo) version is available for this game.".into();
+            self.status = "No cracked version is available for this game.".into();
             self.status_error = true;
             return;
         };
@@ -2589,7 +2677,7 @@ impl DrydockApp {
                     app_id,
                     files: installed_names,
                     note: format!(
-                        "Cracked version of \"{name}\" added to Steam{}. Apply the Denuvo fix, then restart Steam.{}",
+                        "Cracked version of \"{name}\" added to Steam{}. Once Steam has installed it, apply the fix, then restart Steam.{}",
                         match &manifests {
                             Ok((0, _)) | Err(_) => String::new(),
                             Ok((count, _)) => format!(" with {count} depot manifest(s)"),
@@ -4177,6 +4265,14 @@ impl DrydockApp {
         let has_lua = |app_id: u32| {
             self.plugin_luas.contains(&app_id) || self.settings.added_apps.contains_key(&app_id)
         };
+        let has_fix = |app_id: u32| BRAND.features.denuvo_fix && self.fix_for(app_id).is_some();
+        // In Steam, the cracked build is the one the fix's unlock pins.
+        let steam_cracked = |app_id: u32| {
+            self.settings
+                .added_apps
+                .get(&app_id)
+                .is_some_and(|state| state.source == Some(UnlockSource::Cracked))
+        };
         // Games downloaded through the app's own depot engine into the games folder.
         for (app_id, game) in &self.settings.installed_games {
             if seen.insert(*app_id) {
@@ -4187,6 +4283,8 @@ impl DrydockApp {
                     launch_path: self.settings.launch_paths.get(app_id).cloned(),
                     source: LibrarySource::DrydockInstalled,
                     has_lua: has_lua(*app_id),
+                    has_fix: has_fix(*app_id),
+                    cracked: game.cracked,
                 });
             }
         }
@@ -4203,6 +4301,8 @@ impl DrydockApp {
                     launch_path: self.settings.launch_paths.get(&manifest.app_id).cloned(),
                     source: LibrarySource::SteamInstalled,
                     has_lua: true,
+                    has_fix: has_fix(manifest.app_id),
+                    cracked: steam_cracked(manifest.app_id),
                 });
             }
         }
@@ -4236,6 +4336,8 @@ impl DrydockApp {
                 launch_path: self.settings.launch_paths.get(&app_id).cloned(),
                 source: LibrarySource::Available,
                 has_lua: true,
+                has_fix: has_fix(app_id),
+                cracked: steam_cracked(app_id),
             });
         }
         entries.sort_by_key(|entry| entry.name.to_lowercase());
@@ -4418,10 +4520,15 @@ impl DrydockApp {
             }
             Some(LibraryAction::UpdateDrydock(app_id)) => {
                 let name = self.app_display_name(app_id);
-                self.enqueue_download(app_id, name);
+                self.enqueue_download(app_id, name, false);
                 self.status = format!("Checking {} for updates…", self.app_display_name(app_id));
                 self.status_error = false;
             }
+            Some(LibraryAction::DownloadCracked(app_id)) => {
+                let name = self.app_display_name(app_id);
+                self.enqueue_download(app_id, name, true);
+            }
+            Some(LibraryAction::ApplyFix(app_id)) => self.apply_fix_for(app_id),
             Some(LibraryAction::CrackDrydock(app_id)) => self.crack_drydock_game(app_id),
             Some(LibraryAction::UninstallDrydock(app_id)) => self.uninstall_drydock_game(app_id),
             None => {}
@@ -4906,6 +5013,7 @@ impl DrydockApp {
                             drydock_core::InstalledGame {
                                 name: outcome.name.clone(),
                                 install_dir: outcome.root.display().to_string(),
+                                cracked: false,
                             },
                         );
                         self.settings
@@ -5127,7 +5235,7 @@ impl DrydockApp {
                     148.0,
                     |ui| {
                         ui.selectable_value(&mut self.fix_filter, FixFilter::Any, "Any");
-                        ui.selectable_value(&mut self.fix_filter, FixFilter::Denuvo, "Denuvo");
+                        ui.selectable_value(&mut self.fix_filter, FixFilter::Available, "Available");
                     },
                 );
             }
@@ -5167,7 +5275,8 @@ impl DrydockApp {
             .map_or(FixStatus::NotApplied, |root| fix_status(root, denuvo));
         Some(FixPanelState {
             busy: self.background_action.is_some(),
-            installed: self.manifests.iter().any(|manifest| manifest.app_id == app_id),
+            installed: crate::downloads::installed_directory(&self.settings, &self.manifests, app_id)
+                .is_some(),
             denuvo: Some(status),
         })
     }
@@ -5209,10 +5318,11 @@ impl DrydockApp {
             DetailsAction::AddOwn => self.add_own_unlock(Some(app_id)),
             DetailsAction::RemoveFromSteam => self.remove_app_from_steam(app_id),
             DetailsAction::InstallService => self.install_steam_service(),
-            DetailsAction::ApplyDenuvoFix => self.apply_denuvo_fix_for(app_id),
+            DetailsAction::ApplyFix => self.apply_fix_for(app_id),
             DetailsAction::Download(index) => self.open_repack_source(app_id, index),
             DetailsAction::Activate => self.go_to_activation(app_id),
-            DetailsAction::DepotDownload => self.enqueue_download(app_id, name.to_owned()),
+            DetailsAction::DepotDownload => self.enqueue_download(app_id, name.to_owned(), false),
+            DetailsAction::DepotDownloadCracked => self.enqueue_download(app_id, name.to_owned(), true),
             DetailsAction::DepotVerify => self.start_verify(app_id, name.to_owned()),
         }
     }
@@ -5343,14 +5453,18 @@ impl DrydockApp {
             // Depot availability isn't cheaply probeable, so offer Download for any real game and
             // report "no depot data" at download time if the package turns out to be missing.
             downloadable: is_real_game(details.app_id, &details.name),
-            installed: self
-                .manifests
-                .iter()
-                .any(|manifest| manifest.app_id == details.app_id),
+            installed: crate::downloads::installed_directory(&self.settings, &self.manifests, details.app_id)
+                .is_some(),
             busy: self
                 .download_job
                 .as_ref()
                 .is_some_and(|job| job.finished.is_none()),
+            cracked_available: BRAND.features.cracked_version && self.fix_for(details.app_id).is_some(),
+            cracked_installed: self
+                .settings
+                .installed_games
+                .get(&details.app_id)
+                .is_some_and(|game| game.cracked),
         };
         let (action, new_shot) = details_body(
             ui,
@@ -6576,7 +6690,7 @@ impl DrydockApp {
         const FIXES_STAGES: [GuideStage; 3] = [
             (
                 "PREPARE",
-                "Install the game you want to fix.",
+                "Get the cracked version of the game.",
                 &[
                     (
                         "Set your Steam folder",
@@ -6587,8 +6701,8 @@ impl DrydockApp {
                         "In Settings, install the Steam Service — it must be current before a fix can be applied.",
                     ),
                     (
-                        "Install the game fully",
-                        "Add the game and let Steam finish downloading it completely, so there are files to patch.",
+                        "Get the cracked version",
+                        "On the game's page, choose Add cracked version to Steam from the Steam menu — or Download cracked version from the Download menu to let {product} fetch it.",
                     ),
                 ],
             ),
@@ -6597,12 +6711,12 @@ impl DrydockApp {
                 "One click installs everything the fix needs.",
                 &[
                     (
-                        "Open the Fixes tab",
-                        "Pick a game that has a build-locked fix, then open its details page.",
+                        "Find a game with a fix",
+                        "In the Store, set the Fixes filter to Available. Fixes are offered for games that run from Steam alone — not for ones that need the EA app, Ubisoft Connect or the Rockstar launcher.",
                     ),
                     (
                         "Select Apply Fix",
-                        "{product} installs the matching unlock and downloads the fix files over your game install.",
+                        "On the game's page or in its Library menu: {product} installs the matching unlock and unpacks the fix files over your game. A cracked version {product} downloaded gets its fix by itself.",
                     ),
                     (
                         "Let it finish",
@@ -6616,7 +6730,7 @@ impl DrydockApp {
                 &[
                     (
                         "Stays on the fixed build",
-                        "The fix's unlock only carries the manifests of the build it targets, so Steam cannot update the game past it.",
+                        "The fix's unlock pins the build it is made for, so Steam does not update the game past it.",
                     ),
                     (
                         "Launch and play",
@@ -7632,7 +7746,7 @@ impl DrydockApp {
 #[cfg(feature = "screenshot")]
 impl DrydockApp {
     /// Ordered pages the screenshot harness walks through (see [`crate::screenshot`]).
-    pub const SCREENSHOT_PAGES: [&'static str; 18] = [
+    pub const SCREENSHOT_PAGES: [&'static str; 20] = [
         "home",
         "search",
         "repacks",
@@ -7642,6 +7756,8 @@ impl DrydockApp {
         "tools",
         "cloud",
         "details",
+        "details-fix",
+        "details-fix-menu",
         "activation",
         "settings",
         "guide",
@@ -7658,6 +7774,9 @@ impl DrydockApp {
     pub fn screenshot_goto(&mut self, key: &str) {
         // Only the search page searches; everywhere else the query would cover the page.
         self.search.clear();
+        if let Ok(mut open) = SCREENSHOT_OPEN_MENU.lock() {
+            *open = (key == "details-fix-menu").then_some("depot_download");
+        }
         if key == "login" || key == "login-link" {
             self.about_open = false;
             self.update_prompt_open = false;
@@ -7695,6 +7814,36 @@ impl DrydockApp {
                     self.open_details(app_id);
                 } else {
                     self.page = Page::Details;
+                }
+            }
+            "details-fix" | "details-fix-menu" if BRAND.features.uses_fix_list() => {
+                // A game with a fix: the installed game from "details", given a stand-in fix unless
+                // the real list has one. A late list must not take it away again, so it is dropped.
+                self.fixes_receiver = None;
+                let app_id = self
+                    .manifests
+                    .first()
+                    .map(|manifest| manifest.app_id)
+                    .or_else(|| self.catalog.first().map(|app| app.app_id));
+                if let Some(app_id) = app_id {
+                    if self.fix_for(app_id).is_none() {
+                        let file = |name: String| drydock_core::RepositoryFile {
+                            source_url: format!("/v1/denuvo-fixes/file/{name}"),
+                            relative_path: name,
+                            sha: "0".repeat(40),
+                        };
+                        self.fixes.push(FixEntry {
+                            app_id,
+                            name: String::new(),
+                            denuvo: Some(drydock_core::DenuvoFix {
+                                lua: file(format!("{app_id}.lua")),
+                                zip_parts: vec![file(format!("{app_id}.zip"))],
+                            }),
+                        });
+                        self.fixes_loaded = true;
+                        self.rebuild_fix_index();
+                    }
+                    self.open_details(app_id);
                 }
             }
             "denuvo" if BRAND.features.denuvo_tab => {
@@ -7752,6 +7901,7 @@ impl DrydockApp {
                     app_id: 3_751_260,
                     name: "The Blood of Dawnwalker".into(),
                     kind: DownloadKind::Download,
+                    cracked: false,
                     cancel: Arc::new(AtomicBool::new(false)),
                     state: Arc::new(AtomicU8::new(crate::downloads::JOB_RUNNING)),
                     receiver,
@@ -7784,6 +7934,7 @@ impl eframe::App for DrydockApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.image_textures.forget_retired(ui.ctx());
         self.poll_background_action();
+        self.apply_pending_fix();
         self.poll_catalog_refresh();
         self.poll_search_index();
         self.poll_denuvo_refresh();
@@ -8455,6 +8606,10 @@ impl egui::Widget for PillButton {
     }
 }
 
+/// Screenshots only: the split button whose dropdown is shown open.
+#[cfg(feature = "screenshot")]
+static SCREENSHOT_OPEN_MENU: Mutex<Option<&'static str>> = Mutex::new(None);
+
 /// One entry in a [`split_button`] dropdown.
 struct MenuItem<'a> {
     label: &'a str,
@@ -8475,9 +8630,27 @@ fn split_button(
     enabled: bool,
     items: &[MenuItem],
 ) -> Option<usize> {
+    split_button_of(ButtonKind::Primary, ui, id_source, label, hover, enabled, items)
+}
+
+/// [`split_button`] in the colours of a pill of `kind` — a download is a success-coloured action.
+fn split_button_of(
+    kind: ButtonKind,
+    ui: &mut egui::Ui,
+    id_source: &str,
+    label: &str,
+    hover: &str,
+    enabled: bool,
+    items: &[MenuItem],
+) -> Option<usize> {
     if items.is_empty() {
+        let pill = PillButton {
+            label: label.to_owned(),
+            kind,
+            min_size: Vec2::ZERO,
+        };
         return ui
-            .add_enabled(enabled, primary_button(label))
+            .add_enabled(enabled, pill)
             .on_hover_text(hover)
             .clicked()
             .then_some(0);
@@ -8509,9 +8682,12 @@ fn split_button(
             0.0
         }
     };
-    let mut fill_main = lerp_color(ACCENT_DEEP, ACCENT_SOFT, fade(&main));
-    let mut fill_arrow = lerp_color(ACCENT_DEEP, ACCENT_SOFT, fade(&arrow));
-    let mut text_color = Color32::WHITE;
+    let (rest, hovered, mut text_color) = match kind {
+        ButtonKind::Success => (VERDIGRIS, VERDIGRIS_HOVER, ON_VERDIGRIS),
+        ButtonKind::Primary | ButtonKind::Ghost => (ACCENT_DEEP, ACCENT_SOFT, Color32::WHITE),
+    };
+    let mut fill_main = lerp_color(rest, hovered, fade(&main));
+    let mut fill_arrow = lerp_color(rest, hovered, fade(&arrow));
     if !enabled {
         fill_main = lerp_color(fill_main, BACKGROUND, 0.45);
         fill_arrow = lerp_color(fill_arrow, BACKGROUND, 0.45);
@@ -8582,6 +8758,13 @@ fn split_button(
         + 32.0;
 
     let mut chosen = if enabled && main.clicked() { Some(0) } else { None };
+    #[cfg(feature = "screenshot")]
+    if SCREENSHOT_OPEN_MENU
+        .lock()
+        .is_ok_and(|open| *open == Some(id_source))
+    {
+        egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&arrow));
+    }
     egui::Popup::menu(&arrow)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
         .layout(Layout::top_down(Align::Min))
@@ -8776,7 +8959,7 @@ fn catalog_matches_filters(
     }
     match fix_filter {
         FixFilter::Any => true,
-        FixFilter::Denuvo => fix_flags_by_app.contains(&entry.app_id),
+        FixFilter::Available => fix_flags_by_app.contains(&entry.app_id),
     }
 }
 
@@ -9440,6 +9623,11 @@ struct LibraryEntry {
     source: LibrarySource,
     /// Whether Steam has an unlock Lua for it — on disk or recorded — so it can be removed again.
     has_lua: bool,
+    /// Whether a fix is offered for it.
+    has_fix: bool,
+    /// Whether it is the cracked build its fix is made for: downloaded as such, or with the fix's
+    /// unlock in Steam.
+    cracked: bool,
 }
 
 /// What a Library card wants the page to do once the frame is laid out (applied after the borrow of
@@ -9463,6 +9651,10 @@ enum LibraryAction {
     UpdateDrydock(u32),
     /// Run the emu crack flow, deploying it straight into a Drydock game's install folder.
     CrackDrydock(u32),
+    /// Apply (or re-apply) the game's fix.
+    ApplyFix(u32),
+    /// Download the cracked build again (in place), then re-apply its fix.
+    DownloadCracked(u32),
     /// Delete a Drydock-downloaded game's install folder (confirmed first).
     UninstallDrydock(u32),
 }
@@ -9477,6 +9669,8 @@ fn library_menu(
     source: LibrarySource,
     app_id: u32,
     has_lua: bool,
+    has_fix: bool,
+    cracked: bool,
 ) -> (LibraryMenuEntry, Vec<LibraryMenuEntry>) {
     let store_page = (
         "STORE PAGE",
@@ -9489,28 +9683,70 @@ fn library_menu(
         "Delete the unlock Lua from Steam (asks first; the game's files stay)",
         LibraryAction::RemoveLua(app_id),
     ));
-    let update_lua = (
-        "UPDATE LUA",
-        "Re-fetch and re-install the unlock Lua",
-        LibraryAction::UpdateLua(app_id),
-    );
+    // Updating a cracked game replaces the build its fix is made for, so it says so.
+    let update_lua = if cracked {
+        (
+            "UPDATE TO LATEST VERSION",
+            "Replace the cracked version's unlock with the latest one — the fix stops working",
+            LibraryAction::UpdateLua(app_id),
+        )
+    } else {
+        (
+            "UPDATE LUA",
+            "Re-fetch and re-install the unlock Lua",
+            LibraryAction::UpdateLua(app_id),
+        )
+    };
+    let update_drydock = if cracked {
+        (
+            "UPDATE TO LATEST VERSION",
+            "Download the latest version over the cracked one — its fix stops working",
+            LibraryAction::UpdateDrydock(app_id),
+        )
+    } else {
+        (
+            "UPDATE",
+            "Check the depot for updated files and download them",
+            LibraryAction::UpdateDrydock(app_id),
+        )
+    };
+    // A fix needs installed files to patch; on the cracked build it is what is kept up, so it leads.
+    let installed = source != LibrarySource::Available;
+    let fix = (has_fix && installed).then_some(if cracked {
+        (
+            "RE-APPLY FIX",
+            "Re-install the fix's unlock and restore the game files it replaces",
+            LibraryAction::ApplyFix(app_id),
+        )
+    } else {
+        (
+            "APPLY FIX",
+            "Install the fix's unlock and unpack its files over the game",
+            LibraryAction::ApplyFix(app_id),
+        )
+    });
+    let fix_leads = cracked && fix.is_some();
     match source {
         // Uninstalling a Steam game is done in Steam; here its Lua is updated or removed.
         LibrarySource::Available | LibrarySource::SteamInstalled => {
-            (update_lua, remove_lua.into_iter().chain([store_page]).collect())
+            let rest = remove_lua.into_iter().chain([store_page]);
+            match fix {
+                Some(fix) if fix_leads => (fix, [update_lua].into_iter().chain(rest).collect()),
+                fix => (update_lua, fix.into_iter().chain(rest).collect()),
+            }
         }
-        LibrarySource::DrydockInstalled => (
-            (
-                "UPDATE",
-                "Check the depot for updated files and download them",
-                LibraryAction::UpdateDrydock(app_id),
-            ),
-            [
-                (
-                    "VERIFY FILES",
-                    "Verify the downloaded files against the depot manifests",
-                    LibraryAction::VerifyDrydock(app_id),
-                ),
+        LibrarySource::DrydockInstalled => {
+            let verify = (
+                "VERIFY FILES",
+                "Verify the downloaded files against the depot manifests",
+                LibraryAction::VerifyDrydock(app_id),
+            );
+            let repair_cracked = fix_leads.then_some((
+                "REPAIR CRACKED VERSION",
+                "Download the cracked version's missing or changed files again, then re-apply its fix",
+                LibraryAction::DownloadCracked(app_id),
+            ));
+            let tools = [
                 (
                     "CRACK",
                     "Generate and deploy the emu crack into this game's folder",
@@ -9521,19 +9757,32 @@ fn library_menu(
                     "Point PLAY at a different executable",
                     LibraryAction::SetExe(app_id),
                 ),
-            ]
-            .into_iter()
-            .chain(remove_lua)
-            .chain([
+            ];
+            let tail = remove_lua.into_iter().chain([
                 (
                     "UNINSTALL",
                     "Delete the downloaded game folder",
                     LibraryAction::UninstallDrydock(app_id),
                 ),
                 store_page,
-            ])
-            .collect(),
-        ),
+            ]);
+            match fix {
+                Some(fix) if fix_leads => (
+                    fix,
+                    [verify]
+                        .into_iter()
+                        .chain(repair_cracked)
+                        .chain([update_drydock])
+                        .chain(tools)
+                        .chain(tail)
+                        .collect(),
+                ),
+                fix => (
+                    update_drydock,
+                    fix.into_iter().chain([verify]).chain(tools).chain(tail).collect(),
+                ),
+            }
+        }
     }
 }
 
@@ -9750,7 +9999,13 @@ fn library_overview(
                                 }
                             }
                         }
-                        let (main, entries) = library_menu(entry.source, entry.app_id, entry.has_lua);
+                        let (main, entries) = library_menu(
+                            entry.source,
+                            entry.app_id,
+                            entry.has_lua,
+                            entry.has_fix,
+                            entry.cracked,
+                        );
                         let items: Vec<MenuItem> = entries
                             .iter()
                             .map(|(label, hover, _)| MenuItem { label, hover })
@@ -10659,6 +10914,10 @@ struct DepotButtons {
     installed: bool,
     /// A download/verify job is currently running (buttons disabled).
     busy: bool,
+    /// The game has a fix, so the build it is made for can be asked for.
+    cracked_available: bool,
+    /// What the app downloaded is that cracked build.
+    cracked_installed: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -10800,39 +11059,27 @@ fn details_store_sidebar(
         });
 
         // Native depot download: real game files via manifest + key, shown only when the proxy has
-        // download data for this app.
+        // download data for this app. One split button, like Add to Steam: the download is the main
+        // action, the cracked build and a verify hang off its dropdown.
         if depot.downloadable {
             ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-                // Enabled even while another download runs — it just goes into the queue and starts
-                // when the current one finishes (enqueue_download won't add the same game twice).
-                let download_label = if depot.busy {
-                    "ADD TO QUEUE"
-                } else if depot.installed {
-                    "DOWNLOAD / REPAIR"
-                } else {
-                    branded!(upper "DOWNLOAD IN {product}")
-                };
-                let download_hint = if depot.busy {
-                    "Queue this game — it starts once the current download finishes"
-                } else {
-                    "Download the real game files into your Steam library (manifest + depot key → Steam CDN)"
-                };
-                if ui
-                    .add(success_button(download_label))
-                    .on_hover_text(download_hint)
-                    .clicked()
-                {
-                    action = DetailsAction::DepotDownload;
-                }
-                if depot.installed
-                    && ui
-                        .add_enabled(!depot.busy, ghost_button("VERIFY FILES"))
-                        .on_hover_text("Check the installed files against the depot manifest")
-                        .clicked()
-                {
-                    action = DetailsAction::DepotVerify;
+                let (main, extras) = depot_download_menu(depot);
+                let items: Vec<MenuItem> = extras
+                    .iter()
+                    .map(|(label, hover, _)| MenuItem { label, hover })
+                    .collect();
+                if let Some(index) = split_button_of(
+                    ButtonKind::Success,
+                    ui,
+                    "depot_download",
+                    main.0,
+                    main.1,
+                    true,
+                    &items,
+                ) {
+                    action = index.checked_sub(1).map_or(main.2, |extra| extras[extra].2);
                 }
             });
         }
@@ -10962,21 +11209,23 @@ enum DetailsAction {
     None,
     /// Add the normal unlock Lua so Steam installs/updates the game to its latest build.
     AddToSteam,
-    /// Add the GitHub build-locked "Denuvo fix" Lua so the game is pinned to the cracked build.
+    /// Add the fix's build-locked Lua so the game is pinned to the cracked build.
     AddCracked,
     /// Add a Lua and/or depot manifests the user picks from disk.
     AddOwn,
     RemoveFromSteam,
     /// Install the Steam Service (shown in place of Add to Steam when it is not installed).
     InstallService,
-    /// Apply the app's GitHub build-locked Denuvo fix.
-    ApplyDenuvoFix,
+    /// Apply the app's fix (its build-locked Lua and game files).
+    ApplyFix,
     /// Open the repack source at this index (into the app's repack sources) in the browser.
     Download(usize),
     /// Jump to the Activation tab with this game preselected.
     Activate,
     /// Download the real game files via the native depot downloader (manifest + key → Steam CDN).
     DepotDownload,
+    /// Download the build the game's fix is made for, then apply the fix.
+    DepotDownloadCracked,
     /// Verify the installed files against the depot manifest.
     DepotVerify,
 }
@@ -11084,9 +11333,62 @@ fn repack_entries(repackers: &[String]) -> Vec<(String, String, DetailsAction)> 
         .collect()
 }
 
+/// The details page's download split button: its main action and dropdown entries, per install
+/// state. Pure, so the composition can be checked without a frame.
+type DetailsMenuEntry = (&'static str, &'static str, DetailsAction);
+fn depot_download_menu(depot: DepotButtons) -> (DetailsMenuEntry, Vec<DetailsMenuEntry>) {
+    // Enabled even while another download runs — it just goes into the queue and starts when the
+    // current one finishes (enqueue_download won't add the same game twice).
+    let queue_hint = "Queue this game — it starts once the current download finishes";
+    let verify = (depot.installed && !depot.busy).then_some((
+        "VERIFY FILES",
+        "Check the installed files against the depot manifest",
+        DetailsAction::DepotVerify,
+    ));
+    if depot.cracked_installed && depot.cracked_available {
+        // The cracked build is installed: repairing keeps to it, updating leaves it.
+        let main = if depot.busy {
+            ("ADD TO QUEUE", queue_hint, DetailsAction::DepotDownloadCracked)
+        } else {
+            (
+                "REPAIR CRACKED VERSION",
+                "Download the cracked version's missing or changed files again, then re-apply its fix",
+                DetailsAction::DepotDownloadCracked,
+            )
+        };
+        let latest = (
+            "UPDATE TO LATEST VERSION",
+            "Download the latest version over the cracked one — its fix stops working",
+            DetailsAction::DepotDownload,
+        );
+        return (main, [Some(latest), verify].into_iter().flatten().collect());
+    }
+    let main = if depot.busy {
+        ("ADD TO QUEUE", queue_hint, DetailsAction::DepotDownload)
+    } else if depot.installed {
+        (
+            "DOWNLOAD / REPAIR",
+            "Download the latest version's missing or changed files",
+            DetailsAction::DepotDownload,
+        )
+    } else {
+        (
+            branded!(upper "DOWNLOAD IN {product}"),
+            "Download the real game files (manifest + depot key → Steam CDN)",
+            DetailsAction::DepotDownload,
+        )
+    };
+    let cracked = depot.cracked_available.then_some((
+        "DOWNLOAD CRACKED VERSION",
+        "Download the version the game's fix is made for, then apply the fix",
+        DetailsAction::DepotDownloadCracked,
+    ));
+    (main, [cracked, verify].into_iter().flatten().collect())
+}
+
 /// Renders the details-page action buttons (the hub for a game) and returns the one that was
-/// clicked: add the latest or cracked unlock, apply the Denuvo fix, download a repack, or jump
-/// to Activation.
+/// clicked: add the latest or cracked unlock, apply the fix, download a repack, or jump to
+/// Activation.
 fn steam_button_row(
     ui: &mut egui::Ui,
     state: DetailsState,
@@ -11094,7 +11396,6 @@ fn steam_button_row(
     activation_required: bool,
 ) -> DetailsAction {
     let mut action = DetailsAction::None;
-    let installed = panels.fix.is_some_and(|fix| fix.installed);
     let busy_fix = panels.fix.is_some_and(|fix| fix.busy);
     // The cracked variant needs a Denuvo fix to pin to, and a product that offers it at all.
     let has_denuvo = BRAND.features.cracked_version && panels.fix.is_some_and(|fix| fix.denuvo.is_some());
@@ -11155,32 +11456,34 @@ fn steam_button_row(
         }
     }
 
-    if let Some(fix) = panels.fix.filter(|_| BRAND.features.denuvo_fix) {
-        // Denuvo fix (GitHub build-locked Lua + zip), labelled with its installed status.
-        if let Some(status) = fix.denuvo {
-            let text = match status {
-                FixStatus::Applied => "RE-APPLY DENUVO FIX",
-                FixStatus::IncompatibleLua | FixStatus::NotApplied => "APPLY DENUVO FIX",
-            };
-            let response = ui.add_enabled(installed && !busy_fix, ghost_button(text));
-            let response = if !installed {
-                response.on_hover_text("Install the game through Steam first.")
-            } else if busy_fix {
-                response.on_hover_text("A background action is already running.")
-            } else {
-                match status {
-                    FixStatus::Applied => response.on_hover_text(
-                        "The verified fix Lua is installed. Re-apply to refresh the game files.",
-                    ),
-                    FixStatus::IncompatibleLua => response.on_hover_text(
-                        "A different Lua is installed for this app — applying replaces it with the verified fix Lua.",
-                    ),
-                    FixStatus::NotApplied => response,
+    // Apply Fix (the fix's build-locked Lua + game files), labelled with its installed status. Only
+    // once the game is installed — by Steam or by the app — as there is nothing to patch before; the
+    // cracked build itself is fetched from the Add-to-Steam and Download menus.
+    if let Some(status) = panels
+        .fix
+        .filter(|fix| BRAND.features.denuvo_fix && fix.installed)
+        .and_then(|fix| fix.denuvo)
+    {
+        let text = match status {
+            FixStatus::Applied => "RE-APPLY FIX",
+            FixStatus::IncompatibleLua | FixStatus::NotApplied => "APPLY FIX",
+        };
+        let response = ui.add_enabled(!busy_fix, ghost_button(text));
+        let response = if busy_fix {
+            response.on_hover_text("A background action is already running.")
+        } else {
+            response.on_hover_text(match status {
+                FixStatus::Applied => {
+                    "The fix's unlock is installed. Re-apply to restore the game files it replaces."
                 }
-            };
-            if response.clicked() {
-                action = DetailsAction::ApplyDenuvoFix;
-            }
+                FixStatus::IncompatibleLua => {
+                    "Another Lua is installed for this game — applying replaces it with the fix's unlock."
+                }
+                FixStatus::NotApplied => "Install the fix's unlock and unpack its files over the game.",
+            })
+        };
+        if response.clicked() {
+            action = DetailsAction::ApplyFix;
         }
     }
 
@@ -11786,54 +12089,111 @@ mod ui_tests {
 
     #[test]
     fn every_library_row_keeps_its_actions_reachable() {
+        use LibraryAction::*;
         // Nothing may be dropped by the regrouping: each row's main action plus its dropdown has to
-        // still cover everything that row can do.
-        for (source, has_lua, expected) in [
+        // still cover everything that row can do. Arguments: has a Lua, has a fix, is cracked.
+        let cases: [(LibrarySource, bool, bool, bool, Vec<LibraryAction>); 9] = [
             (
                 LibrarySource::Available,
                 true,
-                vec![
-                    LibraryAction::UpdateLua(7),
-                    LibraryAction::RemoveLua(7),
-                    LibraryAction::Details(7),
-                ],
+                false,
+                false,
+                vec![UpdateLua(7), RemoveLua(7), Details(7)],
+            ),
+            // Nothing installed, so nothing to apply a fix to.
+            (
+                LibrarySource::Available,
+                true,
+                true,
+                true,
+                vec![UpdateLua(7), RemoveLua(7), Details(7)],
             ),
             (
                 LibrarySource::SteamInstalled,
                 true,
-                vec![
-                    LibraryAction::UpdateLua(7),
-                    LibraryAction::RemoveLua(7),
-                    LibraryAction::Details(7),
-                ],
+                false,
+                false,
+                vec![UpdateLua(7), RemoveLua(7), Details(7)],
+            ),
+            (
+                LibrarySource::SteamInstalled,
+                true,
+                true,
+                false,
+                vec![UpdateLua(7), ApplyFix(7), RemoveLua(7), Details(7)],
+            ),
+            // On the cracked build the fix leads and updating moves into the dropdown.
+            (
+                LibrarySource::SteamInstalled,
+                true,
+                true,
+                true,
+                vec![ApplyFix(7), UpdateLua(7), RemoveLua(7), Details(7)],
             ),
             (
                 LibrarySource::DrydockInstalled,
                 true,
+                false,
+                false,
                 vec![
-                    LibraryAction::UpdateDrydock(7),
-                    LibraryAction::VerifyDrydock(7),
-                    LibraryAction::CrackDrydock(7),
-                    LibraryAction::SetExe(7),
-                    LibraryAction::RemoveLua(7),
-                    LibraryAction::UninstallDrydock(7),
-                    LibraryAction::Details(7),
+                    UpdateDrydock(7),
+                    VerifyDrydock(7),
+                    CrackDrydock(7),
+                    SetExe(7),
+                    RemoveLua(7),
+                    UninstallDrydock(7),
+                    Details(7),
                 ],
             ),
             (
                 LibrarySource::DrydockInstalled,
                 false,
+                false,
+                false,
                 vec![
-                    LibraryAction::UpdateDrydock(7),
-                    LibraryAction::VerifyDrydock(7),
-                    LibraryAction::CrackDrydock(7),
-                    LibraryAction::SetExe(7),
-                    LibraryAction::UninstallDrydock(7),
-                    LibraryAction::Details(7),
+                    UpdateDrydock(7),
+                    VerifyDrydock(7),
+                    CrackDrydock(7),
+                    SetExe(7),
+                    UninstallDrydock(7),
+                    Details(7),
                 ],
             ),
-        ] {
-            let (main, extras) = library_menu(source, 7, has_lua);
+            (
+                LibrarySource::DrydockInstalled,
+                false,
+                true,
+                false,
+                vec![
+                    UpdateDrydock(7),
+                    ApplyFix(7),
+                    VerifyDrydock(7),
+                    CrackDrydock(7),
+                    SetExe(7),
+                    UninstallDrydock(7),
+                    Details(7),
+                ],
+            ),
+            (
+                LibrarySource::DrydockInstalled,
+                true,
+                true,
+                true,
+                vec![
+                    ApplyFix(7),
+                    VerifyDrydock(7),
+                    DownloadCracked(7),
+                    UpdateDrydock(7),
+                    CrackDrydock(7),
+                    SetExe(7),
+                    RemoveLua(7),
+                    UninstallDrydock(7),
+                    Details(7),
+                ],
+            ),
+        ];
+        for (source, has_lua, has_fix, cracked, expected) in cases {
+            let (main, extras) = library_menu(source, 7, has_lua, has_fix, cracked);
             assert!(
                 source.group() == LibraryGroup::Downloaded
                     || !extras.iter().any(|entry| entry.0.contains("UNINSTALL")),
@@ -11841,8 +12201,53 @@ mod ui_tests {
             );
             let mut actions = vec![main.2];
             actions.extend(extras.iter().map(|(_, _, action)| *action));
-            assert_eq!(actions, expected);
+            assert_eq!(
+                actions, expected,
+                "{source:?} lua={has_lua} fix={has_fix} cracked={cracked}"
+            );
+            let warns = std::iter::once(&main)
+                .chain(&extras)
+                .any(|entry| entry.0 == "UPDATE TO LATEST VERSION");
+            assert_eq!(warns, cracked, "updating a cracked game says what it replaces");
         }
+    }
+
+    #[test]
+    fn the_download_menu_offers_the_cracked_build_only_with_a_fix() {
+        let menu = |installed, busy, cracked_available, cracked_installed| {
+            let (main, extras) = depot_download_menu(DepotButtons {
+                downloadable: true,
+                installed,
+                busy,
+                cracked_available,
+                cracked_installed,
+            });
+            std::iter::once(main.2)
+                .chain(extras.iter().map(|entry| entry.2))
+                .collect::<Vec<_>>()
+        };
+        use DetailsAction::{DepotDownload, DepotDownloadCracked, DepotVerify};
+        assert_eq!(menu(false, false, false, false), [DepotDownload]);
+        assert_eq!(
+            menu(false, false, true, false),
+            [DepotDownload, DepotDownloadCracked]
+        );
+        assert_eq!(
+            menu(true, false, true, false),
+            [DepotDownload, DepotDownloadCracked, DepotVerify]
+        );
+        // Installed as the cracked build: repairing keeps to it, the latest is one step away.
+        assert_eq!(
+            menu(true, false, true, true),
+            [DepotDownloadCracked, DepotDownload, DepotVerify]
+        );
+        // Nothing is verified while a job runs; the main action just queues.
+        assert_eq!(
+            menu(true, true, true, false),
+            [DepotDownload, DepotDownloadCracked]
+        );
+        // A cracked install whose fix is no longer offered can only be updated.
+        assert_eq!(menu(true, false, false, true), [DepotDownload, DepotVerify]);
     }
 
     #[test]

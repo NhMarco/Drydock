@@ -30,14 +30,14 @@ developer = "Example Studio"
 navigation = "side"
 
 # Optional features; everything else is part of every product. Left out = Drydock's choice:
-# Tools and the Denuvo tab on; Cloud, Repacks, Denuvo fix and cracked version off.
+# Tools, the Denuvo tab, Apply Fix and the cracked version on; Cloud and Repacks off.
 # (This example turns Drydock's choices around, so CI builds every feature both ways.)
 [features]
 cloud = true
 denuvo_tab = false
 repacks = true
-denuvo_fix = true
-cracked_version = true
+denuvo_fix = false
+cracked_version = false
 # tools = true
 
 # Every colour the interface paints with, as "#RRGGBB" or "#RRGGBBAA". The tests check text contrast

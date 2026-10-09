@@ -1,6 +1,7 @@
 // Serves the per-app "Denuvo fixes" (build-locked Lua + game-folder zip parts) from GitHub.
 //
-//   GET /v1/denuvo-fixes            -> { fixes: [{ appid, lua: {name,sha,size}, zip_parts: [...] }] }
+//   GET /v1/denuvo-fixes            -> { fixes: [{ appid, lua: {name,sha,size}, zip_parts: [...] }],
+//                                        manifests: [{name,sha,size}] }  (`{depot}_{gid}.manifest`)
 //   GET /v1/denuvo-fixes/file/:name -> raw bytes of one fix file (streamed from GitHub)
 //
 // A file is only servable if it appears in the current manifest (whitelist), so the route can
@@ -15,8 +16,9 @@ function publicRef(ref: FixFileRef): { name: string; sha: string; size?: number 
   return { name: ref.name, sha: ref.sha, ...(ref.size !== undefined ? { size: ref.size } : {}) };
 }
 
-// Accepts only `{appid}.lua`, `{appid}.zip`, `{appid}.zip.NNN` shapes before the whitelist check.
-const NAME_PATTERN = /^[0-9]{1,10}\.(lua|zip)(\.[0-9]{1,10})?$/i;
+// Accepts only `{appid}.lua`, `{appid}.zip`, `{appid}.zip.NNN` and `{depot}_{gid}.manifest` shapes
+// before the whitelist check.
+const NAME_PATTERN = /^(?:[0-9]{1,10}\.(lua|zip)(\.[0-9]{1,10})?|[0-9]{1,10}_[0-9]{1,20}\.manifest)$/i;
 
 export function registerDenuvoFixesRoutes(
   app: FastifyInstance,
@@ -26,13 +28,16 @@ export function registerDenuvoFixesRoutes(
 ): void {
   app.get("/v1/denuvo-fixes", { preHandler: authHook }, async (req, reply) => {
     try {
-      const fixes = await cache.getFixes();
+      const [fixes, manifests] = await Promise.all([cache.getFixes(), cache.getManifests()]);
       const body = fixes.map((fix) => ({
         appid: fix.appid,
         lua: publicRef(fix.lua),
         zip_parts: fix.zip_parts.map(publicRef),
       }));
-      return reply.code(200).header("Cache-Control", "no-store").send({ fixes: body });
+      return reply
+        .code(200)
+        .header("Cache-Control", "no-store")
+        .send({ fixes: body, manifests: manifests.map(publicRef) });
     } catch (error) {
       return sendError(reply, req.log, error, "denuvo-fixes manifest");
     }

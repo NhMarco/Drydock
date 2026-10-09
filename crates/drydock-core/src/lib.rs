@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod cloud;
 pub mod config;
 pub mod conflicts;
+pub mod cracked;
 pub mod denuvo;
 pub mod depot;
 pub mod download_queue;
@@ -57,6 +58,7 @@ pub use config::{
     ConfigEntry, Source as ConfigSource, UserOverrides, describe as describe_config, set_user_overrides,
 };
 pub use conflicts::{ConflictingSoftwareStatus, detect_conflicting_software};
+pub use cracked::{CrackedBuildError, cracked_depot_data, pinned_manifests};
 pub use denuvo::{
     DenuvoError, DenuvoWatchClient, load_cached_denuvo_appids, read_denuvo_appids, save_denuvo_appids,
 };
@@ -80,8 +82,8 @@ pub use game_folder::{
 pub use harden::harden_dll_search;
 pub use language::{GameLanguageError, GameLanguageOptions, apply_language, read_language_options};
 pub use mfb::{
-    DenuvoFix, FixEntry, RepositoryFile, SteamServiceManifest, SteamServicePackage, compute_git_blob_sha,
-    matches_git_blob_sha,
+    DenuvoFix, FixEntry, FixList, RepositoryFile, SteamServiceManifest, SteamServicePackage,
+    compute_git_blob_sha, matches_git_blob_sha,
 };
 pub use models::{AddedAppState, AppInfo, SteamManifest, UnlockSource};
 pub use open_steam_tool::{OpenSteamTool, OstError};

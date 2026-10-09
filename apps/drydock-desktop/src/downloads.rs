@@ -45,6 +45,8 @@ pub(crate) struct DownloadJob {
     pub(crate) app_id: u32,
     pub(crate) name: String,
     pub(crate) kind: DownloadKind,
+    /// The build the game's fix is made for, rather than the latest.
+    pub(crate) cracked: bool,
     pub(crate) cancel: Arc<AtomicBool>,
     /// `JOB_PREPARING` / `JOB_RUNNING` / `JOB_ABANDONED` — see those constants.
     pub(crate) state: Arc<AtomicU8>,
@@ -150,6 +152,7 @@ pub(crate) fn run_depot_job(
     app_id: u32,
     name: &str,
     kind: DownloadKind,
+    cracked: bool,
     steam_root: Option<PathBuf>,
     installed_dir: Option<PathBuf>,
     games_directory: Option<PathBuf>,
@@ -173,16 +176,55 @@ pub(crate) fn run_depot_job(
         }
     };
 
-    step("Fetching the depot package…");
     let proxy = ProxyClient::new().map_err(|error| error.to_string())?;
-    let mut data = DepotData::fetch_cancellable(&proxy, app_id, cancel).map_err(|error| error.to_string())?;
-    stopped()?;
-
     // A package carries every depot the app has — the Windows, macOS and Linux builds of the same
     // game, each its full size. Only what Windows installs is downloaded (and verified): the rest
     // would take several times the disk space and make a verify report every file of it as missing.
-    step("Checking which depots Windows installs…");
-    if let Ok(foreign) = drydock_core::fetch_non_windows_depots(app_id) {
+    let foreign = if cracked {
+        step("Checking which depots Windows installs…");
+        drydock_core::fetch_non_windows_depots(app_id).ok()
+    } else {
+        None
+    };
+    let mut data = if cracked {
+        // The build the fix is made for: pinned by its Lua, the manifests from the fix folder or —
+        // while the game is still on that build — today's package.
+        step("Fetching the fix and the cracked version's manifests…");
+        let list = proxy.denuvo_fixes().map_err(|error| error.to_string())?;
+        let fix = list
+            .fixes
+            .into_iter()
+            .find_map(|(id, fix)| (id == app_id).then_some(fix))
+            .ok_or_else(|| {
+                "No fix is offered for this game any more, so its cracked version can't be downloaded."
+                    .to_owned()
+            })?;
+        drydock_core::cracked_depot_data(
+            &proxy,
+            app_id,
+            &fix,
+            &list.manifests,
+            &foreign.clone().unwrap_or_default(),
+            cancel,
+        )
+        .map_err(|error| match error {
+            drydock_core::CrackedBuildError::Cancelled => STOPPED_WHILE_PREPARING.to_owned(),
+            other => other.to_string(),
+        })?
+    } else {
+        step("Fetching the depot package…");
+        DepotData::fetch_cancellable(&proxy, app_id, cancel).map_err(|error| error.to_string())?
+    };
+    stopped()?;
+
+    let foreign = match foreign {
+        Some(foreign) => Some(foreign),
+        None => {
+            step("Checking which depots Windows installs…");
+            drydock_core::fetch_non_windows_depots(app_id).ok()
+        }
+    };
+    if let Some(foreign) = foreign {
         data.drop_depots(&foreign);
     }
     stopped()?;
@@ -227,8 +269,13 @@ pub(crate) fn run_depot_job(
             )
             .map_err(|error| error.to_string())?;
             let _ = sender.send(DownloadUpdate::Installed(outcome.install_root));
+            let what = if cracked {
+                format!("the cracked version of {name}")
+            } else {
+                name.to_owned()
+            };
             Ok(format!(
-                "Downloaded {name} — {} files, {}",
+                "Downloaded {what} — {} files, {}",
                 outcome.files_written,
                 human_bytes(outcome.bytes_written)
             ))
@@ -244,8 +291,14 @@ pub(crate) fn run_depot_job(
                     outcome.total_chunks
                 ))
             } else {
+                // A fix replaces some of the cracked build's files, so those always show up here.
+                let repair = if cracked {
+                    "files the fix replaced count too; Repair cracked version restores the rest and re-applies the fix"
+                } else {
+                    "press Download to fix"
+                };
                 Ok(format!(
-                    "{name}: {} of {} chunks and {} files need repair — press Download to fix",
+                    "{name}: {} of {} chunks and {} files need repair — {repair}",
                     outcome.bad_chunks, outcome.total_chunks, outcome.bad_files
                 ))
             }
@@ -279,6 +332,7 @@ mod tests {
             drydock_core::InstalledGame {
                 name: "Game".into(),
                 install_dir: "custom/game".into(),
+                cracked: false,
             },
         );
         settings.games_directory = "new/default".into();

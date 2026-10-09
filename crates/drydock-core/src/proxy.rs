@@ -30,7 +30,7 @@ use thiserror::Error;
 use crate::catalog::CatalogApp;
 use crate::login::{Session, current_token, note_login_required};
 use crate::mfb::{
-    DenuvoFix, RepositoryFile, SteamServiceManifest, SteamServicePackage, matches_git_blob_sha,
+    DenuvoFix, FixList, RepositoryFile, SteamServiceManifest, SteamServicePackage, matches_git_blob_sha,
 };
 use crate::repacks::{RepackApp, RepackSource, is_http_url};
 use crate::version::user_agent;
@@ -193,12 +193,19 @@ impl ProxyClient {
     }
 
     /// Resolves every app with a complete GitHub "Denuvo fix" (build-locked Lua + zip parts), as
-    /// assembled by the proxy from the GitHub `Files/fix` directory. Keyed by App ID for merging.
-    pub fn denuvo_fixes(&self) -> Result<Vec<(u32, DenuvoFix)>, ProxyError> {
+    /// assembled by the proxy from the GitHub `Files/fix` directory, keyed by App ID for merging — and
+    /// the manifests of the builds those fixes are locked to. The proxy only lists fixes for games
+    /// that run from Steam alone.
+    pub fn denuvo_fixes(&self) -> Result<FixList, ProxyError> {
         let response = self.send(self.signed_get("/v1/denuvo-fixes")?)?;
         let bytes = read_capped(response, MAXIMUM_MANIFEST_BYTES)?;
         let list: DenuvoFixesDto = serde_json::from_slice(&bytes)?;
-        Ok(list
+        let manifests = list
+            .manifests
+            .into_iter()
+            .map(|file| repository_file(file, "/v1/denuvo-fixes/file/"))
+            .collect();
+        let fixes = list
             .fixes
             .into_iter()
             .filter_map(|fix| {
@@ -214,7 +221,8 @@ impl ProxyClient {
                     },
                 ))
             })
-            .collect())
+            .collect();
+        Ok(FixList { fixes, manifests })
     }
 
     /// Resolves every app that has one or more external repack download sources, as assembled by
@@ -542,6 +550,8 @@ struct ServiceManifestDto {
 struct DenuvoFixesDto {
     #[serde(default)]
     fixes: Vec<DenuvoFixDto>,
+    #[serde(default)]
+    manifests: Vec<FileDto>,
 }
 
 #[derive(Debug, Deserialize)]

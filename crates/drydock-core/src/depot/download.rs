@@ -1143,7 +1143,7 @@ fn open_sized(
 /// Whether a depot is one of Steam's shared "Common Redistributables" (app 228980: Visual C++,
 /// DirectX, .NET, PhysX, …). These are bundled with many games but carry no actual game content, so
 /// a package made up solely of them is not a usable download.
-fn is_shared_redistributable_depot(depot_id: u32) -> bool {
+pub(crate) fn is_shared_redistributable_depot(depot_id: u32) -> bool {
     (228_980..=229_100).contains(&depot_id)
 }
 

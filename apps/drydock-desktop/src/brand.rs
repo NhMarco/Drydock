@@ -81,9 +81,10 @@ pub struct Features {
     pub denuvo_tab: bool,
     /// The Repacks tab, repack filters, and "Download repack" on game pages.
     pub repacks: bool,
-    /// "Apply Denuvo fix" on game pages, the Denuvo-fix filter and its walkthrough.
+    /// "Apply Fix" on game pages and in the Library, the Fixes filter and its walkthrough.
     pub denuvo_fix: bool,
-    /// "Add cracked version to Steam" (the build-locked unlock that goes with a Denuvo fix).
+    /// The build a fix is made for: "Add cracked version to Steam" (its build-locked unlock) and
+    /// "Download cracked version" (the app's own downloader, the fix applied after).
     pub cracked_version: bool,
 }
 
@@ -164,8 +165,8 @@ pub const DRYDOCK: Brand = Brand {
         cloud: false,
         denuvo_tab: true,
         repacks: false,
-        denuvo_fix: false,
-        cracked_version: false,
+        denuvo_fix: true,
+        cracked_version: true,
     },
 };
 

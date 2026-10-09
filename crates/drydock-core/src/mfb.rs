@@ -46,6 +46,16 @@ pub struct DenuvoFix {
     pub zip_parts: Vec<RepositoryFile>,
 }
 
+/// What the fix folder offers: the fixes, and the manifests of the builds they are locked to.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FixList {
+    /// Each fix, by App ID.
+    pub fixes: Vec<(u32, DenuvoFix)>,
+    /// `{depot}_{gid}.manifest` files: depot manifests of the builds the fix Luas pin, so Drydock can
+    /// download such a build itself (`crate::cracked`). Which fix one belongs to is in that fix's Lua.
+    pub manifests: Vec<RepositoryFile>,
+}
+
 /// A game with a GitHub-sourced build-locked "Denuvo" fix available.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FixEntry {

@@ -18,7 +18,7 @@ conflict-free pull (see [Keeping it current](#keeping-it-current)).
 | Logo, window icon, Windows file icon (`brand/*.png`, `brand/app-icon.ico`) | The activation protocol: request and token format, the `.Drydock` marker |
 | The activation bot's public key, for a product with a bot of its own (`brand/activation-key.pem`) | The depot engine, downloads, verify, Steam integration |
 | Navigation: top bar or left column | `DRYDOCK_*` environment variables, the user agent |
-| Optional features: Tools, Cloud, the Denuvo tab, Repacks, Denuvo fix, cracked version | |
+| Optional features: Tools, Cloud, the Denuvo tab, Repacks, Apply Fix, cracked version | |
 | Release assets (`<name>-windows-x64.exe`, …) and the Windows file details | The crate and binary names inside the build (`target/release/Drydock.exe`) |
 | Update channel: the product repository's own releases | |
 | Data directory: `%LOCALAPPDATA%\<name>` (settings, library, cache) | |
@@ -61,7 +61,7 @@ is a complete, commented example: copy the folder to `brand/` and edit it.
 | `developer` | Who made the product: "Developed by …" in the About dialog, and the Windows file's company. | `Drydock contributors` |
 | `discord` | The product's Discord invite, `https://discord.gg/…` (or a `discord.com` link). Shown as a button in the navigation and after an activation. | none — **not** Drydock's: no server of its own, no button |
 | `navigation` | `"top"` or `"side"`. | `"top"` |
-| `[features]` | `tools`, `cloud`, `denuvo_tab`, `repacks`, `denuvo_fix`, `cracked_version` — each `true` or `false`. | Drydock's: Tools and the Denuvo tab on, the others off |
+| `[features]` | `tools`, `cloud`, `denuvo_tab`, `repacks`, `denuvo_fix` (Apply Fix), `cracked_version` (add the cracked version to Steam, or download it) — each `true` or `false`. | Drydock's: Tools, the Denuvo tab, Apply Fix and the cracked version on; Cloud and Repacks off |
 | `[palette]` | `background`, `surface`, `surface_raised`, `surface_sunken`, `border`, `edge`, `text`, `muted`, `accent`, `accent_soft`, `accent_deep`, `success`, `success_hover`, `on_success`, `warning`, `danger`, `chrome`, `scrim`, `overlay`, `input`, `ambient` — each `"#RRGGBB"` or `"#RRGGBBAA"`. `apps/drydock-desktop/src/brand.rs` documents where each one is used. | Drydock's |
 
 Anything left out is Drydock's. An unknown key, a malformed colour or an invalid name fails the

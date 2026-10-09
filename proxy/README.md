@@ -48,6 +48,19 @@ the Ubisoft magicfiles — is served from a GitHub repository (`GITHUB_OWNER`/`G
 than from a provider. Those endpoints need `GITHUB_TOKEN` when that repository is private; without
 it the proxy still starts and everything else keeps working, with a warning at boot.
 
+**Fixes only for games that run from Steam alone.** A game that starts through a third-party launcher
+needs more than a fix carries, so `FIX_BLOCKED_LAUNCHERS` (default `ea,ubisoft,rockstar`; `none`
+turns it off) holds those fixes back. What a game needs is read from its Steam store page — the
+publisher and the third-party account notice — once a week per game and kept in
+`DATA_DIR/fix-launchers.json`. A game is held back until its page has been read, so a launcher game
+never slips through while Steam is slow.
+
+**Downloading a cracked build.** A fix Lua pins the build it is made for (`setManifestid`). Steam
+fetches those manifests itself; the app's own downloader needs them in hand. Put the build's
+`{depot}_{gid}.manifest` files into the fix folder beside the Lua, and the app downloads exactly that
+build. Without them it can only do so while the game is still on that build (today's depot package
+then carries the same manifests).
+
 Why the proxy exists:
 
 - **No upstream API key ever ships in the app.** They live only in the proxy's environment.
@@ -81,8 +94,8 @@ All responses are JSON unless noted. Protected endpoints require the HMAC header
 | GET    | `/v1/gamelist`          | yes  | gzip body of `{ "games": [{ "appid", "name", "tags" }] }`. Send `If-None-Match` with the last `ETag` to get `304`. |
 | GET    | `/v1/app-info/:appid`   | yes  | steamtools per-app metadata (type, technologies incl. Denuvo, tags, reviews). Cached. Only registered while `steamtools` is enabled; limited like `/v1/lua`. |
 | GET    | `/v1/app-schema/:appid` | yes  | The app's achievement schema as a gbe_fork `achievements.json` array (icons as full CDN URLs), for the emulator-template generator. Needs `STEAM_WEB_API_KEY`; returns `[]` when unset or the app has none. |
-| GET    | `/v1/denuvo-fixes`      | yes  | `{ "fixes": [{ "appid", "lua": {name,sha,size}, "zip_parts": [{name,sha,size}] }] }` — GitHub build-locked "Denuvo" fixes. |
-| GET    | `/v1/denuvo-fixes/file/:name` | yes | Raw bytes of one Denuvo fix file (`{appid}.lua`, `{appid}.zip`, `{appid}.zip.NNN`), streamed from GitHub. |
+| GET    | `/v1/denuvo-fixes`      | yes  | `{ "fixes": [{ "appid", "lua": {name,sha,size}, "zip_parts": [{name,sha,size}] }], "manifests": [{name,sha,size}] }` — GitHub build-locked fixes, only for games that run from Steam alone (see below), and the `{depot}_{gid}.manifest` files of the builds they pin. |
+| GET    | `/v1/denuvo-fixes/file/:name` | yes | Raw bytes of one fix file (`{appid}.lua`, `{appid}.zip`, `{appid}.zip.NNN`, `{depot}_{gid}.manifest`), streamed from GitHub. |
 | GET    | `/v1/lua/:appid`        | yes  | The app's unlock Lua from the first provider that has one. 30 requests/min per client (`LUA_RATE_MAX`). |
 | GET    | `/v1/service/manifest`, `/v1/service/file/:name` | yes | Steam Service (OST) payload from GitHub. |
 | GET    | `/v1/emu/manifest`, `/v1/emu/file/:name` | yes | Emulator DLLs from GitHub (`EMU_DIRECTORY`, default `Files/dlls`). |

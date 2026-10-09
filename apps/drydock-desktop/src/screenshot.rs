@@ -19,7 +19,11 @@ const WARMUP_FRAMES: u32 = 220;
 
 /// The details page also waits on the Steam Store fetch, so it needs longer.
 fn warmup_for(key: &str) -> u32 {
-    if key == "details" { 720 } else { WARMUP_FRAMES }
+    if key == "details" || key == "details-fix" {
+        720
+    } else {
+        WARMUP_FRAMES
+    }
 }
 
 pub fn run(dir: PathBuf) -> eframe::Result {

@@ -16,16 +16,21 @@ pub struct InstalledGame {
     pub name: String,
     /// Absolute path to the game's install folder (`<games_directory>/<installdir>`).
     pub install_dir: String,
+    /// Whether this is the cracked build a fix is made for (`crate::cracked`), not the latest one:
+    /// a verify or repair has to keep to that build, and an update leaves it.
+    pub cracked: bool,
 }
 
 /// One depot download waiting in (or currently at the front of) the download queue. Persisted so an
 /// unfinished download resumes automatically after Drydock is closed and reopened; the depot engine
-/// resumes from the on-disk chunks, so only the App ID and name need saving.
+/// resumes from the on-disk chunks, so only the App ID, the name and which build need saving.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct QueuedDownload {
     pub app_id: u32,
     pub name: String,
+    /// The cracked build a fix is made for, instead of the latest one.
+    pub cracked: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -492,6 +497,7 @@ mod tests {
             InstalledGame {
                 name: "CS".into(),
                 install_dir: "D:/Games/CS".into(),
+                cracked: false,
             },
         );
         good.save(&path).expect("save good");
