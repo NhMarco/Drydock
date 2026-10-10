@@ -4065,7 +4065,7 @@ impl DrydockApp {
 
     /// New Releases uses the same price-free grid or list as Featured, retaining the feed's order.
     fn store_shelf(&mut self, ui: &mut egui::Ui, capsules: Option<&[StoreCapsule]>) -> Option<StoreAction> {
-        store_section_heading(ui, "NEW RELEASES", &mut self.store_view);
+        store_section_heading(ui, "Recently Released Games", &mut self.store_view);
         if !self.store_feed_status(ui) {
             return None;
         }
@@ -4100,7 +4100,7 @@ impl DrydockApp {
     /// The Drydock-only Denuvo Watch tab: the live set of games that actually use Denuvo — i.e. the
     /// ones that need Drydock to activate them — in the shared view. Independent of the Steam feed.
     fn store_denuvo_watch(&mut self, ui: &mut egui::Ui) -> Option<StoreAction> {
-        store_section_heading(ui, "DENUVO", &mut self.store_view);
+        store_section_heading(ui, "Games with Denuvo", &mut self.store_view);
         if !self.denuvo_loaded {
             ui.horizontal(|ui| {
                 ui.add(egui::Spinner::new().size(16.0).color(ACCENT));
