@@ -292,12 +292,23 @@ impl StoreTab {
     ];
 }
 
-/// A session-only presentation choice shared by the Store's game catalogues.
+/// The layout shared by the Store's game catalogues, remembered in the settings
+/// (`Settings::store_list_view`).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum StoreView {
     #[default]
     Grid,
     List,
+}
+
+impl StoreView {
+    fn from_settings(list: bool) -> Self {
+        if list { Self::List } else { Self::Grid }
+    }
+
+    fn is_list(self) -> bool {
+        self == Self::List
+    }
 }
 
 /// Which walkthrough the How It Works page is showing.
@@ -960,6 +971,7 @@ impl DrydockApp {
         app.discord_session =
             drydock_core::login::load_session(&drydock_core::login::session_path(&app.paths.settings_dir()));
         app.start_login_status_check();
+        app.store_view = StoreView::from_settings(app.settings.store_list_view);
         app
     }
 
@@ -3982,6 +3994,14 @@ impl DrydockApp {
             StoreTab::Repacks => self.store_repacks(ui),
             StoreTab::DenuvoWatch => self.store_denuvo_watch(ui),
         };
+        // A layout picked beside a catalogue heading is kept for the next start.
+        if self.store_view.is_list() != self.settings.store_list_view {
+            self.settings.store_list_view = self.store_view.is_list();
+            if let Err(error) = self.persist_settings() {
+                self.status = format!("The Store layout could not be saved: {error}");
+                self.status_error = true;
+            }
+        }
         match action {
             Some(StoreAction::Details(app_id)) => self.open_details(app_id),
             Some(StoreAction::Activate(app_id)) => self.go_to_activation(app_id),
@@ -4065,7 +4085,7 @@ impl DrydockApp {
 
     /// New Releases uses the same price-free grid or list as Featured, retaining the feed's order.
     fn store_shelf(&mut self, ui: &mut egui::Ui, capsules: Option<&[StoreCapsule]>) -> Option<StoreAction> {
-        store_section_heading(ui, "Recently Released Games", &mut self.store_view);
+        store_section_heading(ui, "RECENTLY RELEASED GAMES", &mut self.store_view);
         if !self.store_feed_status(ui) {
             return None;
         }
@@ -4100,7 +4120,7 @@ impl DrydockApp {
     /// The Drydock-only Denuvo Watch tab: the live set of games that actually use Denuvo — i.e. the
     /// ones that need Drydock to activate them — in the shared view. Independent of the Steam feed.
     fn store_denuvo_watch(&mut self, ui: &mut egui::Ui) -> Option<StoreAction> {
-        store_section_heading(ui, "Games with Denuvo", &mut self.store_view);
+        store_section_heading(ui, "GAMES WITH DENUVO", &mut self.store_view);
         if !self.denuvo_loaded {
             ui.horizontal(|ui| {
                 ui.add(egui::Spinner::new().size(16.0).color(ACCENT));
@@ -7788,11 +7808,9 @@ impl DrydockApp {
     pub fn screenshot_goto(&mut self, key: &str) {
         // Only the search page searches; everywhere else the query would cover the page.
         self.search.clear();
-        self.store_view = if key.ends_with("-list") {
-            StoreView::List
-        } else {
-            StoreView::Grid
-        };
+        self.store_view = StoreView::from_settings(key.ends_with("-list"));
+        // Matched in memory, so a screenshot run never saves its layout over the user's choice.
+        self.settings.store_list_view = self.store_view.is_list();
         if let Ok(mut open) = SCREENSHOT_OPEN_MENU.lock() {
             *open = (key == "details-fix-menu").then_some("depot_download");
         }

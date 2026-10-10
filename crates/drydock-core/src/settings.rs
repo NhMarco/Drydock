@@ -71,6 +71,8 @@ pub struct Settings {
     /// Threads that read a game back when it is verified (`0` = automatic: one on a hard disk,
     /// several on an SSD).
     pub verify_threads: u32,
+    /// Whether the Store's game catalogues show a compact list instead of the artwork grid.
+    pub store_list_view: bool,
 
     // --- Self-hosting overrides -------------------------------------------------------------
     // Empty means "use the value this build was compiled with". See `crate::config` for the full
@@ -132,6 +134,7 @@ impl Default for Settings {
             max_download_connections: Self::DEFAULT_DOWNLOAD_CONNECTIONS,
             max_download_mbps: 0,
             verify_threads: 0,
+            store_list_view: false,
             proxy_base_url: String::new(),
             proxy_hmac_secret: String::new(),
             update_repository: String::new(),
@@ -428,6 +431,24 @@ mod tests {
         let (settings, outcome) = Settings::load_recovering(&path);
         assert_eq!(outcome, LoadOutcome::Loaded);
         assert_eq!(settings.games_directory, "D:/Games");
+    }
+
+    #[test]
+    fn the_store_layout_is_remembered_and_defaults_to_the_grid() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("settings.json");
+        fs::write(&path, r#"{ "GamesDirectory": "D:/Games" }"#).expect("write settings");
+        let (mut settings, _) = Settings::load_recovering(&path);
+        assert!(
+            !settings.store_list_view,
+            "a file from before the switch shows the grid"
+        );
+
+        settings.store_list_view = true;
+        settings.save(&path).expect("save");
+        let (settings, outcome) = Settings::load_recovering(&path);
+        assert_eq!(outcome, LoadOutcome::Loaded);
+        assert!(settings.store_list_view);
     }
 
     #[test]
