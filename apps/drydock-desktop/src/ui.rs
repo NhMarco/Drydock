@@ -3962,10 +3962,6 @@ impl DrydockApp {
                     selected = tab;
                 }
             }
-            if selected != StoreTab::Repacks {
-                ui.add_space(8.0);
-                store_view_toggle(ui, &mut self.store_view);
-            }
         });
         if selected != self.store_tab {
             self.store_tab = selected;
@@ -4020,7 +4016,7 @@ impl DrydockApp {
 
     /// The Featured tab: a banner for the first available top seller, followed by a responsive
     /// grid or list, keeping the feed's ordering and twenty recommendations.
-    fn store_featured(&self, ui: &mut egui::Ui, featured: Option<&StoreFeatured>) -> Option<StoreAction> {
+    fn store_featured(&mut self, ui: &mut egui::Ui, featured: Option<&StoreFeatured>) -> Option<StoreAction> {
         if !self.store_feed_status(ui) {
             return None;
         }
@@ -4054,12 +4050,7 @@ impl DrydockApp {
         }
 
         ui.add_space(26.0);
-        ui.label(
-            RichText::new("FEATURED & RECOMMENDED")
-                .font(strong_font(26.0))
-                .color(TEXT),
-        );
-        ui.add_space(12.0);
+        store_section_heading(ui, "FEATURED & RECOMMENDED", &mut self.store_view);
         // Only presentation changes: keep the same next twenty games and details action.
         if let Some(hit) = store_games(
             ui,
@@ -4073,7 +4064,8 @@ impl DrydockApp {
     }
 
     /// New Releases uses the same price-free grid or list as Featured, retaining the feed's order.
-    fn store_shelf(&self, ui: &mut egui::Ui, capsules: Option<&[StoreCapsule]>) -> Option<StoreAction> {
+    fn store_shelf(&mut self, ui: &mut egui::Ui, capsules: Option<&[StoreCapsule]>) -> Option<StoreAction> {
+        store_section_heading(ui, "NEW RELEASES", &mut self.store_view);
         if !self.store_feed_status(ui) {
             return None;
         }
@@ -4107,7 +4099,8 @@ impl DrydockApp {
 
     /// The Drydock-only Denuvo Watch tab: the live set of games that actually use Denuvo — i.e. the
     /// ones that need Drydock to activate them — in the shared view. Independent of the Steam feed.
-    fn store_denuvo_watch(&self, ui: &mut egui::Ui) -> Option<StoreAction> {
+    fn store_denuvo_watch(&mut self, ui: &mut egui::Ui) -> Option<StoreAction> {
+        store_section_heading(ui, "DENUVO", &mut self.store_view);
         if !self.denuvo_loaded {
             ui.horizontal(|ui| {
                 ui.add(egui::Spinner::new().size(16.0).color(ACCENT));
@@ -9455,17 +9448,56 @@ fn store_subtab(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response 
     store_selector(ui, label, active, 116.0)
 }
 
-/// Compact, keyboard-accessible choices beside the category tabs. Repacks remains its own list.
+/// The view controls belong to the catalogue section, below the category tabs and Featured hero.
+fn store_section_heading(ui: &mut egui::Ui, title: &str, view: &mut StoreView) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).font(strong_font(26.0)).color(TEXT));
+        ui.add_space(16.0);
+        store_view_toggle(ui, view);
+    });
+    ui.add_space(12.0);
+}
+
+/// Draw the view icons directly so they do not depend on the product's font glyph coverage.
 fn store_view_toggle(ui: &mut egui::Ui, view: &mut StoreView) -> egui::Response {
     ui.horizontal_top(|ui| {
         for (choice, label, tooltip) in [
-            (StoreView::Grid, "GRID", "Show game artwork in a grid"),
-            (StoreView::List, "LIST", "Show games in a compact list"),
+            (StoreView::Grid, "Grid view", "Show game artwork in a grid"),
+            (StoreView::List, "List view", "Show games in a compact list"),
         ] {
-            if store_selector(ui, label, *view == choice, 64.0)
-                .on_hover_text(tooltip)
-                .clicked()
-            {
+            let (response, color) = store_selection_frame(ui, label, *view == choice, Vec2::splat(40.0));
+            let origin = response.rect.center() - Vec2::splat(8.0);
+            match choice {
+                StoreView::Grid => {
+                    for row in 0..2 {
+                        for column in 0..2 {
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_size(
+                                    origin + Vec2::new(column as f32 * 10.0, row as f32 * 10.0),
+                                    Vec2::splat(6.0),
+                                ),
+                                1,
+                                color,
+                            );
+                        }
+                    }
+                }
+                StoreView::List => {
+                    for row in 0..3 {
+                        let left = origin + Vec2::new(0.0, row as f32 * 6.0 + 2.0);
+                        ui.painter().rect_filled(
+                            egui::Rect::from_center_size(left + Vec2::splat(1.0), Vec2::splat(3.0)),
+                            1,
+                            color,
+                        );
+                        ui.painter().line_segment(
+                            [left + Vec2::new(6.0, 1.0), left + Vec2::new(16.0, 1.0)],
+                            Stroke::new(1.5, color),
+                        );
+                    }
+                }
+            }
+            if response.on_hover_text(tooltip).clicked() {
                 *view = choice;
             }
         }
@@ -9481,6 +9513,24 @@ fn store_selector(ui: &mut egui::Ui, label: &str, active: bool, min_width: f32) 
     };
     let galley = ui.painter().layout_no_wrap(label.to_owned(), font.clone(), TEXT);
     let size = Vec2::new((galley.size().x + 32.0).max(min_width), 40.0);
+    let (response, color) = store_selection_frame(ui, label, active, size);
+    ui.painter().text(
+        response.rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        font,
+        color,
+    );
+    response
+}
+
+/// Shared tab/icon selection styling, including focus feedback and accessible selected state.
+fn store_selection_frame(
+    ui: &mut egui::Ui,
+    label: &str,
+    active: bool,
+    size: Vec2,
+) -> (egui::Response, Color32) {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, ui.is_enabled(), active, label)
@@ -9510,12 +9560,10 @@ fn store_selector(ui: &mut egui::Ui, label: &str, active: bool, min_width: f32) 
     } else {
         lerp_color(MUTED, TEXT, hover)
     };
-    ui.painter()
-        .text(rect.center(), egui::Align2::CENTER_CENTER, label, font, color);
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    response
+    (response, color)
 }
 
 /// Featured artwork with a smooth scrim and bounded text, so bright art and long game names remain
@@ -12585,8 +12633,8 @@ mod ui_tests {
         });
         output.drop_without_applying_deltas();
         for (target, position) in [
-            (StoreView::List, rect.right_center() - Vec2::new(32.0, 0.0)),
-            (StoreView::Grid, rect.left_center() + Vec2::new(32.0, 0.0)),
+            (StoreView::List, rect.right_center() - Vec2::new(20.0, 0.0)),
+            (StoreView::Grid, rect.left_center() + Vec2::new(20.0, 0.0)),
         ] {
             for pressed in [true, false] {
                 let input = egui::RawInput {
