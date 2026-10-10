@@ -49,5 +49,6 @@ Thumbs.db
 desktop.ini
 
 # --- Logs and scratch -----------------------------------------------------
+/output/
 *.log
 *.tmp
