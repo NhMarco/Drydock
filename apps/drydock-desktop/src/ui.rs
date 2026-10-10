@@ -1,3 +1,4 @@
+use crate::artwork;
 use crate::brand::{self, BRAND, Navigation};
 use crate::downloads::{
     DownloadJob, DownloadKind, DownloadUpdate, JOB_PREPARING, JobLimits, claim_abandoned, human_bytes,
@@ -116,7 +117,7 @@ const CATALOG_REFRESH_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 /// Steam header art is 460×215 — this ratio is used for card cover heights and detail artwork.
 const STEAM_HEADER_ASPECT: f32 = 0.467;
 /// Height of the top navigation bar and the bottom status strip that frame the storefront.
-const TOP_NAV_HEIGHT: f32 = 52.0;
+const TOP_NAV_HEIGHT: f32 = 64.0;
 /// Width of the side navigation column (products with `Navigation::Side`).
 const SIDE_NAV_WIDTH: f32 = 228.0;
 /// The logo's diameter at the head of the side navigation.
@@ -134,14 +135,13 @@ const PRIMARY_DESTINATIONS: [(Page, &str); 5] = [
 /// The secondary pages, kept apart from the main ones (right of the search in the top bar, at the
 /// foot of the side column), in reading order.
 const SECONDARY_DESTINATIONS: [(Page, &str); 2] = [(Page::Guide, "HELP"), (Page::Settings, "SETTINGS")];
-const STATUS_BAR_HEIGHT: f32 = 30.0;
+const STATUS_BAR_HEIGHT: f32 = 36.0;
 const MIN_CONTENT_GUTTER: f32 = 24.0;
-/// Every tab's content is capped to this single width and centred, so all pages share one aligned
-/// column and none stretches edge-to-edge on wide monitors; on narrower windows it fills to within
-/// `MIN_CONTENT_GUTTER` of each side. It equals the storefront hero image's width, so the Store
-/// banner fills edge to edge with no letterbox bars. `STORE_HERO_ASPECT` is Steam's `library_hero.jpg`
-/// ratio (1920×620), used to size that banner.
-const CONTENT_WIDTH: f32 = 1040.0;
+/// Wide Store, Library and Details content, retaining side gutters on narrower windows.
+const CONTENT_WIDTH: f32 = 1600.0;
+/// Form pages keep inputs and instructions within a comfortable reading width.
+const FORM_CONTENT_WIDTH: f32 = 1040.0;
+/// Steam's `library_hero.jpg` ratio (1920×620).
 const STORE_HERO_ASPECT: f32 = 3.1;
 
 /// Cached result of validating the Steam directory draft text field.
@@ -222,6 +222,13 @@ enum Page {
 }
 
 impl Page {
+    fn content_width(self) -> f32 {
+        match self {
+            Self::Activation | Self::Tools | Self::Cloud | Self::Settings => FORM_CONTENT_WIDTH,
+            _ => CONTENT_WIDTH,
+        }
+    }
+
     /// Whether this product has the page at all (see `brand.rs`). The navigation leaves out what it
     /// does not offer, and the page switch falls back to the Store should one be reached anyway.
     fn offered(self) -> bool {
@@ -278,11 +285,19 @@ impl StoreTab {
     }
 
     const ALL: [(Self, &'static str); 4] = [
-        (Self::Featured, "Featured"),
-        (Self::NewReleases, "New Releases"),
-        (Self::Repacks, "Repacks"),
-        (Self::DenuvoWatch, "Denuvo"),
+        (Self::Featured, "FEATURED"),
+        (Self::NewReleases, "NEW RELEASES"),
+        (Self::Repacks, "REPACKS"),
+        (Self::DenuvoWatch, "DENUVO"),
     ];
+}
+
+/// A session-only presentation choice shared by the Store's game catalogues.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum StoreView {
+    #[default]
+    Grid,
+    List,
 }
 
 /// Which walkthrough the How It Works page is showing.
@@ -466,6 +481,7 @@ pub struct DrydockApp {
     store_loading: bool,
     // Store tab (Steam-style storefront): the selected sub-tab and the live featured feed.
     store_tab: StoreTab,
+    store_view: StoreView,
     featured: Option<StoreFeatured>,
     featured_loading: bool,
     featured_error: Option<String>,
@@ -879,6 +895,7 @@ impl DrydockApp {
             store_receiver: None,
             store_loading: false,
             store_tab: StoreTab::default(),
+            store_view: StoreView::default(),
             featured: None,
             featured_loading: false,
             featured_error: None,
@@ -3157,13 +3174,13 @@ impl DrydockApp {
         let before = self.search.clone();
         let response = ui.add(
             egui::TextEdit::singleline(&mut self.search)
-                .hint_text("Search…")
+                .hint_text("Search games…")
                 .desired_width(width)
                 .margin(egui::Margin {
                     left: 32,
                     right: 12,
-                    top: 7,
-                    bottom: 7,
+                    top: 9,
+                    bottom: 9,
                 }),
         );
         // A magnifying-glass icon painted at the pill's left (a font glyph rendered as tofu on the
@@ -3222,7 +3239,7 @@ impl DrydockApp {
                     }
                     if !BRAND.logo_is_wordmark {
                         ui.add_space(8.0);
-                        ui.label(RichText::new(BRAND.name).size(18.0).strong().color(TEXT));
+                        ui.label(RichText::new(BRAND.name).font(strong_font(18.0)).color(TEXT));
                         ui.label(RichText::new(BRAND.tagline).size(10.5).color(MUTED));
                     }
                 });
@@ -3293,21 +3310,22 @@ impl DrydockApp {
             .show(root, |ui| {
                 ui.horizontal_centered(|ui| {
                     // The product's mark on its disc, then its name.
-                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
-                    ui.painter().circle_filled(rect.center(), 13.0, ACCENT_DEEP);
+                    let compact = ui.ctx().content_rect().width() < 1100.0;
+                    let logo_size = if compact { 26.0 } else { 32.0 };
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(logo_size), Sense::hover());
+                    ui.painter()
+                        .circle_filled(rect.center(), logo_size * 0.5, ACCENT_DEEP);
                     egui::Image::new(brand::logo())
-                        .corner_radius(13)
+                        .corner_radius((logo_size * 0.5) as u8)
                         .paint_at(ui, rect);
                     ui.add_space(9.0);
                     ui.label(
                         RichText::new(BRAND.name)
-                            .size(16.0)
-                            .strong()
-                            .color(TEXT)
-                            .family(egui::FontFamily::Proportional),
+                            .font(strong_font(if compact { 17.0 } else { 22.0 }))
+                            .color(TEXT),
                     );
 
-                    ui.add_space(22.0);
+                    ui.add_space(if compact { 12.0 } else { 24.0 });
                     // Primary destinations as underlined link tabs.
                     for (page, label) in PRIMARY_DESTINATIONS
                         .into_iter()
@@ -3346,7 +3364,8 @@ impl DrydockApp {
                             ui.add_space(2.0);
                         }
                         ui.add_space(8.0);
-                        self.nav_search(ui, 190.0);
+                        let search_width = ui.available_width().clamp(88.0, 300.0);
+                        self.nav_search(ui, search_width);
                     });
                 });
             });
@@ -3791,38 +3810,53 @@ impl DrydockApp {
                 }
                 ui.horizontal_centered(|ui| {
                     let notes = self.collect_notifications();
-                    if let Some(note) = notes.first() {
-                        // Keep the left status clear of the centred download label: cap the title so a
-                        // long message (e.g. a crack summary) ellipsises instead of running into it.
-                        let (dot, _) = ui.allocate_exact_size(Vec2::new(9.0, 9.0), Sense::hover());
-                        ui.painter().circle_filled(dot.center(), 4.0, note.accent);
-                        ui.add_space(4.0);
-                        let title = ellipsize(&note.title, 82);
-                        let title_label = ui.label(RichText::new(&title).size(11.0).color(TEXT));
-                        if title != note.title {
-                            title_label.on_hover_text(&note.title);
-                        }
-                        if !note.detail.is_empty() {
-                            ui.add_space(6.0);
-                            ui.label(RichText::new(ellipsize(&note.detail, 60)).size(10.5).color(MUTED));
-                        }
-                        if notes.len() > 1 {
-                            ui.add_space(8.0);
-                            ui.label(
-                                RichText::new(format!("+{} more", notes.len() - 1))
-                                    .size(10.0)
-                                    .color(MUTED),
-                            )
-                            .on_hover_text(
-                                notes
-                                    .iter()
-                                    .skip(1)
-                                    .map(|note| note.title.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join("\n"),
-                            );
-                        }
-                    }
+                    // Bound by pixels rather than character count: a narrow window must keep its
+                    // notifications clear of Downloads. The complete message remains in a tooltip.
+                    let left_width = (bar.width() * 0.5 - 96.0).max(100.0);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(left_width, bar.height()),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            if let Some(note) = notes.first() {
+                                let (dot, _) = ui.allocate_exact_size(Vec2::new(9.0, 9.0), Sense::hover());
+                                ui.painter().circle_filled(dot.center(), 4.0, note.accent);
+                                let title = if bar.width() >= 1200.0 && !note.detail.is_empty() {
+                                    format!("{} · {}", note.title, note.detail)
+                                } else {
+                                    note.title.clone()
+                                };
+                                let more_width = if notes.len() > 1 { 54.0 } else { 0.0 };
+                                let title_width = (ui.available_width() - more_width).max(40.0);
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(title_width, 18.0),
+                                    Layout::left_to_right(Align::Center),
+                                    |ui| {
+                                        ui.set_width(title_width);
+                                        ui.add(
+                                            egui::Label::new(RichText::new(title).size(11.0).color(TEXT))
+                                                .truncate(),
+                                        )
+                                        .on_hover_text(format!("{}\n{}", note.title, note.detail));
+                                    },
+                                );
+                                if notes.len() > 1 {
+                                    ui.label(
+                                        RichText::new(format!("+{} more", notes.len() - 1))
+                                            .size(10.0)
+                                            .color(MUTED),
+                                    )
+                                    .on_hover_text(
+                                        notes
+                                            .iter()
+                                            .skip(1)
+                                            .map(|note| note.title.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join("\n"),
+                                    );
+                                }
+                            }
+                        },
+                    );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(RichText::new(format!("v{APP_VERSION}")).size(10.0).color(MUTED));
                         ui.add_space(10.0);
@@ -3913,19 +3947,16 @@ impl DrydockApp {
             return;
         }
         self.start_featured();
-        // The shell already caps every page to `CONTENT_WIDTH` (the hero image's width) and centres
-        // it, so the banner fills with no side bars and the list lines up under it — no extra column
-        // needed here.
+        // The shell centres every page at `CONTENT_WIDTH`; no nested column is needed.
         self.home_store_column(ui);
     }
 
-    /// The storefront column body: sub-tabs, divider and the selected tab's content.
+    /// The storefront column body: category tabs and the selected tab's content.
     fn home_store_column(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(14.0);
-        // Steam-style store sub-tabs.
+        ui.add_space(8.0);
         let mut selected = self.store_tab;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
             for (tab, label) in StoreTab::ALL.into_iter().filter(|(tab, _)| tab.offered()) {
                 if store_subtab(ui, label, selected == tab).clicked() {
                     selected = tab;
@@ -3938,11 +3969,7 @@ impl DrydockApp {
             // header lookups should not keep consuming the shared Steam request budget.
             self.header_resolver.cancel_pending();
         }
-        ui.add_space(2.0);
-        let line_y = ui.cursor().top();
-        ui.painter()
-            .hline(ui.max_rect().x_range(), line_y, Stroke::new(1.0, BORDER));
-        ui.add_space(18.0);
+        ui.add_space(20.0);
 
         // The whole storefront reads from an owned snapshot so the render helpers can borrow `self`
         // immutably for the Activatable check without fighting the feed borrow.
@@ -3987,9 +4014,9 @@ impl DrydockApp {
         false
     }
 
-    /// The Featured tab, laid out like Steam's store landing: a wide cinematic banner for the #1 top
-    /// seller, then an "Featured & Recommended" grid of the rest, each with its Activatable overlay.
-    fn store_featured(&self, ui: &mut egui::Ui, featured: Option<&StoreFeatured>) -> Option<StoreAction> {
+    /// The Featured tab: a banner for the first available top seller, followed by a responsive
+    /// grid or list, keeping the feed's ordering and twenty recommendations.
+    fn store_featured(&mut self, ui: &mut egui::Ui, featured: Option<&StoreFeatured>) -> Option<StoreAction> {
         if !self.store_feed_status(ui) {
             return None;
         }
@@ -4018,26 +4045,27 @@ impl DrydockApp {
         let mut action = None;
         // Full-width cinematic banner for the headline title. The storefront only ever offers "View"
         // — Activate lives on the details page, driven by the game's real Denuvo status.
-        if let Some(hit) = store_banner(ui, hero, 1, false) {
+        if let Some(hit) = store_banner(ui, hero, 1, false, &self.header_resolver) {
             action = Some(hit);
         }
 
-        ui.add_space(22.0);
-        section_label(ui, "FEATURED & RECOMMENDED");
-        ui.add_space(12.0);
-        // The rest of the available top sellers as a price-free Steam-style list.
-        ui.spacing_mut().item_spacing.y = 0.0;
-        for capsule in items.take(20) {
-            if let Some(hit) = store_list_row(ui, capsule, false) {
-                action = Some(hit);
-            }
+        ui.add_space(26.0);
+        store_section_heading(ui, "FEATURED & RECOMMENDED", &mut self.store_view);
+        // Only presentation changes: keep the same next twenty games and details action.
+        if let Some(hit) = store_games(
+            ui,
+            items.take(20).map(StoreCard::from),
+            self.store_view,
+            &self.header_resolver,
+        ) {
+            action = Some(hit);
         }
         action
     }
 
-    /// A store category tab (New Releases): the live category as a price-free Steam-style list of
-    /// rows.
-    fn store_shelf(&self, ui: &mut egui::Ui, capsules: Option<&[StoreCapsule]>) -> Option<StoreAction> {
+    /// New Releases uses the same price-free grid or list as Featured, retaining the feed's order.
+    fn store_shelf(&mut self, ui: &mut egui::Ui, capsules: Option<&[StoreCapsule]>) -> Option<StoreAction> {
+        store_section_heading(ui, "Recently Released Games", &mut self.store_view);
         if !self.store_feed_status(ui) {
             return None;
         }
@@ -4046,7 +4074,7 @@ impl DrydockApp {
             ui.label(RichText::new("Nothing to show in this category right now.").color(MUTED));
             return None;
         }
-        // Narrow the category to games actually in our catalog (proxy gamelist), so every row is
+        // Narrow the category to games actually in our catalog (proxy gamelist), so every card is
         // one Drydock can get.
         let available: Vec<&StoreCapsule> = capsules
             .iter()
@@ -4061,23 +4089,18 @@ impl DrydockApp {
             );
             return None;
         }
-        let mut action = None;
-        // No nested scroll area — the page's own scroll handles overflow (a scroll area inside the
-        // centred zero-height content column collapses and clips the list).
-        ui.spacing_mut().item_spacing.y = 0.0;
-        for capsule in available {
-            // Storefront rows are always "View"; Activate lives on the details page.
-            if let Some(hit) = store_list_row(ui, capsule, false) {
-                action = Some(hit);
-            }
-        }
-        ui.add_space(24.0);
-        action
+        store_games(
+            ui,
+            available.into_iter().map(StoreCard::from),
+            self.store_view,
+            &self.header_resolver,
+        )
     }
 
     /// The Drydock-only Denuvo Watch tab: the live set of games that actually use Denuvo — i.e. the
-    /// ones that need Drydock to activate them — as a searchable list. Independent of the Steam feed.
-    fn store_denuvo_watch(&self, ui: &mut egui::Ui) -> Option<StoreAction> {
+    /// ones that need Drydock to activate them — in the shared view. Independent of the Steam feed.
+    fn store_denuvo_watch(&mut self, ui: &mut egui::Ui) -> Option<StoreAction> {
+        store_section_heading(ui, "Games with Denuvo", &mut self.store_view);
         if !self.denuvo_loaded {
             ui.horizontal(|ui| {
                 ui.add(egui::Spinner::new().size(16.0).color(ACCENT));
@@ -4108,23 +4131,13 @@ impl DrydockApp {
             .collect();
         games.sort_by_key(|entry| entry.name.to_lowercase());
 
-        let mut action = None;
-        // Same row structure as the Featured list — a fixed-height slot plus an explicit gap below —
-        // so the spacing between cards is identical (a bare `item_spacing` doesn't take here).
-        ui.spacing_mut().item_spacing.y = 0.0;
-        let width = ui.available_width();
-        for entry in games.iter().take(400) {
-            let selected = self.selected_app == Some(entry.app_id);
-            let mut clicked = false;
-            list_row_slot(ui, width, |ui| {
-                clicked = search_result_row(ui, entry, LIST_ROW_HEIGHT, selected, &self.header_resolver);
-            });
-            ui.add_space(LIST_ROW_GAP);
-            if clicked {
-                action = Some(StoreAction::Details(entry.app_id));
-            }
-        }
-        action
+        let cards = games.into_iter().take(400).map(|entry| StoreCard {
+            app_id: entry.app_id,
+            name: &entry.name,
+            header_image_url: None,
+            selected: self.selected_app == Some(entry.app_id),
+        });
+        store_games(ui, cards, self.store_view, &self.header_resolver)
     }
 
     /// The Repacks tab: every catalogue game Drydock has an external repack download for, as a
@@ -5487,7 +5500,7 @@ impl DrydockApp {
     fn activation_page(&mut self, ui: &mut egui::Ui) {
         page_heading(ui, "ACTIVATION");
         ui.add_space(18.0);
-        content_column(ui, CONTENT_WIDTH, |ui| {
+        content_column(ui, FORM_CONTENT_WIDTH, |ui| {
             self.activation_switcher(ui);
             ui.add_space(16.0);
             match self.activation_provider {
@@ -5638,8 +5651,7 @@ impl DrydockApp {
                         if short_request {
                             ui.label(
                                 RichText::new(&self.activation_request_code)
-                                    .size(22.0)
-                                    .strong()
+                                    .font(strong_font(22.0))
                                     .color(TEXT),
                             );
                         } else {
@@ -5786,8 +5798,7 @@ impl DrydockApp {
                         section_label(ui, "ACTIVATION CODE");
                         ui.label(
                             RichText::new(&self.ubisoft_activation_code)
-                                .size(22.0)
-                                .strong()
+                                .font(strong_font(22.0))
                                 .color(TEXT),
                         );
                         if ui
@@ -6026,7 +6037,7 @@ impl DrydockApp {
         // stays occupied forever and blocks every later attempt.
         page_heading(ui, "CLOUD");
         ui.add_space(22.0);
-        content_column(ui, CONTENT_WIDTH, |ui| {
+        content_column(ui, FORM_CONTENT_WIDTH, |ui| {
             // What it is + the loud "back up your saves" warning.
             panel(ui, |ui| {
                 section_label(ui, "STEAM CLOUD FOR LUA GAMES");
@@ -6247,7 +6258,7 @@ impl DrydockApp {
     fn settings_page(&mut self, ui: &mut egui::Ui) {
         page_heading(ui, "SETTINGS");
         ui.add_space(22.0);
-        content_column(ui, CONTENT_WIDTH, |ui| {
+        content_column(ui, FORM_CONTENT_WIDTH, |ui| {
             if self.discord_session.is_some()
                 || self.login_offer.as_ref().is_some_and(|offer| offer.available)
             {
@@ -6760,7 +6771,7 @@ impl DrydockApp {
     fn tools_page(&mut self, ui: &mut egui::Ui) {
         page_heading(ui, "TOOLS");
         ui.add_space(22.0);
-        content_column(ui, CONTENT_WIDTH, |ui| {
+        content_column(ui, FORM_CONTENT_WIDTH, |ui| {
             panel(ui, |ui| {
                 section_label(ui, "CHANGE GAME LANGUAGE");
                 ui.add_space(10.0);
@@ -7445,7 +7456,7 @@ impl DrydockApp {
                     // A logo that already spells the name and tagline is not captioned with them again.
                     if !BRAND.logo_is_wordmark {
                         ui.add_space(18.0);
-                        ui.label(RichText::new(BRAND.name).size(30.0).strong().color(TEXT));
+                        ui.label(RichText::new(BRAND.name).font(strong_font(30.0)).color(TEXT));
                         ui.label(RichText::new(BRAND.tagline).size(12.5).color(MUTED));
                     }
                     ui.add_space(30.0);
@@ -7562,8 +7573,7 @@ impl DrydockApp {
                 ui.add_space(6.0);
                 ui.label(
                     RichText::new(branded!("{product} update is available"))
-                        .size(22.0)
-                        .strong()
+                        .font(strong_font(22.0))
                         .color(TEXT),
                 );
                 ui.add_space(10.0);
@@ -7652,7 +7662,7 @@ impl DrydockApp {
                         .corner_radius(36),
                 );
                 content.add_space(12.0);
-                content.label(RichText::new(BRAND.name).size(26.0).strong().color(TEXT));
+                content.label(RichText::new(BRAND.name).font(strong_font(26.0)).color(TEXT));
                 content.label(RichText::new(BRAND.tagline).size(12.0).color(MUTED));
                 content.add_space(2.0);
                 content.label(
@@ -7746,11 +7756,15 @@ impl DrydockApp {
 #[cfg(feature = "screenshot")]
 impl DrydockApp {
     /// Ordered pages the screenshot harness walks through (see [`crate::screenshot`]).
-    pub const SCREENSHOT_PAGES: [&'static str; 20] = [
+    pub const SCREENSHOT_PAGES: [&'static str; 24] = [
         "home",
+        "home-list",
+        "new-releases",
+        "new-releases-list",
         "search",
         "repacks",
         "denuvo",
+        "denuvo-list",
         "library",
         "add-game",
         "tools",
@@ -7774,6 +7788,11 @@ impl DrydockApp {
     pub fn screenshot_goto(&mut self, key: &str) {
         // Only the search page searches; everywhere else the query would cover the page.
         self.search.clear();
+        self.store_view = if key.ends_with("-list") {
+            StoreView::List
+        } else {
+            StoreView::Grid
+        };
         if let Ok(mut open) = SCREENSHOT_OPEN_MENU.lock() {
             *open = (key == "details-fix-menu").then_some("depot_download");
         }
@@ -7846,7 +7865,15 @@ impl DrydockApp {
                     self.open_details(app_id);
                 }
             }
-            "denuvo" if BRAND.features.denuvo_tab => {
+            "home" | "home-list" => {
+                self.page = Page::Home;
+                self.store_tab = StoreTab::Featured;
+            }
+            "new-releases" | "new-releases-list" => {
+                self.page = Page::Home;
+                self.store_tab = StoreTab::NewReleases;
+            }
+            "denuvo" | "denuvo-list" if BRAND.features.denuvo_tab => {
                 self.page = Page::Home;
                 self.store_tab = StoreTab::DenuvoWatch;
             }
@@ -8063,7 +8090,7 @@ impl eframe::App for DrydockApp {
                         // Centre a capped-width column, with a minimum gutter on each side, so wide
                         // windows don't stretch the content and objects stay in one aligned block.
                         let avail = ui.available_width();
-                        let capped = avail.min(CONTENT_WIDTH);
+                        let capped = avail.min(self.page.content_width());
                         let side = ((avail - capped) / 2.0).max(MIN_CONTENT_GUTTER);
                         let content_w = (avail - side * 2.0).max(320.0);
                         ui.horizontal_top(|ui| {
@@ -8102,11 +8129,29 @@ impl eframe::App for DrydockApp {
     }
 }
 
-/// Registers an embedded CJK font as a fallback so non-Latin game titles (Chinese, Japanese,
-/// Korean) render real glyphs instead of tofu boxes. Latin text keeps egui's default font; the
-/// fallback is only consulted for code points the primary font has no glyph for.
+/// Embeds the regular/semibold interface fonts, retaining egui's symbols and Noto CJK fallback
+/// so Chinese, Japanese, and Korean game titles render real glyphs instead of tofu boxes.
 fn install_fonts(context: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
+    for (name, bytes) in [
+        (
+            "barlow",
+            include_bytes!("../../../assets/fonts/Barlow-Regular.ttf").as_slice(),
+        ),
+        (
+            "barlow-semibold",
+            include_bytes!("../../../assets/fonts/Barlow-SemiBold.ttf").as_slice(),
+        ),
+    ] {
+        fonts
+            .font_data
+            .insert(name.to_owned(), Arc::new(egui::FontData::from_static(bytes)));
+    }
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "barlow".to_owned());
     fonts.font_data.insert(
         "noto-cjk".to_owned(),
         std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
@@ -8120,18 +8165,34 @@ fn install_fonts(context: &egui::Context) {
             .or_default()
             .push("noto-cjk".to_owned());
     }
+    let mut strong = fonts.families[&egui::FontFamily::Proportional].clone();
+    strong.insert(0, "barlow-semibold".to_owned());
+    fonts
+        .families
+        .insert(egui::FontFamily::Name("strong".into()), strong);
     context.set_fonts(fonts);
+}
+
+/// Embedded semibold with the same symbol and CJK fallbacks as body text.
+fn strong_font(size: f32) -> FontId {
+    FontId::new(size, egui::FontFamily::Name("strong".into()))
 }
 
 fn install_style(context: &egui::Context) {
     let mut style = (*context.style_of(egui::Theme::Dark)).clone();
     style.spacing.item_spacing = Vec2::new(10.0, 10.0);
     style.spacing.button_padding = Vec2::new(16.0, 10.0);
+    style
+        .text_styles
+        .insert(egui::TextStyle::Heading, strong_font(26.0));
+    style
+        .text_styles
+        .insert(egui::TextStyle::Button, strong_font(12.0));
     style.visuals = egui::Visuals::dark();
     style.visuals.panel_fill = BACKGROUND;
     style.visuals.window_fill = SURFACE;
     style.visuals.window_stroke = Stroke::new(1.0, BORDER);
-    style.visuals.window_corner_radius = egui::CornerRadius::same(16);
+    style.visuals.window_corner_radius = egui::CornerRadius::same(12);
     style.visuals.extreme_bg_color = INPUT_FILL;
     style.visuals.faint_bg_color = SURFACE_RAISED;
     style.visuals.widgets.inactive.bg_fill = SURFACE_RAISED;
@@ -8146,7 +8207,7 @@ fn install_style(context: &egui::Context) {
     style.visuals.selection.stroke = Stroke::new(1.0, ACCENT);
     style.visuals.override_text_color = Some(TEXT);
     // The scroll handle reads these foreground colours (see the floating scroll setup below),
-    // giving a violet bar at rest that brightens on hover to match the app.
+    // giving a muted bar at rest that brightens to the brand accent on hover.
     style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, BORDER);
     style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, ACCENT);
     style.visuals.widgets.active.fg_stroke = Stroke::new(1.0, ACCENT_DEEP);
@@ -8164,7 +8225,7 @@ fn install_style(context: &egui::Context) {
         widget.corner_radius = radius;
     }
 
-    // Thin, unobtrusive floating scrollbars, themed with the app's violet handle.
+    // Thin floating scrollbars, themed with the current brand's accent.
     let mut scroll = egui::style::ScrollStyle::floating();
     scroll.bar_width = 9.0;
     scroll.floating_width = 9.0;
@@ -8195,32 +8256,60 @@ fn paint_backdrop(ui: &mut egui::Ui, seconds: f32) {
     let rect = ui.max_rect();
     let painter = ui.painter();
     let drift = (seconds * 0.22).sin() * 26.0;
-    // Two very faint washes drawn from the palette itself — brass above, verdigris below. The
-    // previous pair was a hardcoded violet and cyan left over from the Steam-blue scheme; against a
-    // brass accent the violet read as a different product's colour bleeding through.
-    painter.circle_filled(
+    // A vertex fade removes the hard disc edges while keeping the existing ambient movement.
+    paint_glow(
+        painter,
         egui::pos2(rect.right() - 110.0 + drift, rect.top() + 90.0),
-        190.0,
-        Color32::from_rgba_unmultiplied(ACCENT.r(), ACCENT.g(), ACCENT.b(), 12),
+        420.0,
+        ACCENT,
+        12,
     );
-    painter.circle_filled(
+    paint_glow(
+        painter,
         egui::pos2(rect.left() + 240.0 - drift, rect.bottom() - 60.0),
-        150.0,
-        Color32::from_rgba_unmultiplied(AMBIENT.r(), AMBIENT.g(), AMBIENT.b(), 10),
+        360.0,
+        AMBIENT,
+        10,
     );
 }
 
-/// A top-nav link tab: uppercase label, brightening on hover, with a brass underline when it is
+fn paint_glow(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: Color32, alpha: u8) {
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(
+        center,
+        Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha),
+    );
+    const SEGMENTS: u32 = 48;
+    for index in 0..=SEGMENTS {
+        let angle = index as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+        mesh.colored_vertex(center + Vec2::angled(angle) * radius, Color32::TRANSPARENT);
+        if index > 0 {
+            mesh.add_triangle(0, index, index + 1);
+        }
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// A top-nav link tab: title-case label, brightening on hover, with an accent underline when it is
 /// the active page. Sized to its text so the nav packs tightly without wasting the bar.
 fn nav_link(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
-    let font = FontId::proportional(11.5);
-    let galley = ui.painter().layout_no_wrap(label.to_owned(), font.clone(), TEXT);
+    let compact = ui.ctx().content_rect().width() < 1100.0;
+    let size = if compact { 11.5 } else { 14.0 };
+    let font = if active {
+        strong_font(size)
+    } else {
+        FontId::proportional(size)
+    };
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), font, TEXT);
     let padding = Vec2::new(11.0, 0.0);
     let size = Vec2::new(galley.size().x + padding.x * 2.0, TOP_NAV_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    let hover = ui.ctx().animate_bool(response.id, response.hovered());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label));
+    let hover = ui
+        .ctx()
+        .animate_bool(response.id, response.hovered() || response.has_focus());
     let color = if active {
-        Color32::WHITE
+        TEXT
     } else {
         lerp_color(MUTED, TEXT, hover)
     };
@@ -8233,7 +8322,7 @@ fn nav_link(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
     let underline = if active {
         ACCENT
     } else {
-        lerp_color(Color32::TRANSPARENT, BORDER, hover)
+        BORDER.gamma_multiply(hover)
     };
     ui.painter().line_segment(
         [
@@ -8466,6 +8555,32 @@ enum ButtonKind {
     Success,
 }
 
+/// Shared paint values keep ordinary and split buttons consistent without touching their actions.
+fn button_visuals(kind: ButtonKind, enabled: bool, hover: f32) -> (Color32, Stroke, Color32) {
+    let (fill, stroke, text) = match kind {
+        ButtonKind::Primary => (lerp_color(ACCENT, ACCENT_SOFT, hover), Stroke::NONE, BACKGROUND),
+        ButtonKind::Ghost => (
+            lerp_color(INPUT_FILL, SURFACE_RAISED, hover),
+            Stroke::new(1.0, lerp_color(BORDER, ACCENT, hover)),
+            TEXT,
+        ),
+        ButtonKind::Success => (
+            lerp_color(VERDIGRIS, VERDIGRIS_HOVER, hover),
+            Stroke::NONE,
+            ON_VERDIGRIS,
+        ),
+    };
+    if enabled {
+        (fill, stroke, text)
+    } else {
+        (
+            lerp_color(fill, BACKGROUND, 0.45),
+            Stroke::new(stroke.width, lerp_color(stroke.color, BACKGROUND, 0.5)),
+            MUTED,
+        )
+    }
+}
+
 /// A rounded button that animates its fill/stroke on hover. Implements [`egui::Widget`]
 /// so every existing `add`, `add_enabled`, and `add_sized` call site keeps working.
 struct PillButton {
@@ -8545,11 +8660,11 @@ fn success_button(label: &str) -> PillButton {
 impl egui::Widget for PillButton {
     fn ui(self, ui: &mut egui::Ui) -> egui::Response {
         let enabled = ui.is_enabled();
-        let font = FontId::proportional(10.5);
+        let font = strong_font(12.0);
         let galley = ui
             .painter()
-            .layout_no_wrap(self.label.clone(), font, Color32::WHITE);
-        let padding = Vec2::new(16.0, 9.0);
+            .layout_no_wrap(self.label.clone(), font.clone(), TEXT);
+        let padding = Vec2::new(14.0, 8.0);
         let mut size = (galley.size() + 2.0 * padding).max(self.min_size);
         size.y = size.y.max(32.0);
         // Fill the allocated box when placed by `add_sized` (a justified layout).
@@ -8558,44 +8673,27 @@ impl egui::Widget for PillButton {
             size = size.max(ui.available_size_before_wrap());
         }
         let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &self.label));
 
         let hover = if enabled {
-            ui.ctx().animate_bool(response.id, response.hovered())
+            ui.ctx()
+                .animate_bool(response.id, response.hovered() || response.has_focus())
         } else {
             0.0
         };
-        let (fill, stroke, text_color) = match self.kind {
-            ButtonKind::Primary => (
-                lerp_color(ACCENT_DEEP, ACCENT_SOFT, hover),
-                Stroke::NONE,
-                Color32::WHITE,
-            ),
-            ButtonKind::Ghost => (
-                lerp_color(SURFACE, SURFACE_RAISED, hover),
-                Stroke::new(1.0, lerp_color(BORDER, ACCENT, hover)),
-                lerp_color(TEXT, Color32::WHITE, hover),
-            ),
-            ButtonKind::Success => (
-                lerp_color(VERDIGRIS, VERDIGRIS_HOVER, hover),
-                Stroke::NONE,
-                ON_VERDIGRIS,
-            ),
-        };
-        let (fill, stroke, text_color) = if enabled {
-            (fill, stroke, text_color)
-        } else {
-            (
-                lerp_color(fill, BACKGROUND, 0.45),
-                Stroke::new(stroke.width, lerp_color(stroke.color, BACKGROUND, 0.5)),
-                MUTED,
-            )
-        };
+        let (fill, stroke, text_color) = button_visuals(self.kind, enabled, hover);
 
         if ui.is_rect_visible(rect) {
-            ui.painter().rect(rect, 9, fill, stroke, egui::StrokeKind::Inside);
-            let galley = ui
-                .painter()
-                .layout_no_wrap(self.label, FontId::proportional(10.5), text_color);
+            ui.painter().rect(rect, 8, fill, stroke, egui::StrokeKind::Inside);
+            if enabled && response.has_focus() {
+                ui.painter().rect_stroke(
+                    rect.expand(2.0),
+                    10,
+                    Stroke::new(1.0, ACCENT_SOFT),
+                    egui::StrokeKind::Outside,
+                );
+            }
+            let galley = ui.painter().layout_no_wrap(self.label, font, text_color);
             let pos = rect.center() - galley.size() / 2.0;
             ui.painter().galley(pos, galley, text_color);
         }
@@ -8657,12 +8755,10 @@ fn split_button_of(
     }
 
     const ARROW_WIDTH: f32 = 30.0;
-    let font = FontId::proportional(10.5);
-    let galley = ui
-        .painter()
-        .layout_no_wrap(label.to_owned(), font.clone(), Color32::WHITE);
-    // Same padding as `PillButton` (16/9) so the two sit flush next to each other in a row.
-    let mut size = galley.size() + Vec2::new(32.0 + ARROW_WIDTH, 18.0);
+    let font = strong_font(12.0);
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), font.clone(), TEXT);
+    // Same padding as `PillButton` (14/8) so the two sit flush next to each other in a row.
+    let mut size = galley.size() + Vec2::new(28.0 + ARROW_WIDTH, 16.0);
     size.y = size.y.max(32.0);
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let split_x = rect.right() - ARROW_WIDTH;
@@ -8674,46 +8770,46 @@ fn split_button_of(
     let id = ui.make_persistent_id(id_source);
     let main = ui.interact(main_rect, id.with("main"), sense);
     let arrow = ui.interact(arrow_rect, id.with("arrow"), sense);
+    main.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    arrow.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            enabled,
+            format!("More actions: {label}"),
+        )
+    });
 
     let fade = |response: &egui::Response| {
         if enabled {
-            ui.ctx().animate_bool(response.id, response.hovered())
+            ui.ctx()
+                .animate_bool(response.id, response.hovered() || response.has_focus())
         } else {
             0.0
         }
     };
-    let (rest, hovered, mut text_color) = match kind {
-        ButtonKind::Success => (VERDIGRIS, VERDIGRIS_HOVER, ON_VERDIGRIS),
-        ButtonKind::Primary | ButtonKind::Ghost => (ACCENT_DEEP, ACCENT_SOFT, Color32::WHITE),
-    };
-    let mut fill_main = lerp_color(rest, hovered, fade(&main));
-    let mut fill_arrow = lerp_color(rest, hovered, fade(&arrow));
-    if !enabled {
-        fill_main = lerp_color(fill_main, BACKGROUND, 0.45);
-        fill_arrow = lerp_color(fill_arrow, BACKGROUND, 0.45);
-        text_color = MUTED;
-    }
+    let (fill_main, stroke_main, text_color) = button_visuals(kind, enabled, fade(&main));
+    let (fill_arrow, stroke_arrow, _) = button_visuals(kind, enabled, fade(&arrow));
 
     if ui.is_rect_visible(rect) {
         let left = egui::CornerRadius {
-            nw: 9,
-            sw: 9,
+            nw: 8,
+            sw: 8,
             ne: 0,
             se: 0,
         };
         let right = egui::CornerRadius {
             nw: 0,
             sw: 0,
-            ne: 9,
-            se: 9,
+            ne: 8,
+            se: 8,
         };
         let painter = ui.painter();
-        painter.rect(main_rect, left, fill_main, Stroke::NONE, egui::StrokeKind::Inside);
+        painter.rect(main_rect, left, fill_main, stroke_main, egui::StrokeKind::Inside);
         painter.rect(
             arrow_rect,
             right,
             fill_arrow,
-            Stroke::NONE,
+            stroke_arrow,
             egui::StrokeKind::Inside,
         );
         // Hairline between the halves, so it reads as two targets rather than one wide button.
@@ -8722,8 +8818,16 @@ fn split_button_of(
                 egui::pos2(split_x, rect.top() + 7.0),
                 egui::pos2(split_x, rect.bottom() - 7.0),
             ],
-            Stroke::new(1.0, Color32::from_black_alpha(70)),
+            Stroke::new(1.0, BACKGROUND.gamma_multiply(0.28)),
         );
+        if enabled && (main.has_focus() || arrow.has_focus()) {
+            painter.rect_stroke(
+                rect.expand(2.0),
+                10,
+                Stroke::new(1.0, ACCENT_SOFT),
+                egui::StrokeKind::Outside,
+            );
+        }
         let galley = painter.layout_no_wrap(label.to_owned(), font, text_color);
         painter.galley(main_rect.center() - galley.size() / 2.0, galley, text_color);
         let center = arrow_rect.center();
@@ -8750,12 +8854,12 @@ fn split_button_of(
         .iter()
         .map(|item| {
             ui.painter()
-                .layout_no_wrap(item.label.to_owned(), FontId::proportional(10.5), Color32::WHITE)
+                .layout_no_wrap(item.label.to_owned(), strong_font(12.0), TEXT)
                 .size()
                 .x
         })
         .fold(rect.width(), f32::max)
-        + 32.0;
+        + 28.0;
 
     let mut chosen = if enabled && main.clicked() { Some(0) } else { None };
     #[cfg(feature = "screenshot")]
@@ -8783,12 +8887,10 @@ fn split_button_of(
 }
 
 fn page_heading(ui: &mut egui::Ui, title: &str) {
-    ui.add(egui::Label::new(RichText::new(title).size(30.0).strong().color(TEXT)).wrap());
+    ui.add(egui::Label::new(RichText::new(title).font(strong_font(32.0)).color(TEXT)).wrap());
 }
 
-/// Lays out page content in a left-aligned column capped at `max_width`, so forms stay a readable
-/// width on wide/fullscreen windows while staying anchored to the left (the page scrollbar keeps to
-/// the window edge, and cards don't float in the middle).
+/// Lays out content within the shared page width, keeping nested panels aligned with page headings.
 fn content_column(ui: &mut egui::Ui, max_width: f32, add_contents: impl FnOnce(&mut egui::Ui)) {
     let width = ui.available_width().min(max_width);
     ui.allocate_ui_with_layout(Vec2::new(width, 0.0), Layout::top_down(Align::Min), |ui| {
@@ -9061,8 +9163,8 @@ impl HeaderResolver {
 
     /// Enqueues a one-off background resolution the first time an app is requested. A no-op once the
     /// app is pending, resolved, or known-failed, so it is safe to call every frame. Only rows whose
-    /// cheap CDN guesses fail ever call this, keeping `appdetails` traffic minimal (and well under
-    /// Steam's rate limit).
+    /// cheap CDN guesses fail, and the visible hero with a low-resolution feed image, call this.
+    /// The existing store limiter bounds `appdetails` traffic.
     ///
     /// The queue is capped at [`HEADER_RESOLVER_QUEUE_LIMIT`]; a request that overflows it evicts the
     /// oldest pending App ID (and its `Pending` marker, so it can be asked for again if still
@@ -9262,136 +9364,319 @@ enum StoreAction {
     Activate(u32),
 }
 
-/// A Steam-style store sub-tab: a pill that fills in when active, sized to its label.
+/// Borrowed presentation data for both live-feed capsules and catalogue-only Denuvo entries.
+struct StoreCard<'a> {
+    app_id: u32,
+    name: &'a str,
+    header_image_url: Option<&'a str>,
+    selected: bool,
+}
+
+/// Both views consume the same filtered, ordered entries and expose the same details action.
+fn store_games<'a>(
+    ui: &mut egui::Ui,
+    cards: impl IntoIterator<Item = StoreCard<'a>>,
+    view: StoreView,
+    headers: &HeaderResolver,
+) -> Option<StoreAction> {
+    match view {
+        StoreView::Grid => store_game_grid(ui, cards, headers),
+        StoreView::List => {
+            let mut action = None;
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for card in cards {
+                    ui.push_id(card.app_id, |ui| {
+                        if let Some(hit) = store_list_row(ui, &card, headers) {
+                            action = Some(hit);
+                        }
+                        ui.add_space(LIST_ROW_GAP);
+                    });
+                }
+            });
+            ui.add_space(24.0);
+            action
+        }
+    }
+}
+
+impl<'a> From<&'a StoreCapsule> for StoreCard<'a> {
+    fn from(capsule: &'a StoreCapsule) -> Self {
+        Self {
+            app_id: capsule.app_id,
+            name: &capsule.name,
+            header_image_url: Some(&capsule.header_image_url),
+            selected: false,
+        }
+    }
+}
+
+/// One responsive grid for Featured, New Releases and Denuvo. The page's existing vertical scroll
+/// owns overflow; offscreen cards reserve their space without painting or requesting artwork.
+fn store_game_grid<'a>(
+    ui: &mut egui::Ui,
+    cards: impl IntoIterator<Item = StoreCard<'a>>,
+    headers: &HeaderResolver,
+) -> Option<StoreAction> {
+    let cards: Vec<_> = cards.into_iter().collect();
+    let gap = 16.0;
+    let columns = ((ui.available_width() + gap) / (240.0 + gap))
+        .floor()
+        .clamp(1.0, 6.0) as usize;
+    let width = (ui.available_width() - gap * (columns - 1) as f32) / columns as f32;
+    let mut action = None;
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::splat(gap);
+        for row in cards.chunks(columns) {
+            ui.horizontal_top(|ui| {
+                for card in row {
+                    ui.push_id(card.app_id, |ui| {
+                        if let Some(hit) = store_game_card(ui, card, width, headers) {
+                            action = Some(hit);
+                        }
+                    });
+                }
+            });
+        }
+    });
+    ui.add_space(24.0);
+    action
+}
+
+/// A store category with an accent selection, a visible focus state and a comfortable hit target.
 fn store_subtab(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
-    let font = FontId::proportional(11.5);
-    let galley = ui.painter().layout_no_wrap(label.to_owned(), font, TEXT);
-    let size = Vec2::new(galley.size().x + 26.0, 32.0);
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    let hover = ui.ctx().animate_bool(response.id, response.hovered());
-    let fill = if active {
-        SURFACE_RAISED
+    store_selector(ui, label, active, 116.0)
+}
+
+/// The view controls belong to the catalogue section, below the category tabs and Featured hero.
+fn store_section_heading(ui: &mut egui::Ui, title: &str, view: &mut StoreView) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).font(strong_font(26.0)).color(TEXT));
+        ui.add_space(16.0);
+        store_view_toggle(ui, view);
+    });
+    ui.add_space(12.0);
+}
+
+/// Draw the view icons directly so they do not depend on the product's font glyph coverage.
+fn store_view_toggle(ui: &mut egui::Ui, view: &mut StoreView) -> egui::Response {
+    ui.horizontal_top(|ui| {
+        for (choice, label, tooltip) in [
+            (StoreView::Grid, "Grid view", "Show game artwork in a grid"),
+            (StoreView::List, "List view", "Show games in a compact list"),
+        ] {
+            let (response, color) = store_selection_frame(ui, label, *view == choice, Vec2::splat(40.0));
+            let origin = response.rect.center() - Vec2::splat(8.0);
+            match choice {
+                StoreView::Grid => {
+                    for row in 0..2 {
+                        for column in 0..2 {
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_size(
+                                    origin + Vec2::new(column as f32 * 10.0, row as f32 * 10.0),
+                                    Vec2::splat(6.0),
+                                ),
+                                1,
+                                color,
+                            );
+                        }
+                    }
+                }
+                StoreView::List => {
+                    for row in 0..3 {
+                        let left = origin + Vec2::new(0.0, row as f32 * 6.0 + 2.0);
+                        ui.painter().rect_filled(
+                            egui::Rect::from_center_size(left + Vec2::splat(1.0), Vec2::splat(3.0)),
+                            1,
+                            color,
+                        );
+                        ui.painter().line_segment(
+                            [left + Vec2::new(6.0, 1.0), left + Vec2::new(16.0, 1.0)],
+                            Stroke::new(1.5, color),
+                        );
+                    }
+                }
+            }
+            if response.on_hover_text(tooltip).clicked() {
+                *view = choice;
+            }
+        }
+    })
+    .response
+}
+
+fn store_selector(ui: &mut egui::Ui, label: &str, active: bool, min_width: f32) -> egui::Response {
+    let font = if active {
+        strong_font(14.0)
     } else {
-        lerp_color(Color32::TRANSPARENT, SURFACE, hover)
+        FontId::proportional(14.0)
     };
-    let stroke = if active {
-        Stroke::new(1.0, BORDER)
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), font.clone(), TEXT);
+    let size = Vec2::new((galley.size().x + 32.0).max(min_width), 40.0);
+    let (response, color) = store_selection_frame(ui, label, active, size);
+    ui.painter().text(
+        response.rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        font,
+        color,
+    );
+    response
+}
+
+/// Shared tab/icon selection styling, including focus feedback and accessible selected state.
+fn store_selection_frame(
+    ui: &mut egui::Ui,
+    label: &str,
+    active: bool,
+    size: Vec2,
+) -> (egui::Response, Color32) {
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, ui.is_enabled(), active, label)
+    });
+    let hover = ui
+        .ctx()
+        .animate_bool(response.id, response.hovered() || response.has_focus());
+    let fill = if active {
+        lerp_color(SURFACE, ACCENT, 0.12)
     } else {
-        Stroke::NONE
+        lerp_color(BACKGROUND, SURFACE_RAISED, hover)
+    };
+    let stroke = if active || response.has_focus() {
+        Stroke::new(1.0, ACCENT)
+    } else {
+        Stroke::new(1.0, lerp_color(BORDER, ACCENT, hover * 0.5))
     };
     ui.painter().rect(
         rect,
-        egui::CornerRadius {
-            nw: 7,
-            ne: 7,
-            sw: 0,
-            se: 0,
-        },
+        egui::CornerRadius::same(8),
         fill,
         stroke,
         egui::StrokeKind::Inside,
     );
     let color = if active {
-        Color32::WHITE
+        ACCENT_SOFT
     } else {
         lerp_color(MUTED, TEXT, hover)
     };
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        label,
-        FontId::proportional(11.5),
-        color,
-    );
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    response
+    (response, color)
 }
 
-/// The full-width Featured banner: a wide cinematic strip for the #1 seller with a left-anchored
-/// title/price/CTA block over a left-darkening gradient, in the style of Steam's store carousel.
+/// Featured artwork with a smooth scrim and bounded text, so bright art and long game names remain
+/// readable. Reuses the existing cached header resolver for newer Steam artwork paths.
 fn store_banner(
     ui: &mut egui::Ui,
     capsule: &StoreCapsule,
     rank: usize,
     activatable: bool,
+    headers: &HeaderResolver,
 ) -> Option<StoreAction> {
     let mut action = None;
     let width = ui.available_width();
-    // Height follows the hero image's aspect so `library_hero.jpg` fills the banner exactly — no
-    // letterbox bars — and the banner is as wide as the (column-capped) image.
-    let height = width / STORE_HERO_ASPECT;
+    let compact = width < 1000.0;
+    let height = (width / STORE_HERO_ASPECT).clamp(280.0, 380.0);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
     let corner = egui::CornerRadius::same(12);
-    // Use the widest capsule art Steam has for this title, falling back to the feed's header.
-    let urls = [
-        format!(
+    // A feed capsule may be only 231×87. Prefer hero art, then the current resolved header's
+    // double-resolution sibling; retain the feed art when sharper assets aren't available.
+    let mut urls = Vec::new();
+    artwork::push_variants(
+        &mut urls,
+        &format!(
             "https://cdn.cloudflare.steamstatic.com/steam/apps/{}/library_hero.jpg",
             capsule.app_id
         ),
-        capsule.header_image_url.clone(),
-    ];
+    );
+    if let Some(header) = headers.get(capsule.app_id) {
+        artwork::push_variants(&mut urls, &header);
+    } else if ui.is_rect_visible(rect) && capsule.header_image_url.contains("capsule_231x87") {
+        headers.request(capsule.app_id);
+    }
+    artwork::push_variants(&mut urls, &capsule.header_image_url);
     let refs: Vec<&str> = urls.iter().map(String::as_str).collect();
     // Cover-fit (fill + crop) so any art fills the banner edge to edge instead of leaving bars.
-    paint_remote_image_cover_multi(ui, rect, &refs, corner);
+    paint_remote_image_cover_multi_preview(ui, rect, &refs, corner, Some(&capsule.header_image_url));
     let response = ui.interact(rect, ui.id().with(("banner", capsule.app_id)), Sense::click());
-    let hover = ui.ctx().animate_bool(response.id, response.hovered());
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &capsule.name));
+    let hover = ui
+        .ctx()
+        .animate_bool(response.id, response.hovered() || response.has_focus());
     let painter = ui.painter().with_clip_rect(rect);
-    // Left→right darkening *gradient* so the copy stays legible over any hero art. A soft fade to
-    // transparent (not a hard-edged rectangle) avoids a visible seam on evenly-lit art.
-    let fade_w = width * 0.70;
-    let strips = 48;
-    for i in 0..strips {
-        let t = i as f32 / (strips - 1) as f32;
-        let alpha = (170.0 * (1.0 - t).powf(1.3)) as u8;
-        if alpha == 0 {
-            continue;
-        }
-        let x0 = rect.left() + fade_w * (i as f32 / strips as f32);
-        let x1 = rect.left() + fade_w * ((i + 1) as f32 / strips as f32);
-        let round = if i == 0 {
-            egui::CornerRadius {
-                nw: 12,
-                sw: 12,
-                ne: 0,
-                se: 0,
-            }
-        } else {
-            egui::CornerRadius::ZERO
-        };
-        painter.rect_filled(
-            egui::Rect::from_min_max(egui::pos2(x0, rect.top()), egui::pos2(x1, rect.bottom())),
-            round,
-            scrim(alpha),
-        );
-    }
+    painter.rect_filled(rect, corner, scrim(if compact { 100 } else { 28 }));
+    let fade_start = rect.left() + width * if compact { 0.55 } else { 0.36 };
+    let fade_end = rect.right() - 12.0;
+    painter.rect_filled(
+        egui::Rect::from_min_max(rect.min, egui::pos2(fade_start, rect.bottom())),
+        egui::CornerRadius {
+            nw: 12,
+            sw: 12,
+            ne: 0,
+            se: 0,
+        },
+        scrim(230),
+    );
+    // Interpolated vertex colours avoid the visible bands of a stack of translucent strips.
+    let mut fade = egui::Mesh::default();
+    fade.colored_vertex(egui::pos2(fade_start, rect.top()), scrim(230));
+    fade.colored_vertex(egui::pos2(fade_end, rect.top()), scrim(0));
+    fade.colored_vertex(egui::pos2(fade_end, rect.bottom()), scrim(0));
+    fade.colored_vertex(egui::pos2(fade_start, rect.bottom()), scrim(230));
+    fade.add_triangle(0, 1, 2);
+    fade.add_triangle(0, 2, 3);
+    painter.add(egui::Shape::mesh(fade));
     painter.rect_stroke(
         rect,
         corner,
         Stroke::new(1.0, lerp_color(BORDER, ACCENT, hover)),
         egui::StrokeKind::Inside,
     );
-    let left = rect.left() + 30.0;
+    let padding = if compact { 24.0 } else { 36.0 };
+    let left = rect.left() + padding;
     // Rank + Activatable eyebrow line.
     let mut eyebrow = format!("#{rank} TOP SELLER");
     if activatable {
         eyebrow.push_str(branded!(upper "   ·   ACTIVATABLE IN {product}"));
     }
     painter.text(
-        egui::pos2(left, rect.top() + 40.0),
+        egui::pos2(left, rect.top() + padding),
         egui::Align2::LEFT_TOP,
         eyebrow,
-        FontId::monospace(11.0),
-        if activatable { ACCENT_SOFT } else { MUTED },
+        strong_font(12.0),
+        ACCENT_SOFT,
     );
+    let text_width = if compact {
+        width - padding * 2.0
+    } else {
+        (width * 0.48).min(680.0)
+    };
+    let title_size = if compact { 32.0 } else { 56.0 };
+    let title_top = rect.top() + padding + 28.0;
+    let title_height = rect.bottom() - padding - 42.0 - 42.0 - title_top;
+    let display_name = if compact {
+        capsule.name.clone()
+    } else {
+        capsule.name.replacen(": ", ":\n", 1)
+    };
+    let mut title = egui::text::LayoutJob::simple(display_name, strong_font(title_size), TEXT, text_width);
+    title.wrap.max_rows = (title_height / (title_size * 1.25)).floor().clamp(1.0, 3.0) as usize;
+    let title = painter.layout_job(title);
+    let elided = title.elided;
+    painter.galley(egui::pos2(left, title_top), title, TEXT);
     painter.text(
-        egui::pos2(left, rect.top() + 60.0),
+        egui::pos2(left, rect.bottom() - padding - 68.0),
         egui::Align2::LEFT_TOP,
-        &capsule.name,
-        FontId::proportional(34.0),
-        Color32::WHITE,
+        BRAND.tagline,
+        FontId::proportional(if compact { 14.0 } else { 17.0 }),
+        TEXT,
     );
+    if elided {
+        response.clone().on_hover_text(&capsule.name);
+    }
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -9404,21 +9689,120 @@ fn store_banner(
     } else {
         ("VIEW IN STORE", false)
     };
-    let btn_w = if activatable { 188.0 } else { 150.0 };
-    let btn_rect = egui::Rect::from_min_size(egui::pos2(left, rect.bottom() - 52.0), Vec2::new(btn_w, 34.0));
+    let btn_w = if activatable { 200.0 } else { 168.0 };
+    let btn_rect = egui::Rect::from_min_size(
+        egui::pos2(left, rect.bottom() - padding - 42.0),
+        Vec2::new(btn_w, 42.0),
+    );
     let button = if primary {
-        success_button(label).min_size(Vec2::new(btn_w, 34.0))
+        ui.put(btn_rect, success_button(label).min_size(btn_rect.size()))
     } else {
-        ghost_button(label).min_size(Vec2::new(btn_w, 34.0))
+        ui.put(btn_rect, primary_button(label).min_size(btn_rect.size()))
     };
-    if ui.put(btn_rect, button).clicked() {
+    if button.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
         action = Some(if activatable {
             StoreAction::Activate(capsule.app_id)
         } else {
             StoreAction::Details(capsule.app_id)
         });
     }
+    // `ui.put` positions the CTA inside the banner; subsequent content must follow the full banner.
+    ui.advance_cursor_after_rect(rect);
     action
+}
+
+/// An artwork-led Store card. Its whole surface opens the same details page as the old row;
+/// only the existing details action is exposed. Portrait art gives the grid a stronger composition.
+fn store_game_card(
+    ui: &mut egui::Ui,
+    card: &StoreCard<'_>,
+    width: f32,
+    headers: &HeaderResolver,
+) -> Option<StoreAction> {
+    let image_height = width * 0.9;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, image_height + 114.0), Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return None;
+    }
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), card.name));
+    let hover = ui
+        .ctx()
+        .animate_bool(response.id, response.hovered() || response.has_focus());
+    let corner = egui::CornerRadius::same(10);
+    let fill = if card.selected {
+        lerp_color(SURFACE, ACCENT_DEEP, 0.2)
+    } else {
+        lerp_color(SURFACE, SURFACE_RAISED, hover)
+    };
+    let border = if card.selected {
+        ACCENT
+    } else {
+        lerp_color(BORDER, ACCENT, hover)
+    };
+    ui.painter().rect_filled(rect, corner, fill);
+    let artwork = egui::Rect::from_min_size(rect.min, Vec2::new(width, image_height));
+    // Cards use standard-size portrait/header assets; optional _2x requests belong to the hero.
+    let resolved = headers.get(card.app_id);
+    let urls = artwork::card_urls(card.app_id, resolved.as_deref(), card.header_image_url);
+    let refs: Vec<&str> = urls.iter().map(String::as_str).collect();
+    let image_corner = egui::CornerRadius {
+        nw: 10,
+        ne: 10,
+        sw: 0,
+        se: 0,
+    };
+    if paint_remote_image_cover_multi_preview(ui, artwork, &refs, image_corner, card.header_image_url) {
+        headers.request(card.app_id);
+    }
+    let painter = ui.painter().with_clip_rect(rect);
+    let mut title =
+        egui::text::LayoutJob::simple(card.name.to_owned(), strong_font(17.0), TEXT, width - 28.0);
+    title.wrap.max_rows = 2;
+    let title = painter.layout_job(title);
+    let elided = title.elided;
+    painter.galley(
+        egui::pos2(rect.left() + 14.0, artwork.bottom() + 13.0),
+        title,
+        TEXT,
+    );
+    let footer = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 14.0, rect.bottom() - 48.0),
+        egui::pos2(rect.right() - 14.0, rect.bottom() - 12.0),
+    );
+    painter.rect(
+        footer,
+        6,
+        lerp_color(INPUT_FILL, SURFACE, hover),
+        Stroke::new(1.0, border),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        footer.left_center() + Vec2::new(12.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        "VIEW GAME",
+        FontId::proportional(13.0),
+        TEXT,
+    );
+    let arrow = footer.right_center() - Vec2::new(15.0, 0.0);
+    painter.add(egui::Shape::line(
+        vec![
+            arrow + Vec2::new(-3.0, -4.0),
+            arrow + Vec2::new(1.0, 0.0),
+            arrow + Vec2::new(-3.0, 4.0),
+        ],
+        Stroke::new(1.5, lerp_color(TEXT, ACCENT_SOFT, hover)),
+    ));
+    painter.rect_stroke(rect, corner, Stroke::new(1.0, border), egui::StrokeKind::Inside);
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let clicked = response.clicked();
+    if card.header_image_url.is_none() {
+        // Catalogue rows previously showed the App ID; retain that information on hover.
+        response.on_hover_text(format!("{}\nAPP {}", card.name, card.app_id));
+    } else if elided {
+        response.on_hover_text(card.name);
+    }
+    ui.advance_cursor_after_rect(rect);
+    clicked.then_some(StoreAction::Details(card.app_id))
 }
 
 /// Height of a Steam-style list row (thumbnail + title + meta + a right-hand control).
@@ -9427,139 +9811,81 @@ const LIST_ROW_HEIGHT: f32 = 62.0;
 /// of layout item-spacing (which the right-hand `ui.put` control otherwise swallows).
 const LIST_ROW_GAP: f32 = 5.0;
 
-/// Draws the shared chrome of a Steam-style list row — a full-width band with a small landscape
-/// thumbnail, a title and a meta line — and returns the rect reserved on the right for a control
-/// plus a click response for the rest of the row (used to open details). `right_w` is the width to
-/// reserve on the right; pass 0.0 for a row with no control.
-fn list_row_base(
-    ui: &mut egui::Ui,
-    app_id: u32,
-    preferred_thumb: Option<&str>,
-    title: &str,
-    meta: &str,
-    meta_color: Color32,
-    right_w: f32,
-) -> (egui::Rect, egui::Response) {
-    // The card fills the top of its slot; the caller wraps each row in a fixed-height region that
-    // reserves LIST_ROW_GAP below, so a visible gap always separates the cards.
-    let (rect, hover_resp) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), LIST_ROW_HEIGHT), Sense::hover());
-    let hover = ui.ctx().animate_bool(hover_resp.id, hover_resp.hovered());
+/// The previous Store list layout: a landscape thumbnail, bounded title and VIEW control.
+/// Catalogue-only entries retain their App ID and selection; invisible rows do not request art.
+fn store_list_row(ui: &mut egui::Ui, card: &StoreCard<'_>, headers: &HeaderResolver) -> Option<StoreAction> {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), LIST_ROW_HEIGHT), Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return None;
+    }
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), card.name));
+    let hover = ui
+        .ctx()
+        .animate_bool(response.id, response.hovered() || response.has_focus());
     ui.painter().rect(
         rect,
-        egui::CornerRadius::same(8),
+        8,
         lerp_color(SURFACE, SURFACE_RAISED, 0.35 + hover * 0.65),
-        Stroke::new(1.0, lerp_color(BORDER, ACCENT, hover)),
+        Stroke::new(
+            1.0,
+            if card.selected {
+                ACCENT
+            } else {
+                lerp_color(BORDER, ACCENT, hover)
+            },
+        ),
         egui::StrokeKind::Inside,
     );
-    // Small landscape thumbnail, vertically centred. A caller-supplied URL (the live feed's own,
-    // already-valid capsule) is tried first, then the App-ID-derived CDN fallbacks.
-    let th = LIST_ROW_HEIGHT - 16.0;
-    let tw = th / STEAM_HEADER_ASPECT;
+    let image_height = LIST_ROW_HEIGHT - 16.0;
     let thumb = egui::Rect::from_min_size(
-        egui::pos2(rect.left() + 9.0, rect.center().y - th / 2.0),
-        Vec2::new(tw, th),
+        rect.min + Vec2::splat(8.0),
+        Vec2::new(image_height / STEAM_HEADER_ASPECT, image_height),
     );
-    let fallback = steam_artwork_urls(app_id);
-    let mut refs: Vec<&str> = Vec::with_capacity(5);
-    if let Some(url) = preferred_thumb.filter(|url| url.starts_with("https://")) {
-        refs.push(url);
-    }
+    let fallback = steam_artwork_urls(card.app_id);
+    let resolved = headers.get(card.app_id);
+    let mut refs: Vec<&str> = card.header_image_url.into_iter().collect();
     refs.extend(fallback.iter().map(String::as_str));
-    // Cover-fit so the thumbnail fills its rect with no letterbox bars — the feed's capsule art is a
-    // wider aspect than the header-shaped slot, which a plain fit would bar top and bottom.
-    paint_remote_image_cover_multi(ui, thumb, &refs, egui::CornerRadius::same(4));
-
-    let text_x = thumb.right() + 16.0;
-    let painter = ui.painter().with_clip_rect(rect);
-    let has_meta = !meta.is_empty();
+    refs.extend(resolved.as_deref());
+    if paint_remote_image_cover_multi(ui, thumb, &refs, egui::CornerRadius::same(4)) {
+        headers.request(card.app_id);
+    }
+    let button_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.right() - 96.0, rect.center().y - 16.0),
+        Vec2::new(84.0, 32.0),
+    );
+    let text_left = thumb.right() + 16.0;
+    let text_width = (button_rect.left() - text_left - 12.0).max(1.0);
+    let mut title = egui::text::LayoutJob::simple(card.name.to_owned(), strong_font(15.0), TEXT, text_width);
+    title.wrap.max_rows = 1;
+    let title = ui.painter().layout_job(title);
+    let elided = title.elided;
+    let has_meta = card.header_image_url.is_none();
     let title_y = if has_meta {
-        rect.center().y - 9.0
+        rect.center().y - 18.0
     } else {
-        rect.center().y
+        rect.center().y - title.size().y / 2.0
     };
-    painter.text(
-        egui::pos2(text_x, title_y),
-        egui::Align2::LEFT_CENTER,
-        title,
-        FontId::proportional(15.0),
-        TEXT,
-    );
+    ui.painter().galley(egui::pos2(text_left, title_y), title, TEXT);
     if has_meta {
-        painter.text(
-            egui::pos2(text_x, rect.center().y + 11.0),
+        ui.painter().text(
+            egui::pos2(text_left, rect.center().y + 9.0),
             egui::Align2::LEFT_CENTER,
-            meta,
+            format!("APP {}", card.app_id),
             FontId::proportional(11.0),
-            meta_color,
+            MUTED,
         );
     }
-
-    let right_zone = egui::Rect::from_min_size(
-        egui::pos2(rect.right() - right_w - 12.0, rect.center().y - 16.0),
-        Vec2::new(right_w, 32.0),
-    );
-    // The clickable area is everything left of the control (so the control gets its own clicks).
-    let click_right = if right_w > 0.0 {
-        right_zone.left() - 8.0
-    } else {
-        rect.right()
-    };
-    let click_rect = egui::Rect::from_min_max(rect.min, egui::pos2(click_right, rect.bottom()));
-    let click = ui.interact(click_rect, hover_resp.id.with("click"), Sense::click());
-    if click.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    let button_clicked = ui
+        .put(button_rect, ghost_button("VIEW").min_size(button_rect.size()))
+        .clicked();
+    let clicked = response.clicked() || button_clicked;
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if elided {
+        response.on_hover_text(card.name);
     }
-    (right_zone, click)
-}
-
-/// A Steam-style store list row: thumbnail + title, an "Activatable in Drydock" meta line when Drydock
-/// supports it, and a right-hand Activate/View control. No price (the store list is price-free).
-fn store_list_row(ui: &mut egui::Ui, capsule: &StoreCapsule, activatable: bool) -> Option<StoreAction> {
-    let (meta, meta_color) = if activatable {
-        (branded!("Activatable in {product}"), ACCENT_SOFT)
-    } else {
-        ("", MUTED)
-    };
-    let (label, primary, btn_w) = if activatable {
-        ("ACTIVATE", true, 116.0)
-    } else {
-        ("VIEW", false, 84.0)
-    };
-    let mut action = None;
-    // A fixed-height slot for the card, then an explicit gap below it. egui shrinks a nested
-    // `allocate_ui` back to its content, so the gap can't be baked into the slot height — it has to
-    // be added as real space after the row for the cards to separate.
-    let width = ui.available_width();
-    list_row_slot(ui, width, |ui| {
-        let (right_zone, click) = list_row_base(
-            ui,
-            capsule.app_id,
-            Some(capsule.header_image_url.as_str()),
-            &capsule.name,
-            meta,
-            meta_color,
-            btn_w,
-        );
-        if click.clicked() {
-            action = Some(StoreAction::Details(capsule.app_id));
-        }
-        let button = if primary {
-            success_button(label).min_size(Vec2::new(btn_w, 32.0))
-        } else {
-            ghost_button(label).min_size(Vec2::new(btn_w, 32.0))
-        };
-        if ui.put(right_zone, button).clicked() {
-            action = Some(if activatable {
-                StoreAction::Activate(capsule.app_id)
-            } else {
-                StoreAction::Details(capsule.app_id)
-            });
-        }
-    });
-    // The real gap between cards (the slot itself shrinks to the card, so this must be explicit).
-    ui.add_space(LIST_ROW_GAP);
-    action
+    ui.advance_cursor_after_rect(rect);
+    clicked.then_some(StoreAction::Details(card.app_id))
 }
 
 /// Runs `contents` inside a fixed-height row slot (`LIST_ROW_HEIGHT`); the caller adds the gap below.
@@ -9937,7 +10263,7 @@ fn library_overview(
             egui::Frame::new()
                 .inner_margin(egui::Margin::symmetric(22, 18))
                 .show(ui, |ui| {
-                    ui.label(RichText::new(&entry.name).size(22.0).strong().color(TEXT));
+                    ui.label(RichText::new(&entry.name).font(strong_font(22.0)).color(TEXT));
                     ui.add_space(8.0);
                     let amber = AMBER;
                     let (status, color) = match entry.source {
@@ -10517,15 +10843,15 @@ fn activation_ea_body(ui: &mut egui::Ui) {
 }
 
 fn section_label(ui: &mut egui::Ui, label: &str) {
-    ui.label(RichText::new(label).size(10.0).strong().color(ACCENT));
+    ui.label(RichText::new(label).font(strong_font(12.0)).color(ACCENT));
 }
 
 fn panel(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
         .fill(SURFACE)
         .stroke(Stroke::new(1.0, BORDER))
-        .corner_radius(16)
-        .inner_margin(22)
+        .corner_radius(12)
+        .inner_margin(24)
         .show(ui, |ui| {
             // Fill the container width so stacked panels line up instead of shrinking to content.
             ui.set_width(ui.available_width());
@@ -10954,7 +11280,7 @@ fn details_body(
     let mut new_shot = shot_index;
 
     // The game title heads the page, Steam-store style.
-    ui.add(egui::Label::new(RichText::new(&details.name).size(30.0).strong().color(TEXT)).wrap());
+    ui.add(egui::Label::new(RichText::new(&details.name).font(strong_font(30.0)).color(TEXT)).wrap());
     ui.label(
         RichText::new(format!("APP {}", details.app_id))
             .size(10.0)
@@ -10969,13 +11295,14 @@ fn details_body(
         let right_w = (width * 0.35).clamp(320.0, 440.0);
         let left_w = width - right_w - gap;
         ui.horizontal_top(|ui| {
+            // Use one gap so the two columns fit exactly within the shared page width.
+            ui.spacing_mut().item_spacing.x = gap;
             ui.allocate_ui_with_layout(Vec2::new(left_w, 10.0), Layout::top_down(Align::Min), |ui| {
                 ui.set_width(left_w);
                 new_shot = details_media(ui, details, shot_index);
                 ui.add_space(24.0);
                 details_about(ui, details);
             });
-            ui.add_space(gap);
             ui.allocate_ui_with_layout(Vec2::new(right_w, 10.0), Layout::top_down(Align::Min), |ui| {
                 ui.set_width(right_w);
                 action = details_store_sidebar(ui, details, state, activation_required, panels, depot);
@@ -11771,7 +12098,22 @@ fn paint_remote_image_cover_multi(
     uris: &[&str],
     corner: egui::CornerRadius,
 ) -> bool {
+    paint_remote_image_cover_multi_preview(ui, rect, uris, corner, None)
+}
+
+/// Keep the feed thumbnail visible while sharper Store artwork loads. Existing callers preserve
+/// their neutral loading tile; only the Store supplies a preview through the same cached loader.
+fn paint_remote_image_cover_multi_preview(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    uris: &[&str],
+    corner: egui::CornerRadius,
+    preview: Option<&str>,
+) -> bool {
     ui.painter().rect_filled(rect, corner, SURFACE);
+    if let Some(preview) = preview.filter(|uri| uri.starts_with("https://")) {
+        paint_remote_image_cover_multi(ui, rect, &[preview], corner);
+    }
     for (index, uri) in uris.iter().enumerate() {
         let is_last = index + 1 == uris.len();
         let texture = ui.ctx().try_load_texture(
@@ -12077,13 +12419,18 @@ mod ui_tests {
         // available height is the whole screen — which turned every dropdown entry into a
         // screen-tall block. Entries must stay button-sized.
         let mut heights = Vec::new();
-        egui::__run_test_ui(|ui| {
+        // The production buttons use an embedded named family; egui's test helper installs empty
+        // fonts, so use the app's font setup before measuring this existing layout regression.
+        let context = egui::Context::default();
+        install_fonts(&context);
+        let output = context.run_ui(Default::default(), |ui| {
             ui.allocate_ui_with_layout(Vec2::new(260.0, 600.0), Layout::top_down(Align::Min), |ui| {
                 let response =
                     ui.add(ghost_button("REMOVE VERSION FROM STEAM").min_size(Vec2::new(240.0, 34.0)));
                 heights.push(response.rect.height());
             });
         });
+        output.drop_without_applying_deltas();
         for height in heights {
             assert!(height < 60.0, "a dropdown entry grew to {height} px tall");
         }
@@ -12276,6 +12623,110 @@ mod ui_tests {
     }
 
     #[test]
+    fn store_view_toggle_switches_both_ways_with_pointer_input() {
+        let context = egui::Context::default();
+        install_fonts(&context);
+        let mut view = StoreView::default();
+        let mut rect = egui::Rect::NOTHING;
+        let output = context.run_ui(Default::default(), |ui| {
+            rect = store_view_toggle(ui, &mut view).rect;
+        });
+        output.drop_without_applying_deltas();
+        for (target, position) in [
+            (StoreView::List, rect.right_center() - Vec2::new(20.0, 0.0)),
+            (StoreView::Grid, rect.left_center() + Vec2::new(20.0, 0.0)),
+        ] {
+            for pressed in [true, false] {
+                let input = egui::RawInput {
+                    events: vec![
+                        egui::Event::PointerMoved(position),
+                        egui::Event::PointerButton {
+                            pos: position,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::default(),
+                        },
+                    ],
+                    ..Default::default()
+                };
+                context
+                    .run_ui(input, |ui| {
+                        store_view_toggle(ui, &mut view);
+                    })
+                    .drop_without_applying_deltas();
+            }
+            assert_eq!(view, target);
+        }
+    }
+
+    #[test]
+    fn both_store_views_open_the_same_game_details() {
+        for view in [StoreView::Grid, StoreView::List] {
+            let context = egui::Context::default();
+            install_fonts(&context);
+            // No resolver workers or network are needed to test the real rendered click targets.
+            let headers = HeaderResolver {
+                slots: Arc::new(Mutex::new(HashMap::from([(730, HeaderSlot::Failed)]))),
+                queue: Arc::new((
+                    Mutex::new(std::collections::VecDeque::new()),
+                    std::sync::Condvar::new(),
+                )),
+            };
+            let mut action = None;
+            let mut position = egui::Pos2::ZERO;
+            context
+                .run_ui(Default::default(), |ui| {
+                    position = ui.cursor().min + Vec2::splat(20.0);
+                    action = store_games(
+                        ui,
+                        [StoreCard {
+                            app_id: 730,
+                            name: "Counter-Strike 2",
+                            header_image_url: None,
+                            selected: false,
+                        }],
+                        view,
+                        &headers,
+                    );
+                })
+                .drop_without_applying_deltas();
+            for pressed in [true, false] {
+                let input = egui::RawInput {
+                    events: vec![
+                        egui::Event::PointerMoved(position),
+                        egui::Event::PointerButton {
+                            pos: position,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::default(),
+                        },
+                    ],
+                    ..Default::default()
+                };
+                context
+                    .run_ui(input, |ui| {
+                        action = store_games(
+                            ui,
+                            [StoreCard {
+                                app_id: 730,
+                                name: "Counter-Strike 2",
+                                header_image_url: None,
+                                selected: false,
+                            }],
+                            view,
+                            &headers,
+                        );
+                    })
+                    .drop_without_applying_deltas();
+            }
+            assert!(
+                matches!(action, Some(StoreAction::Details(730))),
+                "{view:?} lost its details action"
+            );
+        }
+    }
+
+    #[test]
     fn the_store_shows_exactly_the_tabs_this_product_offers() {
         // CI runs the tests for Drydock and again with the example brand, which turns Repacks on
         // and the Denuvo tab off, so this checks both ways — the core tabs are there in either.
@@ -12284,9 +12735,9 @@ mod ui_tests {
             .filter(|(tab, _)| tab.offered())
             .map(|(_, label)| label)
             .collect();
-        assert_eq!(shown.contains(&"Repacks"), BRAND.features.repacks);
-        assert_eq!(shown.contains(&"Denuvo"), BRAND.features.denuvo_tab);
-        for core in ["Featured", "New Releases"] {
+        assert_eq!(shown.contains(&"REPACKS"), BRAND.features.repacks);
+        assert_eq!(shown.contains(&"DENUVO"), BRAND.features.denuvo_tab);
+        for core in ["FEATURED", "NEW RELEASES"] {
             assert!(shown.contains(&core), "{core} is part of every product");
         }
     }
