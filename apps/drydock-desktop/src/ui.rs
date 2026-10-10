@@ -137,9 +137,10 @@ const PRIMARY_DESTINATIONS: [(Page, &str); 5] = [
 const SECONDARY_DESTINATIONS: [(Page, &str); 2] = [(Page::Guide, "HELP"), (Page::Settings, "SETTINGS")];
 const STATUS_BAR_HEIGHT: f32 = 36.0;
 const MIN_CONTENT_GUTTER: f32 = 24.0;
-/// Every page shares the Store's centred content width, retaining `MIN_CONTENT_GUTTER` on
-/// narrower windows.
+/// Wide Store, Library and Details content, retaining side gutters on narrower windows.
 const CONTENT_WIDTH: f32 = 1600.0;
+/// Form pages keep inputs and instructions within a comfortable reading width.
+const FORM_CONTENT_WIDTH: f32 = 1040.0;
 /// Steam's `library_hero.jpg` ratio (1920×620).
 const STORE_HERO_ASPECT: f32 = 3.1;
 
@@ -221,6 +222,13 @@ enum Page {
 }
 
 impl Page {
+    fn content_width(self) -> f32 {
+        match self {
+            Self::Activation | Self::Tools | Self::Cloud | Self::Settings => FORM_CONTENT_WIDTH,
+            _ => CONTENT_WIDTH,
+        }
+    }
+
     /// Whether this product has the page at all (see `brand.rs`). The navigation leaves out what it
     /// does not offer, and the page switch falls back to the Store should one be reached anyway.
     fn offered(self) -> bool {
@@ -277,11 +285,19 @@ impl StoreTab {
     }
 
     const ALL: [(Self, &'static str); 4] = [
-        (Self::Featured, "Featured"),
-        (Self::NewReleases, "New Releases"),
-        (Self::Repacks, "Repacks"),
-        (Self::DenuvoWatch, "Denuvo"),
+        (Self::Featured, "FEATURED"),
+        (Self::NewReleases, "NEW RELEASES"),
+        (Self::Repacks, "REPACKS"),
+        (Self::DenuvoWatch, "DENUVO"),
     ];
+}
+
+/// A session-only presentation choice shared by the Store's game catalogues.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum StoreView {
+    #[default]
+    Grid,
+    List,
 }
 
 /// Which walkthrough the How It Works page is showing.
@@ -465,6 +481,7 @@ pub struct DrydockApp {
     store_loading: bool,
     // Store tab (Steam-style storefront): the selected sub-tab and the live featured feed.
     store_tab: StoreTab,
+    store_view: StoreView,
     featured: Option<StoreFeatured>,
     featured_loading: bool,
     featured_error: Option<String>,
@@ -878,6 +895,7 @@ impl DrydockApp {
             store_receiver: None,
             store_loading: false,
             store_tab: StoreTab::default(),
+            store_view: StoreView::default(),
             featured: None,
             featured_loading: false,
             featured_error: None,
@@ -3944,6 +3962,10 @@ impl DrydockApp {
                     selected = tab;
                 }
             }
+            if selected != StoreTab::Repacks {
+                ui.add_space(8.0);
+                store_view_toggle(ui, &mut self.store_view);
+            }
         });
         if selected != self.store_tab {
             self.store_tab = selected;
@@ -3997,7 +4019,7 @@ impl DrydockApp {
     }
 
     /// The Featured tab: a banner for the first available top seller, followed by a responsive
-    /// artwork grid, keeping the feed's ordering and twenty recommendations.
+    /// grid or list, keeping the feed's ordering and twenty recommendations.
     fn store_featured(&self, ui: &mut egui::Ui, featured: Option<&StoreFeatured>) -> Option<StoreAction> {
         if !self.store_feed_status(ui) {
             return None;
@@ -4033,19 +4055,24 @@ impl DrydockApp {
 
         ui.add_space(26.0);
         ui.label(
-            RichText::new("Featured & recommended")
+            RichText::new("FEATURED & RECOMMENDED")
                 .font(strong_font(26.0))
                 .color(TEXT),
         );
         ui.add_space(12.0);
         // Only presentation changes: keep the same next twenty games and details action.
-        if let Some(hit) = store_game_grid(ui, items.take(20).map(StoreCard::from), &self.header_resolver) {
+        if let Some(hit) = store_games(
+            ui,
+            items.take(20).map(StoreCard::from),
+            self.store_view,
+            &self.header_resolver,
+        ) {
             action = Some(hit);
         }
         action
     }
 
-    /// New Releases uses the same price-free game grid as Featured, retaining the feed's order.
+    /// New Releases uses the same price-free grid or list as Featured, retaining the feed's order.
     fn store_shelf(&self, ui: &mut egui::Ui, capsules: Option<&[StoreCapsule]>) -> Option<StoreAction> {
         if !self.store_feed_status(ui) {
             return None;
@@ -4070,15 +4097,16 @@ impl DrydockApp {
             );
             return None;
         }
-        store_game_grid(
+        store_games(
             ui,
             available.into_iter().map(StoreCard::from),
+            self.store_view,
             &self.header_resolver,
         )
     }
 
     /// The Drydock-only Denuvo Watch tab: the live set of games that actually use Denuvo — i.e. the
-    /// ones that need Drydock to activate them — in the shared grid. Independent of the Steam feed.
+    /// ones that need Drydock to activate them — in the shared view. Independent of the Steam feed.
     fn store_denuvo_watch(&self, ui: &mut egui::Ui) -> Option<StoreAction> {
         if !self.denuvo_loaded {
             ui.horizontal(|ui| {
@@ -4116,7 +4144,7 @@ impl DrydockApp {
             header_image_url: None,
             selected: self.selected_app == Some(entry.app_id),
         });
-        store_game_grid(ui, cards, &self.header_resolver)
+        store_games(ui, cards, self.store_view, &self.header_resolver)
     }
 
     /// The Repacks tab: every catalogue game Drydock has an external repack download for, as a
@@ -5479,7 +5507,7 @@ impl DrydockApp {
     fn activation_page(&mut self, ui: &mut egui::Ui) {
         page_heading(ui, "ACTIVATION");
         ui.add_space(18.0);
-        content_column(ui, CONTENT_WIDTH, |ui| {
+        content_column(ui, FORM_CONTENT_WIDTH, |ui| {
             self.activation_switcher(ui);
             ui.add_space(16.0);
             match self.activation_provider {
@@ -6016,7 +6044,7 @@ impl DrydockApp {
         // stays occupied forever and blocks every later attempt.
         page_heading(ui, "CLOUD");
         ui.add_space(22.0);
-        content_column(ui, CONTENT_WIDTH, |ui| {
+        content_column(ui, FORM_CONTENT_WIDTH, |ui| {
             // What it is + the loud "back up your saves" warning.
             panel(ui, |ui| {
                 section_label(ui, "STEAM CLOUD FOR LUA GAMES");
@@ -6237,7 +6265,7 @@ impl DrydockApp {
     fn settings_page(&mut self, ui: &mut egui::Ui) {
         page_heading(ui, "SETTINGS");
         ui.add_space(22.0);
-        content_column(ui, CONTENT_WIDTH, |ui| {
+        content_column(ui, FORM_CONTENT_WIDTH, |ui| {
             if self.discord_session.is_some()
                 || self.login_offer.as_ref().is_some_and(|offer| offer.available)
             {
@@ -6750,7 +6778,7 @@ impl DrydockApp {
     fn tools_page(&mut self, ui: &mut egui::Ui) {
         page_heading(ui, "TOOLS");
         ui.add_space(22.0);
-        content_column(ui, CONTENT_WIDTH, |ui| {
+        content_column(ui, FORM_CONTENT_WIDTH, |ui| {
             panel(ui, |ui| {
                 section_label(ui, "CHANGE GAME LANGUAGE");
                 ui.add_space(10.0);
@@ -7735,12 +7763,15 @@ impl DrydockApp {
 #[cfg(feature = "screenshot")]
 impl DrydockApp {
     /// Ordered pages the screenshot harness walks through (see [`crate::screenshot`]).
-    pub const SCREENSHOT_PAGES: [&'static str; 21] = [
+    pub const SCREENSHOT_PAGES: [&'static str; 24] = [
         "home",
+        "home-list",
         "new-releases",
+        "new-releases-list",
         "search",
         "repacks",
         "denuvo",
+        "denuvo-list",
         "library",
         "add-game",
         "tools",
@@ -7764,6 +7795,11 @@ impl DrydockApp {
     pub fn screenshot_goto(&mut self, key: &str) {
         // Only the search page searches; everywhere else the query would cover the page.
         self.search.clear();
+        self.store_view = if key.ends_with("-list") {
+            StoreView::List
+        } else {
+            StoreView::Grid
+        };
         if let Ok(mut open) = SCREENSHOT_OPEN_MENU.lock() {
             *open = (key == "details-fix-menu").then_some("depot_download");
         }
@@ -7836,11 +7872,15 @@ impl DrydockApp {
                     self.open_details(app_id);
                 }
             }
-            "new-releases" => {
+            "home" | "home-list" => {
+                self.page = Page::Home;
+                self.store_tab = StoreTab::Featured;
+            }
+            "new-releases" | "new-releases-list" => {
                 self.page = Page::Home;
                 self.store_tab = StoreTab::NewReleases;
             }
-            "denuvo" if BRAND.features.denuvo_tab => {
+            "denuvo" | "denuvo-list" if BRAND.features.denuvo_tab => {
                 self.page = Page::Home;
                 self.store_tab = StoreTab::DenuvoWatch;
             }
@@ -8057,7 +8097,7 @@ impl eframe::App for DrydockApp {
                         // Centre a capped-width column, with a minimum gutter on each side, so wide
                         // windows don't stretch the content and objects stay in one aligned block.
                         let avail = ui.available_width();
-                        let capped = avail.min(CONTENT_WIDTH);
+                        let capped = avail.min(self.page.content_width());
                         let side = ((avail - capped) / 2.0).max(MIN_CONTENT_GUTTER);
                         let content_w = (avail - side * 2.0).max(320.0);
                         ui.horizontal_top(|ui| {
@@ -8267,11 +8307,7 @@ fn nav_link(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
     } else {
         FontId::proportional(size)
     };
-    let mut display = label.to_ascii_lowercase();
-    if let Some(first) = display.get_mut(..1) {
-        first.make_ascii_uppercase();
-    }
-    let galley = ui.painter().layout_no_wrap(display, font, TEXT);
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), font, TEXT);
     let padding = Vec2::new(11.0, 0.0);
     let size = Vec2::new(galley.size().x + padding.x * 2.0, TOP_NAV_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
@@ -9343,6 +9379,34 @@ struct StoreCard<'a> {
     selected: bool,
 }
 
+/// Both views consume the same filtered, ordered entries and expose the same details action.
+fn store_games<'a>(
+    ui: &mut egui::Ui,
+    cards: impl IntoIterator<Item = StoreCard<'a>>,
+    view: StoreView,
+    headers: &HeaderResolver,
+) -> Option<StoreAction> {
+    match view {
+        StoreView::Grid => store_game_grid(ui, cards, headers),
+        StoreView::List => {
+            let mut action = None;
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for card in cards {
+                    ui.push_id(card.app_id, |ui| {
+                        if let Some(hit) = store_list_row(ui, &card, headers) {
+                            action = Some(hit);
+                        }
+                        ui.add_space(LIST_ROW_GAP);
+                    });
+                }
+            });
+            ui.add_space(24.0);
+            action
+        }
+    }
+}
+
 impl<'a> From<&'a StoreCapsule> for StoreCard<'a> {
     fn from(capsule: &'a StoreCapsule) -> Self {
         Self {
@@ -9388,13 +9452,35 @@ fn store_game_grid<'a>(
 
 /// A store category with an accent selection, a visible focus state and a comfortable hit target.
 fn store_subtab(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
+    store_selector(ui, label, active, 116.0)
+}
+
+/// Compact, keyboard-accessible choices beside the category tabs. Repacks remains its own list.
+fn store_view_toggle(ui: &mut egui::Ui, view: &mut StoreView) -> egui::Response {
+    ui.horizontal_top(|ui| {
+        for (choice, label, tooltip) in [
+            (StoreView::Grid, "GRID", "Show game artwork in a grid"),
+            (StoreView::List, "LIST", "Show games in a compact list"),
+        ] {
+            if store_selector(ui, label, *view == choice, 64.0)
+                .on_hover_text(tooltip)
+                .clicked()
+            {
+                *view = choice;
+            }
+        }
+    })
+    .response
+}
+
+fn store_selector(ui: &mut egui::Ui, label: &str, active: bool, min_width: f32) -> egui::Response {
     let font = if active {
         strong_font(14.0)
     } else {
         FontId::proportional(14.0)
     };
     let galley = ui.painter().layout_no_wrap(label.to_owned(), font.clone(), TEXT);
-    let size = Vec2::new((galley.size().x + 40.0).max(116.0), 40.0);
+    let size = Vec2::new((galley.size().x + 32.0).max(min_width), 40.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, ui.is_enabled(), active, label)
@@ -9536,7 +9622,7 @@ fn store_banner(
     painter.text(
         egui::pos2(left, rect.bottom() - padding - 68.0),
         egui::Align2::LEFT_TOP,
-        "Discover your next adventure.",
+        BRAND.tagline,
         FontId::proportional(if compact { 14.0 } else { 17.0 }),
         TEXT,
     );
@@ -9553,7 +9639,7 @@ fn store_banner(
     let (label, primary) = if activatable {
         (branded!(upper "ACTIVATE IN {product}"), true)
     } else {
-        ("View in store", false)
+        ("VIEW IN STORE", false)
     };
     let btn_w = if activatable { 200.0 } else { 168.0 };
     let btn_rect = egui::Rect::from_min_size(
@@ -9607,21 +9693,9 @@ fn store_game_card(
     };
     ui.painter().rect_filled(rect, corner, fill);
     let artwork = egui::Rect::from_min_size(rect.min, Vec2::new(width, image_height));
-    let mut urls = Vec::new();
-    artwork::push_variants(
-        &mut urls,
-        &format!(
-            "https://cdn.cloudflare.steamstatic.com/steam/apps/{}/library_600x900.jpg",
-            card.app_id
-        ),
-    );
-    if let Some(header) = headers.get(card.app_id) {
-        artwork::push_variants(&mut urls, &header);
-    }
-    let fallback = steam_artwork_urls(card.app_id);
-    for url in fallback.iter().take(3) {
-        artwork::push_variants(&mut urls, url);
-    }
+    // Cards use standard-size portrait/header assets; optional _2x requests belong to the hero.
+    let resolved = headers.get(card.app_id);
+    let urls = artwork::card_urls(card.app_id, resolved.as_deref(), card.header_image_url);
     let refs: Vec<&str> = urls.iter().map(String::as_str).collect();
     let image_corner = egui::CornerRadius {
         nw: 10,
@@ -9631,12 +9705,6 @@ fn store_game_card(
     };
     if paint_remote_image_cover_multi_preview(ui, artwork, &refs, image_corner, card.header_image_url) {
         headers.request(card.app_id);
-        if let Some(header) = card.header_image_url {
-            let mut feed = Vec::new();
-            artwork::push_variants(&mut feed, header);
-            let refs: Vec<&str> = feed.iter().map(String::as_str).collect();
-            paint_remote_image_cover_multi_preview(ui, artwork, &refs, image_corner, Some(header));
-        }
     }
     let painter = ui.painter().with_clip_rect(rect);
     let mut title =
@@ -9663,7 +9731,7 @@ fn store_game_card(
     painter.text(
         footer.left_center() + Vec2::new(12.0, 0.0),
         egui::Align2::LEFT_CENTER,
-        "View game",
+        "VIEW GAME",
         FontId::proportional(13.0),
         TEXT,
     );
@@ -9694,6 +9762,83 @@ const LIST_ROW_HEIGHT: f32 = 62.0;
 /// Transparent gap baked below each row so a visible space always separates the cards, independent
 /// of layout item-spacing (which the right-hand `ui.put` control otherwise swallows).
 const LIST_ROW_GAP: f32 = 5.0;
+
+/// The previous Store list layout: a landscape thumbnail, bounded title and VIEW control.
+/// Catalogue-only entries retain their App ID and selection; invisible rows do not request art.
+fn store_list_row(ui: &mut egui::Ui, card: &StoreCard<'_>, headers: &HeaderResolver) -> Option<StoreAction> {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), LIST_ROW_HEIGHT), Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return None;
+    }
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), card.name));
+    let hover = ui
+        .ctx()
+        .animate_bool(response.id, response.hovered() || response.has_focus());
+    ui.painter().rect(
+        rect,
+        8,
+        lerp_color(SURFACE, SURFACE_RAISED, 0.35 + hover * 0.65),
+        Stroke::new(
+            1.0,
+            if card.selected {
+                ACCENT
+            } else {
+                lerp_color(BORDER, ACCENT, hover)
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+    let image_height = LIST_ROW_HEIGHT - 16.0;
+    let thumb = egui::Rect::from_min_size(
+        rect.min + Vec2::splat(8.0),
+        Vec2::new(image_height / STEAM_HEADER_ASPECT, image_height),
+    );
+    let fallback = steam_artwork_urls(card.app_id);
+    let resolved = headers.get(card.app_id);
+    let mut refs: Vec<&str> = card.header_image_url.into_iter().collect();
+    refs.extend(fallback.iter().map(String::as_str));
+    refs.extend(resolved.as_deref());
+    if paint_remote_image_cover_multi(ui, thumb, &refs, egui::CornerRadius::same(4)) {
+        headers.request(card.app_id);
+    }
+    let button_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.right() - 96.0, rect.center().y - 16.0),
+        Vec2::new(84.0, 32.0),
+    );
+    let text_left = thumb.right() + 16.0;
+    let text_width = (button_rect.left() - text_left - 12.0).max(1.0);
+    let mut title = egui::text::LayoutJob::simple(card.name.to_owned(), strong_font(15.0), TEXT, text_width);
+    title.wrap.max_rows = 1;
+    let title = ui.painter().layout_job(title);
+    let elided = title.elided;
+    let has_meta = card.header_image_url.is_none();
+    let title_y = if has_meta {
+        rect.center().y - 18.0
+    } else {
+        rect.center().y - title.size().y / 2.0
+    };
+    ui.painter().galley(egui::pos2(text_left, title_y), title, TEXT);
+    if has_meta {
+        ui.painter().text(
+            egui::pos2(text_left, rect.center().y + 9.0),
+            egui::Align2::LEFT_CENTER,
+            format!("APP {}", card.app_id),
+            FontId::proportional(11.0),
+            MUTED,
+        );
+    }
+    let button_clicked = ui
+        .put(button_rect, ghost_button("VIEW").min_size(button_rect.size()))
+        .clicked();
+    let clicked = response.clicked() || button_clicked;
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if elided {
+        response.on_hover_text(card.name);
+    }
+    ui.advance_cursor_after_rect(rect);
+    clicked.then_some(StoreAction::Details(card.app_id))
+}
 
 /// Runs `contents` inside a fixed-height row slot (`LIST_ROW_HEIGHT`); the caller adds the gap below.
 fn list_row_slot(ui: &mut egui::Ui, width: f32, contents: impl FnOnce(&mut egui::Ui)) {
@@ -12430,6 +12575,110 @@ mod ui_tests {
     }
 
     #[test]
+    fn store_view_toggle_switches_both_ways_with_pointer_input() {
+        let context = egui::Context::default();
+        install_fonts(&context);
+        let mut view = StoreView::default();
+        let mut rect = egui::Rect::NOTHING;
+        let output = context.run_ui(Default::default(), |ui| {
+            rect = store_view_toggle(ui, &mut view).rect;
+        });
+        output.drop_without_applying_deltas();
+        for (target, position) in [
+            (StoreView::List, rect.right_center() - Vec2::new(32.0, 0.0)),
+            (StoreView::Grid, rect.left_center() + Vec2::new(32.0, 0.0)),
+        ] {
+            for pressed in [true, false] {
+                let input = egui::RawInput {
+                    events: vec![
+                        egui::Event::PointerMoved(position),
+                        egui::Event::PointerButton {
+                            pos: position,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::default(),
+                        },
+                    ],
+                    ..Default::default()
+                };
+                context
+                    .run_ui(input, |ui| {
+                        store_view_toggle(ui, &mut view);
+                    })
+                    .drop_without_applying_deltas();
+            }
+            assert_eq!(view, target);
+        }
+    }
+
+    #[test]
+    fn both_store_views_open_the_same_game_details() {
+        for view in [StoreView::Grid, StoreView::List] {
+            let context = egui::Context::default();
+            install_fonts(&context);
+            // No resolver workers or network are needed to test the real rendered click targets.
+            let headers = HeaderResolver {
+                slots: Arc::new(Mutex::new(HashMap::from([(730, HeaderSlot::Failed)]))),
+                queue: Arc::new((
+                    Mutex::new(std::collections::VecDeque::new()),
+                    std::sync::Condvar::new(),
+                )),
+            };
+            let mut action = None;
+            let mut position = egui::Pos2::ZERO;
+            context
+                .run_ui(Default::default(), |ui| {
+                    position = ui.cursor().min + Vec2::splat(20.0);
+                    action = store_games(
+                        ui,
+                        [StoreCard {
+                            app_id: 730,
+                            name: "Counter-Strike 2",
+                            header_image_url: None,
+                            selected: false,
+                        }],
+                        view,
+                        &headers,
+                    );
+                })
+                .drop_without_applying_deltas();
+            for pressed in [true, false] {
+                let input = egui::RawInput {
+                    events: vec![
+                        egui::Event::PointerMoved(position),
+                        egui::Event::PointerButton {
+                            pos: position,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::default(),
+                        },
+                    ],
+                    ..Default::default()
+                };
+                context
+                    .run_ui(input, |ui| {
+                        action = store_games(
+                            ui,
+                            [StoreCard {
+                                app_id: 730,
+                                name: "Counter-Strike 2",
+                                header_image_url: None,
+                                selected: false,
+                            }],
+                            view,
+                            &headers,
+                        );
+                    })
+                    .drop_without_applying_deltas();
+            }
+            assert!(
+                matches!(action, Some(StoreAction::Details(730))),
+                "{view:?} lost its details action"
+            );
+        }
+    }
+
+    #[test]
     fn the_store_shows_exactly_the_tabs_this_product_offers() {
         // CI runs the tests for Drydock and again with the example brand, which turns Repacks on
         // and the Denuvo tab off, so this checks both ways — the core tabs are there in either.
@@ -12438,9 +12687,9 @@ mod ui_tests {
             .filter(|(tab, _)| tab.offered())
             .map(|(_, label)| label)
             .collect();
-        assert_eq!(shown.contains(&"Repacks"), BRAND.features.repacks);
-        assert_eq!(shown.contains(&"Denuvo"), BRAND.features.denuvo_tab);
-        for core in ["Featured", "New Releases"] {
+        assert_eq!(shown.contains(&"REPACKS"), BRAND.features.repacks);
+        assert_eq!(shown.contains(&"DENUVO"), BRAND.features.denuvo_tab);
+        for core in ["FEATURED", "NEW RELEASES"] {
             assert!(shown.contains(&core), "{core} is part of every product");
         }
     }

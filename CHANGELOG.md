@@ -6,12 +6,11 @@ All notable Drydock changes are documented here. The project follows semantic ve
 
 - Refreshed the desktop UI with the existing brand palette: clearer typography, navigation,
   buttons, panels, and focus states throughout the app.
-- All page content now shares the Store's 1,600-pixel maximum width and responsive side gutters.
-- Featured recommendations, New Releases, and Denuvo now use a responsive game-card grid with
-  portrait artwork and outlined View game footers. The hero prefers sharper artwork through the
-  existing cached loader.
-- Preserved existing game actions and API contracts. See
-  [the visual-refresh notes](docs/UI_DESIGN_2026-10-10.md) for scope, artwork, font licenses, and checks.
+- Store, Library and Details use a 1,600-pixel maximum width; form pages keep a 1,040-pixel cap.
+- Featured recommendations, New Releases and Denuvo offer a responsive grid or compact list through
+  a shared Store toggle. Cards use standard-size portraits; only the hero tries sharper `_2x` art.
+- Navigation and action labels retain uppercase casing, and the hero uses the product's tagline.
+  Game actions and API contracts are unchanged.
 
 ## 1.1.1 - 2026-09-11
 

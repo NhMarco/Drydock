@@ -81,8 +81,8 @@ code should use them rather than re-implementing their rules inline:
 
 Presentation-only Steam artwork URL choices live in the desktop's `artwork.rs`. It must not become
 a second store client: current hashed headers are obtained through the existing cached resolver.
-Shared desktop styling uses `BRAND.palette` and embedded fonts; see the
-[2026-10-10 visual-refresh notes](UI_DESIGN_2026-10-10.md) for the current design and validation.
+Shared desktop styling uses `BRAND.palette` and embedded fonts. Store cards use standard-size
+artwork; optional double-resolution variants are reserved for the featured hero.
 
 ### Persistence
 
