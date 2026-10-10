@@ -3,6 +3,7 @@
     windows_subsystem = "windows"
 )]
 
+mod artwork;
 mod brand;
 mod downloads;
 mod image_cache;

@@ -79,6 +79,11 @@ code should use them rather than re-implementing their rules inline:
   `QueueEffect` the UI then acts on.
 - `safe_path` — as above.
 
+Presentation-only Steam artwork URL choices live in the desktop's `artwork.rs`. It must not become
+a second store client: current hashed headers are obtained through the existing cached resolver.
+Shared desktop styling uses `BRAND.palette` and embedded fonts. Store cards use standard-size
+artwork; optional double-resolution variants are reserved for the featured hero.
+
 ### Persistence
 
 `PortablePaths` resolves `%LOCALAPPDATA%\<Product>` (Windows) or `$XDG_DATA_HOME/<Product>` (elsewhere) —

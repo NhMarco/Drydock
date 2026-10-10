@@ -2,6 +2,17 @@
 
 All notable Drydock changes are documented here. The project follows semantic versioning.
 
+## Unreleased
+
+- Refreshed the desktop UI with the existing brand palette: clearer typography, navigation,
+  buttons, panels, and focus states throughout the app.
+- Store, Library and Details use a 1,600-pixel maximum width; form pages keep a 1,040-pixel cap.
+- Featured recommendations, New Releases and Denuvo offer a responsive grid or compact list through
+  icon controls beside each catalogue heading. Cards use standard-size portraits; only the hero
+  tries sharper `_2x` art.
+- Navigation and action labels retain uppercase casing, and the hero uses the product's tagline.
+  Game actions and API contracts are unchanged.
+
 ## 1.1.1 - 2026-09-11
 
 Fixes unlocks that were not pinned to a build and depot manifests that never reached Steam.
