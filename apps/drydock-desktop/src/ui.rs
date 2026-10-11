@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use drydock_core::depot::MAXIMUM_VERIFY_THREADS;
+use drydock_core::sources::{DepotSource, day_label};
 use drydock_core::{
     APP_VERSION, ActivationRequestService, AddedAppState, AppCatalog, AppPayloadStore, AppUpdater,
     CRACK_ARTIFACT_NAMES, CatalogApp, CloudProvider, CloudRedirect, CloudSettings, ConflictingSoftwareStatus,
@@ -35,6 +36,7 @@ use drydock_core::{
     save_denuvo_appids, scan_crack_files, service_status, start_steam, stop_steam, toolchain_dlls,
     uninstall_service,
 };
+use drydock_core::{HubcapClient, HubcapUsage};
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke, Vec2};
 
 // The palette comes from the product being built (`brand.rs`); these names are what the rest of the
@@ -251,6 +253,255 @@ enum LoginGate {
     Offline(String),
     /// In: the app itself.
     Open,
+}
+
+/// What the source picker was opened for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceAction {
+    AddToSteam,
+    Download,
+}
+
+/// One provider in the source picker, with what it says about the game.
+#[derive(Clone, Debug, PartialEq)]
+struct SourceRow {
+    source: DepotSource,
+    /// Whether it has the game; `None` when it cannot say (SteamTools lists every Steam app).
+    listed: Option<bool>,
+    /// When it last updated the game's unlock, in Unix seconds, where it says so.
+    updated: Option<u64>,
+    /// The provider's own verdict that its copy is older than the game's current build (Hubcap).
+    needs_update: bool,
+}
+
+/// What the picker's lookup found: the proxy's providers in the order it tries them, Hubcap when a
+/// key is saved, and when Steam's current build went live.
+struct SourceReport {
+    rows: Vec<SourceRow>,
+    steam_build: Option<u64>,
+    /// What could not be asked, said under the choices.
+    problems: Vec<String>,
+}
+
+/// The open source picker: an add or a download waiting for the user to pick where it comes from.
+struct SourcePicker {
+    app_id: u32,
+    name: String,
+    action: SourceAction,
+    /// `None` is "Automatic": the server's order.
+    choice: Option<DepotSource>,
+    report: Option<SourceReport>,
+    receiver: Option<Receiver<SourceReport>>,
+}
+
+/// How a source's line in the picker reads: current, behind, or just a fact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NoteTone {
+    Current,
+    Outdated,
+    Neutral,
+}
+
+/// The line under a source in the picker, its tone, and whether it can be picked at all.
+fn source_note(row: &SourceRow, steam_build: Option<u64>) -> (String, NoteTone, bool) {
+    if row.listed == Some(false) {
+        return ("Not available for this game".to_owned(), NoteTone::Neutral, false);
+    }
+    if row.source == DepotSource::DepotBox {
+        return (
+            "Built on request — always the current build".to_owned(),
+            NoteTone::Current,
+            true,
+        );
+    }
+    let Some(updated) = row.updated else {
+        let note = if row.source == DepotSource::Hubcap && row.listed.is_none() {
+            "Could not be checked"
+        } else {
+            "No date given"
+        };
+        return (note.to_owned(), NoteTone::Neutral, true);
+    };
+    let day = day_label(updated);
+    let (note, tone) = if row.needs_update {
+        (format!("Updated {day} — outdated"), NoteTone::Outdated)
+    } else {
+        match steam_build {
+            Some(build) if updated >= build => (
+                format!("Updated {day} — current (Steam build from {})", day_label(build)),
+                NoteTone::Current,
+            ),
+            Some(build) => (
+                format!(
+                    "Updated {day} — older than Steam's build from {}",
+                    day_label(build)
+                ),
+                NoteTone::Outdated,
+            ),
+            None => (format!("Updated {day}"), NoteTone::Neutral),
+        }
+    };
+    (note, tone, true)
+}
+
+/// The line under "Automatic": the proxy's providers in the order it tries them.
+fn automatic_note(rows: &[SourceRow]) -> String {
+    let order: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.source != DepotSource::Hubcap)
+        .map(|row| row.source.label())
+        .collect();
+    if order.is_empty() {
+        "The server picks, in its own order".to_owned()
+    } else {
+        format!("The first that has it: {}", order.join(" → "))
+    }
+}
+
+/// Asks who has `app_id`: the proxy for its providers, Hubcap with the user's key, steamcmd for when
+/// Steam's current build went live. Runs on the picker's own thread.
+fn source_report(app_id: u32, hubcap_key: Option<String>) -> SourceReport {
+    let mut rows = Vec::new();
+    let mut problems = Vec::new();
+    match ProxyClient::new().and_then(|client| client.sources(app_id)) {
+        Ok(sources) => rows.extend(sources.into_iter().filter_map(|source| {
+            let name = DepotSource::from_key(&source.name).filter(|name| *name != DepotSource::Hubcap)?;
+            Some(SourceRow {
+                source: name,
+                listed: source.listed,
+                updated: source.updated,
+                needs_update: false,
+            })
+        })),
+        Err(error) => problems.push(format!(
+            "The server could not say which sources have this game: {error}"
+        )),
+    }
+    if let Some(key) = hubcap_key {
+        match HubcapClient::new(&key).and_then(|hubcap| hubcap.status(app_id)) {
+            Ok(status) => rows.push(SourceRow {
+                source: DepotSource::Hubcap,
+                listed: Some(status.available),
+                updated: status.updated,
+                needs_update: status.needs_update,
+            }),
+            Err(error) => {
+                rows.push(SourceRow {
+                    source: DepotSource::Hubcap,
+                    listed: None,
+                    updated: None,
+                    needs_update: false,
+                });
+                problems.push(format!("Hubcap Manifest: {error}"));
+            }
+        }
+    }
+    SourceReport {
+        rows,
+        steam_build: drydock_core::fetch_public_build_time(app_id).ok().flatten(),
+        problems,
+    }
+}
+
+/// The catalogue with Hubcap's library: every app the proxy lists, plus those only Hubcap has.
+fn merged_catalog(proxy: &[CatalogApp], hubcap: &[(u32, String)]) -> Vec<CatalogApp> {
+    let mut known: std::collections::HashSet<u32> = proxy.iter().map(|app| app.app_id).collect();
+    let mut merged = proxy.to_vec();
+    merged.extend(
+        hubcap
+            .iter()
+            .filter(|(app_id, _)| known.insert(*app_id))
+            .map(|(app_id, name)| CatalogApp {
+                app_id: *app_id,
+                name: name.clone(),
+                drm: false,
+                tags: Vec::new(),
+            }),
+    );
+    merged.sort_by_cached_key(|app| app.name.to_lowercase());
+    merged
+}
+
+/// A Hubcap key check's answer: the key being added (`None` for the saved one) and what is left.
+type HubcapCheck = (Option<String>, Result<HubcapUsage, String>);
+/// Hubcap's library: `(App ID, name)` of every app it has manifests for.
+type HubcapLibrary = Vec<(u32, String)>;
+
+/// How long Hubcap's library is kept before it is asked for again.
+const HUBCAP_CATALOG_REFRESH: Duration = Duration::from_secs(24 * 60 * 60);
+const HUBCAP_CATALOG_MARKER: &str = "hubcap-library-v1";
+
+fn load_hubcap_catalog(cache_dir: &Path) -> Vec<(u32, String)> {
+    drydock_core::hubcap::load_library(&cache_dir.join("hubcap-library.json"))
+}
+
+fn save_hubcap_catalog(cache_dir: &Path, apps: &[(u32, String)]) -> std::io::Result<()> {
+    drydock_core::hubcap::save_library(&cache_dir.join("hubcap-library.json"), apps)?;
+    fs::write(cache_dir.join("hubcap-library.marker"), HUBCAP_CATALOG_MARKER)
+}
+
+/// One choice in the source picker: a radio mark, the source's name and a line about its state.
+fn source_option(
+    ui: &mut egui::Ui,
+    selected: bool,
+    label: &str,
+    note: &str,
+    tone: NoteTone,
+    enabled: bool,
+) -> egui::Response {
+    let width = ui.available_width();
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 54.0), sense);
+    response
+        .widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, enabled, selected, label));
+    let hover = if enabled {
+        ui.ctx()
+            .animate_bool(response.id, response.hovered() || response.has_focus())
+    } else {
+        0.0
+    };
+    let painter = ui.painter().with_clip_rect(rect);
+    let fill = if selected {
+        lerp_color(SURFACE, ACCENT, 0.12)
+    } else {
+        lerp_color(INPUT_FILL, SURFACE_RAISED, hover)
+    };
+    let stroke = if selected {
+        ACCENT
+    } else {
+        lerp_color(BORDER, ACCENT, hover * 0.6)
+    };
+    painter.rect(rect, 8, fill, Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+    let mark = egui::pos2(rect.left() + 22.0, rect.center().y);
+    painter.circle_stroke(mark, 7.0, Stroke::new(1.5, if selected { ACCENT } else { MUTED }));
+    if selected {
+        painter.circle_filled(mark, 3.5, ACCENT);
+    }
+    let text = if enabled { TEXT } else { MUTED };
+    painter.text(
+        egui::pos2(rect.left() + 42.0, rect.top() + 18.0),
+        egui::Align2::LEFT_CENTER,
+        label,
+        strong_font(13.0),
+        text,
+    );
+    let note_color = match tone {
+        _ if !enabled => MUTED,
+        NoteTone::Current => VERDIGRIS,
+        NoteTone::Outdated => AMBER,
+        NoteTone::Neutral => MUTED,
+    };
+    painter.text(
+        egui::pos2(rect.left() + 42.0, rect.top() + 37.0),
+        egui::Align2::LEFT_CENTER,
+        note,
+        FontId::proportional(11.5),
+        note_color,
+    );
+    if enabled && response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response
 }
 
 /// The link of a running Discord sign-in, shown while it waits so it can go into any browser: the
@@ -493,6 +744,20 @@ pub struct DrydockApp {
     // Store tab (Steam-style storefront): the selected sub-tab and the live featured feed.
     store_tab: StoreTab,
     store_view: StoreView,
+    /// The open source picker, when an add or a download waits for the user to pick a source.
+    source_picker: Option<SourcePicker>,
+    /// The user's Hubcap Manifest key (`drydock_core::hubcap`), when they added one.
+    hubcap_key: Option<String>,
+    hubcap_key_draft: String,
+    /// What is left of today's Hubcap downloads, once asked (or why it could not be).
+    hubcap_usage: Option<Result<HubcapUsage, String>>,
+    /// A key check: the key being added (`None` when checking the saved one) and Hubcap's answer.
+    hubcap_check: Option<Receiver<HubcapCheck>>,
+    /// The proxy's catalogue as it came, before Hubcap's apps join it (`merged_catalog`).
+    proxy_catalog: Arc<Vec<CatalogApp>>,
+    /// Hubcap's library, `(App ID, name)`, while a key is saved.
+    hubcap_catalog: Arc<Vec<(u32, String)>>,
+    hubcap_catalog_receiver: Option<Receiver<Result<HubcapLibrary, String>>>,
     featured: Option<StoreFeatured>,
     featured_loading: bool,
     featured_error: Option<String>,
@@ -907,6 +1172,14 @@ impl DrydockApp {
             store_loading: false,
             store_tab: StoreTab::default(),
             store_view: StoreView::default(),
+            source_picker: None,
+            hubcap_key: None,
+            hubcap_key_draft: String::new(),
+            hubcap_usage: None,
+            hubcap_check: None,
+            proxy_catalog: Arc::new(Vec::new()),
+            hubcap_catalog: Arc::new(Vec::new()),
+            hubcap_catalog_receiver: None,
             featured: None,
             featured_loading: false,
             featured_error: None,
@@ -972,6 +1245,14 @@ impl DrydockApp {
             drydock_core::login::load_session(&drydock_core::login::session_path(&app.paths.settings_dir()));
         app.start_login_status_check();
         app.store_view = StoreView::from_settings(app.settings.store_list_view);
+        // The catalogue as the proxy lists it; with a Hubcap key, its library joins it.
+        app.proxy_catalog = Arc::clone(&app.catalog);
+        app.hubcap_key =
+            drydock_core::hubcap::load_key(&drydock_core::hubcap::key_path(&app.paths.settings_dir()));
+        if app.hubcap_key.is_some() {
+            app.hubcap_catalog = Arc::new(load_hubcap_catalog(&app.paths.cache_dir()));
+            app.apply_catalog();
+        }
         app
     }
 
@@ -1057,6 +1338,361 @@ impl DrydockApp {
         });
     }
 
+    /// The catalogue shown: the proxy's, plus — with a Hubcap key — the apps only Hubcap has.
+    fn apply_catalog(&mut self) {
+        if self.hubcap_key.is_none() || self.hubcap_catalog.is_empty() {
+            if !Arc::ptr_eq(&self.catalog, &self.proxy_catalog) {
+                self.catalog = Arc::clone(&self.proxy_catalog);
+                self.recompute_tags();
+            }
+            return;
+        }
+        let merged = merged_catalog(&self.proxy_catalog, &self.hubcap_catalog);
+        if merged != *self.catalog {
+            self.catalog = Arc::new(merged);
+            self.recompute_tags();
+        }
+    }
+
+    /// Fetches Hubcap's library once a day while a key is saved; it costs nothing of the allowance.
+    fn start_hubcap_catalog_refresh(&mut self, force: bool) {
+        let Some(key) = self.hubcap_key.clone() else {
+            return;
+        };
+        if self.hubcap_catalog_receiver.is_some() {
+            return;
+        }
+        let marker = self.paths.cache_dir().join("hubcap-library.marker");
+        if !force
+            && !self.hubcap_catalog.is_empty()
+            && refresh_marker_is_current(&marker, HUBCAP_CATALOG_MARKER, HUBCAP_CATALOG_REFRESH)
+        {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        self.hubcap_catalog_receiver = Some(receiver);
+        std::thread::spawn(move || {
+            let result = HubcapClient::new(&key)
+                .and_then(|hubcap| hubcap.library())
+                .map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+    }
+
+    fn poll_hubcap_catalog(&mut self) {
+        let Some(receiver) = self.hubcap_catalog_receiver.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(result) => {
+                self.hubcap_catalog_receiver = None;
+                match result {
+                    // A key removed while the list loaded: it is not wanted any more.
+                    Ok(_) if self.hubcap_key.is_none() => {}
+                    Ok(apps) => {
+                        let _ = save_hubcap_catalog(&self.paths.cache_dir(), &apps);
+                        self.hubcap_catalog = Arc::new(apps);
+                        self.apply_catalog();
+                    }
+                    Err(error) => {
+                        self.status = format!("Hubcap Manifest's game list could not be loaded: {error}");
+                        self.status_error = true;
+                    }
+                }
+            }
+            Err(TryRecvError::Disconnected) => self.hubcap_catalog_receiver = None,
+            Err(TryRecvError::Empty) => {}
+        }
+    }
+
+    /// Checks a Hubcap key with Hubcap — the one being added (`Some`), or else the saved one, for the
+    /// line in Settings. Asking what is left of the day costs nothing.
+    fn start_hubcap_check(&mut self, adding: Option<String>) {
+        let Some(key) = adding.clone().or_else(|| self.hubcap_key.clone()) else {
+            return;
+        };
+        if self.hubcap_check.is_some() {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        self.hubcap_check = Some(receiver);
+        std::thread::spawn(move || {
+            let result = HubcapClient::new(&key)
+                .and_then(|hubcap| hubcap.usage())
+                .map_err(|error| error.to_string());
+            let _ = sender.send((adding, result));
+        });
+    }
+
+    fn poll_hubcap_check(&mut self) {
+        let Some(receiver) = self.hubcap_check.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok((adding, result)) => {
+                self.hubcap_check = None;
+                match (adding, result) {
+                    (Some(key), Ok(usage)) => {
+                        let path = drydock_core::hubcap::key_path(&self.paths.settings_dir());
+                        if let Err(error) = drydock_core::hubcap::save_key(&path, &key) {
+                            self.status = format!("The Hubcap Manifest key could not be saved: {error}");
+                            self.status_error = true;
+                            return;
+                        }
+                        self.hubcap_key = Some(key);
+                        self.hubcap_key_draft.clear();
+                        self.hubcap_usage = Some(Ok(usage));
+                        self.status = format!(
+                            "Hubcap Manifest key saved — {} of {} downloads left today",
+                            usage.remaining, usage.limit
+                        );
+                        self.status_error = false;
+                        self.start_hubcap_catalog_refresh(true);
+                    }
+                    (Some(_), Err(error)) => {
+                        self.status = format!("The key was not saved: {error}");
+                        self.status_error = true;
+                    }
+                    (None, result) => self.hubcap_usage = Some(result),
+                }
+            }
+            Err(TryRecvError::Disconnected) => self.hubcap_check = None,
+            Err(TryRecvError::Empty) => {}
+        }
+    }
+
+    /// Forgets the Hubcap key; the games only Hubcap has leave the catalogue with it.
+    fn remove_hubcap_key(&mut self) {
+        drydock_core::hubcap::forget_key(&drydock_core::hubcap::key_path(&self.paths.settings_dir()));
+        self.hubcap_key = None;
+        self.hubcap_usage = None;
+        self.hubcap_catalog = Arc::new(Vec::new());
+        self.apply_catalog();
+        self.status = "Hubcap Manifest key removed".into();
+        self.status_error = false;
+    }
+
+    /// The HUBCAP MANIFEST panel in Settings: add, check or remove the key.
+    fn hubcap_controls(&mut self, ui: &mut egui::Ui) {
+        section_label(ui, "HUBCAP MANIFEST");
+        ui.add_space(8.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(branded!(
+                    "With your own API key from hubcapmanifest.com, HUBCAPMANIFEST becomes a source you can \
+                     pick when you add or download a game, and the games only Hubcap has join the Store. The \
+                     key stays on this computer and is never sent to the {product} server."
+                ))
+                .size(11.0)
+                .color(MUTED),
+            )
+            .wrap(),
+        );
+        ui.add_space(10.0);
+        if self.hubcap_key.is_some() {
+            if self.hubcap_usage.is_none() && self.hubcap_check.is_none() {
+                self.start_hubcap_check(None);
+            }
+            let (text, color) = match &self.hubcap_usage {
+                Some(Ok(usage)) => (
+                    format!(
+                        "Key saved · {} of {} downloads left today",
+                        usage.remaining, usage.limit
+                    ),
+                    VERDIGRIS,
+                ),
+                Some(Err(error)) => (format!("Key saved · {error}"), AMBER),
+                None => ("Key saved · checking…".to_owned(), MUTED),
+            };
+            ui.label(RichText::new(text).size(12.0).color(color));
+            ui.add_space(8.0);
+            if ui
+                .add(ghost_button("REMOVE KEY"))
+                .on_hover_text("Forget the key on this computer")
+                .clicked()
+            {
+                self.remove_hubcap_key();
+            }
+        } else {
+            let checking = self.hubcap_check.is_some();
+            ui.add_sized(
+                [ui.available_width(), 42.0],
+                egui::TextEdit::singleline(&mut self.hubcap_key_draft)
+                    .password(true)
+                    .hint_text("Your Hubcap Manifest API key")
+                    .margin(egui::Margin::symmetric(12, 10)),
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let ready = !checking && !self.hubcap_key_draft.trim().is_empty();
+                if ui
+                    .add_enabled(ready, primary_button("SAVE KEY"))
+                    .on_hover_text("Checks the key with Hubcap Manifest, then keeps it")
+                    .clicked()
+                {
+                    let key = self.hubcap_key_draft.trim().to_owned();
+                    self.start_hubcap_check(Some(key));
+                }
+                if checking {
+                    ui.add(egui::Spinner::new().size(16.0).color(ACCENT));
+                    ui.label(RichText::new("Checking the key…").size(11.5).color(MUTED));
+                }
+            });
+        }
+    }
+
+    /// Opens the source picker for an add or a download; the lookup of who has the game starts at
+    /// once, and "Automatic" can be picked before it answers.
+    fn open_source_picker(&mut self, app_id: u32, name: String, action: SourceAction) {
+        let (sender, receiver) = mpsc::channel();
+        let hubcap_key = self.hubcap_key.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(source_report(app_id, hubcap_key));
+        });
+        self.source_picker = Some(SourcePicker {
+            app_id,
+            name,
+            action,
+            choice: None,
+            report: None,
+            receiver: Some(receiver),
+        });
+    }
+
+    fn poll_source_picker(&mut self) {
+        let Some(picker) = self.source_picker.as_mut() else {
+            return;
+        };
+        let Some(receiver) = picker.receiver.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(report) => {
+                picker.receiver = None;
+                picker.report = Some(report);
+            }
+            Err(TryRecvError::Disconnected) => picker.receiver = None,
+            Err(TryRecvError::Empty) => {}
+        }
+    }
+
+    /// The source picker: "Automatic" and every source with how current it is, then the action.
+    fn source_picker_window(&mut self, context: &egui::Context) {
+        let has_key = self.hubcap_key.is_some();
+        let Some(picker) = self.source_picker.as_mut() else {
+            return;
+        };
+        let mut confirm = false;
+        let mut cancel = false;
+        let response = egui::Modal::new(egui::Id::new("source_picker"))
+            .backdrop_color(scrim(170))
+            .frame(dialog_frame())
+            .show(context, |ui| {
+                ui.set_width(500.0);
+                ui.spacing_mut().item_spacing.y = 8.0;
+                ui.label(
+                    RichText::new("CHOOSE A SOURCE")
+                        .size(9.5)
+                        .extra_letter_spacing(2.0)
+                        .color(ACCENT),
+                );
+                ui.add(
+                    egui::Label::new(RichText::new(&picker.name).font(strong_font(20.0)).color(TEXT)).wrap(),
+                );
+                ui.label(
+                    RichText::new("Where the unlock Lua and the depot manifests come from.")
+                        .size(11.5)
+                        .color(MUTED),
+                );
+                ui.add_space(6.0);
+                let automatic = picker.report.as_ref().map_or_else(
+                    || "The server picks, in its own order".to_owned(),
+                    |report| automatic_note(&report.rows),
+                );
+                if source_option(
+                    ui,
+                    picker.choice.is_none(),
+                    "AUTOMATIC",
+                    &automatic,
+                    NoteTone::Neutral,
+                    true,
+                )
+                .clicked()
+                {
+                    picker.choice = None;
+                }
+                match &picker.report {
+                    None => {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new().size(16.0).color(ACCENT));
+                            ui.label(
+                                RichText::new("Checking which sources have this game…")
+                                    .size(11.5)
+                                    .color(MUTED),
+                            );
+                        });
+                    }
+                    Some(report) => {
+                        for row in &report.rows {
+                            let (note, tone, enabled) = source_note(row, report.steam_build);
+                            let selected = picker.choice == Some(row.source);
+                            if source_option(ui, selected, row.source.label(), &note, tone, enabled).clicked()
+                                && enabled
+                            {
+                                picker.choice = Some(row.source);
+                            }
+                        }
+                        if !has_key {
+                            source_option(
+                                ui,
+                                false,
+                                DepotSource::Hubcap.label(),
+                                "Add your API key in Settings to use it",
+                                NoteTone::Neutral,
+                                false,
+                            );
+                        }
+                        for problem in &report.problems {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(format!("⚠ {problem}")).size(11.0).color(AMBER),
+                                )
+                                .wrap(),
+                            );
+                        }
+                    }
+                }
+                ui.add_space(12.0);
+                let label = match picker.action {
+                    SourceAction::AddToSteam => "ADD TO STEAM",
+                    SourceAction::Download => "DOWNLOAD",
+                };
+                ui.allocate_ui_with_layout(
+                    Vec2::new(ui.available_width(), 34.0),
+                    Layout::right_to_left(Align::Center),
+                    |ui| {
+                        confirm = ui
+                            .add(primary_button(label).min_size(Vec2::new(130.0, 34.0)))
+                            .clicked();
+                        ui.add_space(8.0);
+                        cancel = ui
+                            .add(ghost_button("CANCEL").min_size(Vec2::new(110.0, 34.0)))
+                            .clicked();
+                    },
+                );
+            });
+        if confirm && let Some(picker) = self.source_picker.take() {
+            match picker.action {
+                SourceAction::AddToSteam => self.add_app_to_steam(picker.app_id, picker.choice),
+                SourceAction::Download => {
+                    self.enqueue_download(picker.app_id, picker.name, false, picker.choice);
+                }
+            }
+        } else if cancel || response.should_close() {
+            self.source_picker = None;
+        }
+    }
+
     /// Forces a game-list refresh from the Settings button, subject to the rate limiter.
     fn force_catalog_refresh(&mut self) {
         if self.catalog_receiver.is_some() {
@@ -1092,11 +1728,12 @@ impl DrydockApp {
                 if let Ok(apps) = result
                     && !apps.is_empty()
                 {
-                    let changed = apps != *self.catalog;
-                    self.catalog = Arc::new(apps);
-                    self.recompute_tags();
+                    let changed = apps != *self.proxy_catalog;
+                    self.proxy_catalog = Arc::new(apps);
+                    self.apply_catalog();
+                    // The proxy's list alone is cached: Hubcap's is kept apart, and goes with its key.
                     if let Err(error) =
-                        save_catalog_apps(&self.paths.cache_dir().join("games.json"), &self.catalog)
+                        save_catalog_apps(&self.paths.cache_dir().join("games.json"), &self.proxy_catalog)
                     {
                         self.status = format!("The refreshed game list could not be cached: {error}");
                         self.status_error = true;
@@ -1555,12 +2192,17 @@ impl DrydockApp {
             return;
         }
         let name = self.app_display_name(app_id);
-        let cracked = self
-            .settings
-            .installed_games
-            .get(&app_id)
-            .is_some_and(|game| game.cracked);
-        self.spawn_job(app_id, name, DownloadKind::Verify, cracked, Some(root.clone()));
+        let installed = self.settings.installed_games.get(&app_id);
+        let cracked = installed.is_some_and(|game| game.cracked);
+        let source = installed.and_then(|game| DepotSource::from_key(&game.source));
+        self.spawn_job(
+            app_id,
+            name,
+            DownloadKind::Verify,
+            cracked,
+            source,
+            Some(root.clone()),
+        );
         self.activation_verify = Some((app_id, root));
         self.status = "Verifying the game files before activation…".into();
         self.status_error = false;
@@ -1865,6 +2507,7 @@ impl DrydockApp {
         name: String,
         kind: DownloadKind,
         cracked: bool,
+        source: Option<DepotSource>,
         root: Option<PathBuf>,
     ) {
         let steam_root = self.steam.root.clone();
@@ -1890,12 +2533,18 @@ impl DrydockApp {
         let thread_state = Arc::clone(&state);
         let (sender, receiver) = mpsc::channel();
         let job_name = name.clone();
+        let hubcap_key = self
+            .hubcap_key
+            .clone()
+            .filter(|_| source == Some(DepotSource::Hubcap));
         std::thread::spawn(move || {
             let result = run_depot_job(
                 app_id,
                 &job_name,
                 kind,
                 cracked,
+                source,
+                hubcap_key,
                 steam_root,
                 installed_dir,
                 games_directory,
@@ -1913,6 +2562,7 @@ impl DrydockApp {
             name,
             kind,
             cracked,
+            source,
             cancel,
             state,
             receiver,
@@ -1955,7 +2605,7 @@ impl DrydockApp {
     /// Adds a game to the persistent download queue and starts it when nothing else is downloading.
     /// A game already in the queue isn't added twice. `cracked` asks for the build the game's fix is
     /// made for instead of the latest one.
-    fn enqueue_download(&mut self, app_id: u32, name: String, cracked: bool) {
+    fn enqueue_download(&mut self, app_id: u32, name: String, cracked: bool, source: Option<DepotSource>) {
         let busy = self.download_running() || self.download_paused;
         let effect = download_queue::enqueue(
             &mut self.settings.download_queue,
@@ -1963,6 +2613,7 @@ impl DrydockApp {
                 app_id,
                 name: name.clone(),
                 cracked,
+                source: source.map_or_else(String::new, |source| source.key().to_owned()),
             },
             busy,
         );
@@ -1996,6 +2647,7 @@ impl DrydockApp {
             front.name.clone(),
             DownloadKind::Download,
             front.cracked,
+            DepotSource::from_key(&front.source),
             None,
         );
         self.status = if front.cracked {
@@ -2013,13 +2665,12 @@ impl DrydockApp {
             self.status_error = true;
             return;
         }
-        // A cracked install is checked against the build it is, not the latest.
-        let cracked = self
-            .settings
-            .installed_games
-            .get(&app_id)
-            .is_some_and(|game| game.cracked);
-        self.spawn_job(app_id, name, DownloadKind::Verify, cracked, None);
+        // A cracked install is checked against the build it is, not the latest, and one from a picked
+        // source against that source's.
+        let installed = self.settings.installed_games.get(&app_id);
+        let cracked = installed.is_some_and(|game| game.cracked);
+        let source = installed.and_then(|game| DepotSource::from_key(&game.source));
+        self.spawn_job(app_id, name, DownloadKind::Verify, cracked, source, None);
         self.status = "Verifying files…".into();
         self.status_error = false;
     }
@@ -2223,6 +2874,7 @@ impl DrydockApp {
                         job.name.clone(),
                         job.install_root.clone(),
                         job.cracked,
+                        job.source,
                     )
                 });
                 self.download_job = None; // the download thread has ended
@@ -2231,13 +2883,14 @@ impl DrydockApp {
                         // Completed: drop it from the queue by App ID (robust to reordering) and register
                         // it in the Drydock library in one saved change, then resume the next one.
                         let mut unsaved = None;
-                        if let Some((id, name, Some(root), cracked)) = finished_game {
+                        if let Some((id, name, Some(root), cracked, source)) = finished_game {
                             drydock_core::download_queue::register_completed(
                                 &mut self.settings,
                                 id,
                                 &name,
                                 &root,
                                 cracked,
+                                source.map_or("", DepotSource::key),
                             );
                             // The cracked build is only half of it: its fix goes on next, by itself.
                             if cracked && BRAND.features.denuvo_fix {
@@ -2558,7 +3211,9 @@ impl DrydockApp {
 
     /// Downloads and installs the Lua unlock files for `app_id`. Steam is not restarted — the Steam
     /// Service picks the Lua up on its own.
-    fn add_app_to_steam(&mut self, app_id: u32) {
+    /// Adds the app's unlock and depot manifests to Steam, from `source` (the proxy's choice when
+    /// `None`).
+    fn add_app_to_steam(&mut self, app_id: u32, source: Option<DepotSource>) {
         let Some(root) = self.steam_root_or_error("Steam was not found. Select its folder in Settings.")
         else {
             return;
@@ -2579,12 +3234,27 @@ impl DrydockApp {
         self.service_receiver = Some(receiver);
         // Naming the second half matters: fetching the depot package is the slow part (the upstream
         // builds it on demand), so without this the button looks stuck on a large title.
-        self.busy_label = Some(format!("Adding {name} to Steam and caching its manifests…"));
+        self.busy_label = Some(match source {
+            Some(source) => format!(
+                "Adding {name} to Steam from {} and caching its manifests…",
+                source.label()
+            ),
+            None => format!("Adding {name} to Steam and caching its manifests…"),
+        });
         let store = self.payload_store.clone();
         let writes = Arc::clone(&self.unlock_writes);
+        let hubcap_key = self
+            .hubcap_key
+            .clone()
+            .filter(|_| source == Some(DepotSource::Hubcap));
         std::thread::spawn(move || {
             let result = (|| {
                 let client = ProxyClient::new().map_err(|error| error.to_string())?;
+                let hubcap = hubcap_key
+                    .as_deref()
+                    .map(HubcapClient::new)
+                    .transpose()
+                    .map_err(|error| error.to_string())?;
                 // Re-check the Steam Service is current before touching the plug-in folder.
                 let manifest = OpenSteamTool::new()
                     .and_then(|ost| ost.manifest())
@@ -2597,16 +3267,31 @@ impl DrydockApp {
                 // active and pin exactly those GIDs. The Lua API answers for the *current* build
                 // instead, with the pins commented out — Steam then resolves a build of its own
                 // choosing and the manifests cached here are never the ones it asks for.
-                let depot = DepotData::fetch(&client, app_id);
+                let depot = drydock_core::sources::depot_data(
+                    &client,
+                    hubcap.as_ref(),
+                    app_id,
+                    source,
+                    &AtomicBool::new(false),
+                );
                 let (file_name, bytes, manifests) = match &depot {
                     Ok(data) if data.lua.is_some() => {
                         let (name, bytes) = data.lua.clone().expect("checked above");
                         (name, bytes, Ok(&data.raw_manifests))
                     }
                     // No package, or one without a Lua: fall back to the Lua API so the app can
-                    // still be unlocked, and say so — that unlock is not pinned to a build.
+                    // still be unlocked, and say so — that unlock is not pinned to a build. Hubcap has
+                    // no Lua of its own outside its package.
                     other => {
-                        let bytes = client.download_lua(app_id).map_err(|error| error.to_string())?;
+                        if source == Some(DepotSource::Hubcap) {
+                            return Err(match other {
+                                Err(error) => error.to_string(),
+                                Ok(_) => "Hubcap Manifest's package carried no unlock Lua".to_owned(),
+                            });
+                        }
+                        let bytes = client
+                            .download_lua_from(app_id, source.map(DepotSource::key))
+                            .map_err(|error| error.to_string())?;
                         let error = match other {
                             Err(error) => error.to_string(),
                             Ok(_) => "the depot package carried no unlock Lua".to_owned(),
@@ -4545,7 +5230,10 @@ impl DrydockApp {
             Some(LibraryAction::Launch(app_id)) => self.launch_library_game(app_id),
             Some(LibraryAction::SetExe(app_id)) => self.set_library_launch_path(app_id),
             Some(LibraryAction::InstallSteam(app_id)) => self.install_steam_game(app_id),
-            Some(LibraryAction::UpdateLua(app_id)) => self.add_app_to_steam(app_id),
+            Some(LibraryAction::UpdateLua(app_id)) => {
+                let name = self.app_display_name(app_id);
+                self.open_source_picker(app_id, name, SourceAction::AddToSteam);
+            }
             Some(LibraryAction::RemoveLua(app_id)) => self.remove_lua_confirmed(app_id),
             Some(LibraryAction::VerifyDrydock(app_id)) => {
                 let name = self.app_display_name(app_id);
@@ -4553,13 +5241,11 @@ impl DrydockApp {
             }
             Some(LibraryAction::UpdateDrydock(app_id)) => {
                 let name = self.app_display_name(app_id);
-                self.enqueue_download(app_id, name, false);
-                self.status = format!("Checking {} for updates…", self.app_display_name(app_id));
-                self.status_error = false;
+                self.open_source_picker(app_id, name, SourceAction::Download);
             }
             Some(LibraryAction::DownloadCracked(app_id)) => {
                 let name = self.app_display_name(app_id);
-                self.enqueue_download(app_id, name, true);
+                self.enqueue_download(app_id, name, true, None);
             }
             Some(LibraryAction::ApplyFix(app_id)) => self.apply_fix_for(app_id),
             Some(LibraryAction::CrackDrydock(app_id)) => self.crack_drydock_game(app_id),
@@ -5047,6 +5733,7 @@ impl DrydockApp {
                                 name: outcome.name.clone(),
                                 install_dir: outcome.root.display().to_string(),
                                 cracked: false,
+                                source: String::new(),
                             },
                         );
                         self.settings
@@ -5346,7 +6033,9 @@ impl DrydockApp {
     fn perform_details_action(&mut self, app_id: u32, name: &str, action: DetailsAction) {
         match action {
             DetailsAction::None => {}
-            DetailsAction::AddToSteam => self.add_app_to_steam(app_id),
+            DetailsAction::AddToSteam => {
+                self.open_source_picker(app_id, name.to_owned(), SourceAction::AddToSteam)
+            }
             DetailsAction::AddCracked => self.add_cracked_to_steam(app_id),
             DetailsAction::AddOwn => self.add_own_unlock(Some(app_id)),
             DetailsAction::RemoveFromSteam => self.remove_app_from_steam(app_id),
@@ -5354,8 +6043,10 @@ impl DrydockApp {
             DetailsAction::ApplyFix => self.apply_fix_for(app_id),
             DetailsAction::Download(index) => self.open_repack_source(app_id, index),
             DetailsAction::Activate => self.go_to_activation(app_id),
-            DetailsAction::DepotDownload => self.enqueue_download(app_id, name.to_owned(), false),
-            DetailsAction::DepotDownloadCracked => self.enqueue_download(app_id, name.to_owned(), true),
+            DetailsAction::DepotDownload => {
+                self.open_source_picker(app_id, name.to_owned(), SourceAction::Download)
+            }
+            DetailsAction::DepotDownloadCracked => self.enqueue_download(app_id, name.to_owned(), true, None),
             DetailsAction::DepotVerify => self.start_verify(app_id, name.to_owned()),
         }
     }
@@ -6289,6 +6980,8 @@ impl DrydockApp {
                 });
                 ui.add_space(16.0);
             }
+            panel(ui, |ui| self.hubcap_controls(ui));
+            ui.add_space(16.0);
             // Where Drydock installs the games it downloads itself. Empty keeps the old behaviour
             // (Steam's own library), so an existing setup is unaffected until the user picks a folder.
             panel(ui, |ui| {
@@ -7216,6 +7909,7 @@ impl DrydockApp {
         }
         self.online_work_started = true;
         self.start_catalog_refresh(false);
+        self.start_hubcap_catalog_refresh(false);
         self.start_fixes_refresh();
         self.start_repacks_refresh();
         self.refresh_service_status();
@@ -7776,7 +8470,7 @@ impl DrydockApp {
 #[cfg(feature = "screenshot")]
 impl DrydockApp {
     /// Ordered pages the screenshot harness walks through (see [`crate::screenshot`]).
-    pub const SCREENSHOT_PAGES: [&'static str; 24] = [
+    pub const SCREENSHOT_PAGES: [&'static str; 25] = [
         "home",
         "home-list",
         "new-releases",
@@ -7798,6 +8492,7 @@ impl DrydockApp {
         "guide-fixes",
         "downloads",
         // Last: the dialogs stay open over whatever comes after them.
+        "source-picker",
         "about",
         "update",
         "login",
@@ -7811,6 +8506,9 @@ impl DrydockApp {
         self.store_view = StoreView::from_settings(key.ends_with("-list"));
         // Matched in memory, so a screenshot run never saves its layout over the user's choice.
         self.settings.store_list_view = self.store_view.is_list();
+        if key != "source-picker" {
+            self.source_picker = None;
+        }
         if let Ok(mut open) = SCREENSHOT_OPEN_MENU.lock() {
             *open = (key == "details-fix-menu").then_some("depot_download");
         }
@@ -7852,6 +8550,32 @@ impl DrydockApp {
                 } else {
                     self.page = Page::Details;
                 }
+            }
+            "source-picker" => {
+                // The picker as a download of a game every provider has, Ryu picked, no Hubcap key.
+                let row = |source, listed, updated| SourceRow {
+                    source,
+                    listed,
+                    updated,
+                    needs_update: false,
+                };
+                self.source_picker = Some(SourcePicker {
+                    app_id: 730,
+                    name: "Counter-Strike 2".into(),
+                    action: SourceAction::Download,
+                    choice: Some(DepotSource::Ryu),
+                    report: Some(SourceReport {
+                        rows: vec![
+                            row(DepotSource::DepotBox, Some(true), None),
+                            row(DepotSource::SteamTools, None, None),
+                            row(DepotSource::Ryu, Some(true), Some(1_791_590_400)),
+                        ],
+                        steam_build: Some(1_791_486_413),
+                        problems: Vec::new(),
+                    }),
+                    receiver: None,
+                });
+                self.hubcap_key = None;
             }
             "details-fix" | "details-fix-menu" if BRAND.features.uses_fix_list() => {
                 // A game with a fix: the installed game from "details", given a stand-in fix unless
@@ -7947,6 +8671,7 @@ impl DrydockApp {
                     name: "The Blood of Dawnwalker".into(),
                     kind: DownloadKind::Download,
                     cracked: false,
+                    source: None,
                     cancel: Arc::new(AtomicBool::new(false)),
                     state: Arc::new(AtomicU8::new(crate::downloads::JOB_RUNNING)),
                     receiver,
@@ -7981,6 +8706,9 @@ impl eframe::App for DrydockApp {
         self.poll_background_action();
         self.apply_pending_fix();
         self.poll_catalog_refresh();
+        self.poll_hubcap_catalog();
+        self.poll_hubcap_check();
+        self.poll_source_picker();
         self.poll_search_index();
         self.poll_denuvo_refresh();
         self.poll_fixes_refresh();
@@ -8142,6 +8870,7 @@ impl eframe::App for DrydockApp {
         self.crack_removal_window(&context);
         self.entitlement_success_window(&context);
         self.about_window(&context);
+        self.source_picker_window(&context);
         self.update_prompt_window(&context);
         self.busy_overlay(&context);
     }
@@ -12742,6 +13471,103 @@ mod ui_tests {
                 "{view:?} lost its details action"
             );
         }
+    }
+
+    #[test]
+    fn each_source_says_how_current_it_is() {
+        let row = |source, listed, updated, needs_update| SourceRow {
+            source,
+            listed,
+            updated,
+            needs_update,
+        };
+        let steam_build = Some(1_791_486_413); // 08 Oct 2026
+        let note = |row: SourceRow| source_note(&row, steam_build);
+
+        assert_eq!(
+            note(row(DepotSource::Ryu, Some(false), None, false)),
+            ("Not available for this game".to_owned(), NoteTone::Neutral, false)
+        );
+        assert_eq!(
+            note(row(DepotSource::DepotBox, Some(true), None, false)).1,
+            NoteTone::Current
+        );
+        assert_eq!(
+            note(row(DepotSource::SteamTools, None, None, false)),
+            ("No date given".to_owned(), NoteTone::Neutral, true)
+        );
+        let (text, tone, _) = note(row(DepotSource::Ryu, Some(true), Some(1_791_590_400), false));
+        assert_eq!(tone, NoteTone::Current, "{text}");
+        assert!(text.starts_with("Updated 10 Oct 2026 — current"), "{text}");
+        let (text, tone, _) = note(row(DepotSource::Ryu, Some(true), Some(1_788_000_000), false));
+        assert_eq!(tone, NoteTone::Outdated);
+        assert!(
+            text.contains("older than Steam's build from 08 Oct 2026"),
+            "{text}"
+        );
+        // Hubcap's own verdict wins over the dates.
+        assert_eq!(
+            note(row(DepotSource::Hubcap, Some(true), Some(1_791_590_400), true)).1,
+            NoteTone::Outdated
+        );
+        assert_eq!(
+            note(row(DepotSource::Hubcap, None, None, false)).0,
+            "Could not be checked"
+        );
+        // Without Steam's build date there is nothing to compare with.
+        assert_eq!(
+            source_note(
+                &row(DepotSource::Ryu, Some(true), Some(1_791_590_400), false),
+                None
+            ),
+            ("Updated 10 Oct 2026".to_owned(), NoteTone::Neutral, true)
+        );
+    }
+
+    #[test]
+    fn automatic_names_the_servers_order_without_hubcap() {
+        let rows: Vec<SourceRow> = [
+            DepotSource::DepotBox,
+            DepotSource::SteamTools,
+            DepotSource::Ryu,
+            DepotSource::Hubcap,
+        ]
+        .into_iter()
+        .map(|source| SourceRow {
+            source,
+            listed: None,
+            updated: None,
+            needs_update: false,
+        })
+        .collect();
+        assert_eq!(
+            automatic_note(&rows),
+            "The first that has it: DEPOTBOX → STEAMTOOLS → RYU"
+        );
+        assert_eq!(automatic_note(&[]), "The server picks, in its own order");
+    }
+
+    #[test]
+    fn hubcaps_library_only_adds_what_the_proxy_lacks() {
+        let app = |app_id, name: &str, tags: Vec<String>| CatalogApp {
+            app_id,
+            name: name.to_owned(),
+            drm: false,
+            tags,
+        };
+        let proxy = vec![
+            app(730, "Counter-Strike 2", vec!["Action".into()]),
+            app(10, "Counter-Strike", vec![]),
+        ];
+        let hubcap = vec![
+            (730, "CS2 (Hubcap's name)".to_owned()),
+            (5, "alpha".to_owned()),
+            (5, "duplicate".to_owned()),
+        ];
+        let merged = merged_catalog(&proxy, &hubcap);
+        let names: Vec<&str> = merged.iter().map(|app| app.name.as_str()).collect();
+        assert_eq!(names, ["alpha", "Counter-Strike", "Counter-Strike 2"]);
+        assert_eq!(merged[2].tags, ["Action"], "the proxy's entry is kept as it is");
     }
 
     #[test]

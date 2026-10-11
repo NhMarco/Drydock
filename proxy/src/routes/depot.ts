@@ -2,50 +2,36 @@
 // Drydock needs to download game files itself. The private upstream API keys stay server-side;
 // clients authenticate with the Drydock HMAC hook.
 //
-//   GET /v1/depot/package/:appid -> application/zip (streamed)
+//   GET /v1/depot/package/:appid                 -> application/zip (streamed)
+//   GET /v1/depot/package/:appid?source=<name>   -> the same, from that provider only
 //
 // The package can come from any of several upstreams — Ryu (`secure_download`), DepotBox
-// (`direct-download`), SteamTools (`manifest`) or Hubcap (`api/v1/manifest`) — each returning a
-// manifests+keys ZIP. The set and order are configured in `PROVIDER_SOURCES` (see config.ts): the
-// route tries the enabled sources in order and caches the first real ZIP archive one returns. A
-// source that answers with anything else, or that is rate limited, is skipped. The response carries
-// `X-Depot-Source` naming which upstream served it. Disabling a source is purely config — the code
-// path stays wired so it can be switched back on without a rebuild.
-//
-// Hubcap is a **day-limited** source (a handful of manifest downloads per day), so it sits apart
-// from that order:
-//
-//   * it is asked only after every ordinary provider failed, wherever it is listed;
-//   * it is not asked at all while a copy of that app is on disk, however old, or while its
-//     allowance is down to the configured reserve;
-//   * what it does serve is **kept**: that cache entry outlives the TTL and the sweep, so the app
-//     stays downloadable without spending the allowance again. The moment an ordinary provider
-//     serves the same app, its package replaces the kept one and normal 24h caching resumes.
-//
-// `X-Cache` says which of the three a response came from: `MISS` (fetched now), `HIT` (cached
-// normally) or `KEPT` (the retained copy from a day-limited source).
+// (`direct-download`) or SteamTools (`manifest`) — each returning a manifests+keys ZIP. The set and
+// order are configured in `PROVIDER_SOURCES` (see config.ts): without `source` the route tries the
+// enabled providers in order and caches the first real ZIP archive one returns; a source that answers
+// with anything else, or that is rate limited, is skipped. With `source` the user picked the provider
+// in the app, so only that one is asked (and cached apart). The response carries `X-Depot-Source`
+// naming which upstream served it and `X-Cache` saying whether it came from the cache.
 //
 // The `.lua` in a package loses the provider's comments and gets Drydock's header (luaClean.ts)
 // before it is cached, so every client gets the same clean file whichever provider served it.
 
 import { Readable } from "node:stream";
 import type { FastifyInstance, FastifyBaseLogger, FastifyReply, preHandlerHookHandler } from "fastify";
-import { isLastResort, orderedSources, type DepotPackageSourceName } from "../config.js";
+import type { DepotPackageSourceName } from "../config.js";
 import { UpstreamError, type SteamToolsClient } from "../upstream.js";
 import type { DepotBoxClient, RawStream } from "../depotbox.js";
 import type { RyuClient } from "../ryu.js";
-import type { HubcapClient } from "../hubcap.js";
 import type { CacheHit, FileCache } from "../fileCache.js";
 import type { ProviderCooldown } from "../merged.js";
 import { MAXIMUM_PACKAGE_BYTES, requireZip } from "../packageCheck.js";
 import { cleanPackageLuas } from "../luaClean.js";
-import { clientKey } from "../auth.js";
 
 const APPID_PATTERN = /^[0-9]{1,10}$/;
 
 // A package cached before this process started may predate Lua cleaning. Such a copy is cleaned as
 // it is served — cleaning is idempotent, so one already clean passes unchanged — until a fresh fetch
-// replaces it (within a day, or for a kept copy whenever an ordinary provider has the app again).
+// replaces it within a day.
 const STARTED_AT = Date.now();
 
 async function collect(stream: NodeJS.ReadableStream): Promise<Buffer> {
@@ -58,50 +44,18 @@ async function collect(stream: NodeJS.ReadableStream): Promise<Buffer> {
 interface PackageSource {
   name: DepotPackageSourceName;
   fetch: (appid: string) => Promise<RawStream>;
-  /** Day-limited: only asked once everything else failed, and what it serves is kept (see below). */
-  lastResort: boolean;
-  /** Whether its allowance permits a request right now. */
-  allowed: () => Promise<boolean>;
 }
 
 export interface DepotLimits {
   /** Packages one client may ask for per window. */
   rateMax: number;
   rateWindowMs: number;
-  /**
-   * Requests to a day-limited source (Hubcap) one client may cause per UTC day; 0 for no cap. The
-   * allowance is shared by everyone, and without this a single client could spend all of it.
-   */
-  lastResortPerClientDaily: number;
-}
-
-/** Counts per client and UTC day, starting over at midnight. */
-class DailyBudget {
-  private day = "";
-  private readonly used = new Map<string, number>();
-
-  constructor(private readonly perClient: number) {}
-
-  /** Whether `key` may spend one more today; spends it if so. */
-  take(key: string): boolean {
-    if (this.perClient <= 0) return true;
-    const today = new Date().toISOString().slice(0, 10);
-    if (today !== this.day) {
-      this.day = today;
-      this.used.clear();
-    }
-    const spent = this.used.get(key) ?? 0;
-    if (spent >= this.perClient) return false;
-    this.used.set(key, spent + 1);
-    return true;
-  }
 }
 
 export interface DepotUpstreams {
   ryu: RyuClient;
   depotbox: DepotBoxClient;
   steamtools: SteamToolsClient;
-  hubcap: HubcapClient;
 }
 
 export function registerDepotRoutes(
@@ -111,36 +65,19 @@ export function registerDepotRoutes(
   cache: FileCache,
   authHook: preHandlerHookHandler,
   cooldown: ProviderCooldown,
-  limits: DepotLimits = { rateMax: 20, rateWindowMs: 60_000, lastResortPerClientDaily: 0 },
+  limits: DepotLimits = { rateMax: 20, rateWindowMs: 60_000 },
 ): void {
-  const lastResortBudget = new DailyBudget(limits.lastResortPerClientDaily);
   // Map each configured source name to its fetch function, preserving the configured order. Sources
   // that aren't enabled simply aren't in this list.
   const factories: Record<DepotPackageSourceName, PackageSource["fetch"]> = {
     ryu: (appid) => upstreams.ryu.downloadDepotPackage(appid),
     depotbox: (appid) => upstreams.depotbox.downloadDepotPackage(appid),
     steamtools: (appid) => upstreams.steamtools.downloadManifestZip(appid),
-    hubcap: (appid) => upstreams.hubcap.downloadDepotPackage(appid),
   };
-  const allowances: Partial<Record<DepotPackageSourceName, () => Promise<boolean>>> = {
-    hubcap: () => upstreams.hubcap.hasAllowance(),
-  };
-  // Day-limited sources go to the back whatever order they were configured in.
-  const ordered = orderedSources(enabledSources);
-  const sources: PackageSource[] = ordered.map((name) => ({
-    name,
-    fetch: factories[name],
-    lastResort: isLastResort(name),
-    allowed: allowances[name] ?? (async () => true),
-  }));
-  const normalSources = sources.filter((source) => !source.lastResort);
-  const lastResortSources = sources.filter((source) => source.lastResort);
-  app.log.info(
-    { sources: ordered, lastResort: lastResortSources.map((source) => source.name) },
-    "Depot package sources enabled.",
-  );
+  const sources: PackageSource[] = enabledSources.map((name) => ({ name, fetch: factories[name] }));
+  app.log.info({ sources: enabledSources }, "Depot package sources enabled.");
 
-  app.get<{ Params: { appid: string } }>(
+  app.get<{ Params: { appid: string }; Querystring: { source?: string } }>(
     "/v1/depot/package/:appid",
     { preHandler: authHook, config: { rateLimit: { max: limits.rateMax, timeWindow: limits.rateWindowMs } } },
     async (req, reply) => {
@@ -148,23 +85,21 @@ export function registerDepotRoutes(
       if (!APPID_PATTERN.test(appid)) return reply.code(400).send({ error: "invalid_appid" });
 
       if (sources.length === 0) {
-        req.log.error("No depot package sources are enabled (DEPOT_PACKAGE_SOURCES).");
+        req.log.error("No depot package sources are enabled (PROVIDER_SOURCES).");
         return reply.code(503).send({ error: "no_source" });
       }
+      const chosen = req.query.source;
+      const candidates = chosen === undefined ? sources : sources.filter((source) => source.name === chosen);
+      if (candidates.length === 0) return reply.code(400).send({ error: "unknown_source" });
 
       // A cached copy from before this process started, cleaned on the way out (see STARTED_AT).
-      const serveCached = async (hit: CacheHit, source: string, cacheState: "HIT" | "MISS" | "KEPT") => {
+      const serveCached = async (hit: CacheHit, source: string, cacheState: "HIT" | "MISS") => {
         if (hit.storedAt >= STARTED_AT) return sendZip(hit.stream(), hit.contentLength, source, cacheState);
         const cleaned = cleanPackageLuas(await collect(hit.stream()), appid);
         return sendZip(Readable.from([cleaned]), cleaned.length, source, cacheState);
       };
 
-      const sendZip = (
-        body: NodeJS.ReadableStream,
-        length: number | null,
-        source: string,
-        cacheState: "HIT" | "MISS" | "KEPT",
-      ) => {
+      const sendZip = (body: NodeJS.ReadableStream, length: number | null, source: string, cacheState: "HIT" | "MISS") => {
         reply
           .header("Content-Type", "application/zip")
           .header("Cache-Control", "no-store")
@@ -175,29 +110,19 @@ export function registerDepotRoutes(
         return reply.send(body);
       };
 
-      // Serve a cached package (any source) for 24h so on-demand upstream packaging runs at most
-      // once per app per day. `getOrFetch` also collapses concurrent misses for the same app into a
+      // Serve a cached package for 24h so on-demand upstream packaging runs at most once per app (and
+      // chosen source) per day. `getOrFetch` also collapses concurrent misses for the same key into a
       // single upstream fetch — packaging a large title takes minutes, and every duplicate request
       // used to start its own job and race to write the same cache entry.
-      const cacheKey = `depot:${appid}`;
+      const cacheKey = chosen === undefined ? `depot:${appid}` : `depot:${appid}:${chosen}`;
       let source: DepotPackageSourceName | "cache" = "cache";
       let lastError: unknown;
 
-      // Tries the given upstreams in order, returning the first stream that opens.
-      const openFrom = async (candidates: PackageSource[]): Promise<Readable | null> => {
+      // Tries the candidates in order, returning the first stream that opens.
+      const openUpstream = async (): Promise<Readable> => {
         for (const candidate of candidates) {
           if (cooldown.isCooling(candidate.name)) {
             lastError ??= new UpstreamError(429, `${candidate.name} is rate limited`);
-            continue;
-          }
-          if (!(await candidate.allowed())) {
-            req.log.info({ appid, source: candidate.name }, "Depot source has no allowance left; skipping it.");
-            lastError ??= new UpstreamError(429, `${candidate.name} has no allowance left`);
-            continue;
-          }
-          if (candidate.lastResort && !lastResortBudget.take(clientKey(req))) {
-            req.log.info({ appid, source: candidate.name, client: clientKey(req) }, "Client spent its daily share of a day-limited source.");
-            lastError ??= new UpstreamError(429, `${candidate.name}: this client's daily share is spent`);
             continue;
           }
           try {
@@ -221,44 +146,19 @@ export function registerDepotRoutes(
             req.log.info({ appid, source: candidate.name, err: error }, "Depot source failed; trying next.");
           }
         }
-        return null;
-      };
-
-      // The order the package is looked for in, and why:
-      //
-      //   1. the ordinary providers — a fresh package from one of them replaces whatever was kept,
-      //      which is what puts this app back on normal 24h caching;
-      //   2. any copy already on disk, however old, before spending a day-limited request on a file
-      //      the proxy already has;
-      //   3. the day-limited providers (Hubcap), whose answer is *kept*: it stands in for this app
-      //      until step 1 succeeds again.
-      const openUpstream = async (): Promise<{ stream: Readable; kept?: boolean }> => {
-        const normal = await openFrom(normalSources);
-        if (normal) return { stream: normal };
-        if (await cache.getStale(cacheKey)) {
-          // Handled by the caller, which serves that copy rather than spending an allowance on a
-          // file the proxy already has.
-          throw lastError ?? new UpstreamError(502, `no current depot source for ${appid}`);
-        }
-        const lastResort = await openFrom(lastResortSources);
-        if (lastResort) return { stream: lastResort, kept: true };
         throw lastError ?? new UpstreamError(502, `no depot source served ${appid}`);
       };
 
       try {
         const { hit, cached } = await cache.getOrFetch(cacheKey, "application/zip", openUpstream);
-        const state = cached ? (hit.kept ? "KEPT" : "HIT") : hit.kept ? "KEPT" : "MISS";
-        return await serveCached(hit, cached ? "cache" : source, state);
+        return await serveCached(hit, cached ? "cache" : source, cached ? "HIT" : "MISS");
       } catch (error) {
-        // Every provider failed. A copy on disk — an expired one, or one kept from a day-limited
-        // source — is a better answer than an error, and it costs nobody anything.
+        // Every candidate failed. An expired copy on disk is a better answer than an error, and it
+        // costs nobody anything.
         const stale = await cache.getStale(cacheKey);
         if (stale) {
-          req.log.info(
-            { appid, kept: stale.kept, storedAt: stale.storedAt },
-            "No provider served the package; serving the copy on disk.",
-          );
-          return await serveCached(stale, "cache", stale.kept ? "KEPT" : "HIT");
+          req.log.info({ appid, storedAt: stale.storedAt }, "No provider served the package; serving the copy on disk.");
+          return await serveCached(stale, "cache", "HIT");
         }
         // Deliberately *not* falling back to piping `raw.stream` here: by the time a cache write
         // fails its pipeline has already consumed part (or all) of the upstream stream, so replaying

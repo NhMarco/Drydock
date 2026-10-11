@@ -13,13 +13,15 @@ use crate::settings::QueuedDownload;
 
 /// Register the exact successful target and remove its queue entry in the same settings snapshot.
 /// Persist the snapshot before starting the next job; metadata enrichment is optional. `cracked`
-/// says which build is now in the folder: the cracked one, or the latest.
+/// says which build is now in the folder (the cracked one, or the latest), `source` which provider
+/// the user picked for it (empty for the proxy's choice).
 pub fn register_completed(
     settings: &mut crate::Settings,
     app_id: u32,
     name: &str,
     root: &std::path::Path,
     cracked: bool,
+    source: &str,
 ) {
     settings.installed_games.insert(
         app_id,
@@ -27,6 +29,7 @@ pub fn register_completed(
             name: name.to_owned(),
             install_dir: root.display().to_string(),
             cracked,
+            source: source.to_owned(),
         },
     );
     remove_completed(&mut settings.download_queue, app_id);
@@ -143,6 +146,7 @@ mod tests {
             app_id,
             name: format!("Game {app_id}"),
             cracked: false,
+            source: String::new(),
         }
     }
 

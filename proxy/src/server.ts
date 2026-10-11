@@ -5,11 +5,10 @@ import { join } from "node:path";
 import Fastify, { type FastifyServerOptions } from "fastify";
 import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
-import { isLastResort, loadConfig, orderedSources, type OrdinarySourceName } from "./config.js";
+import { loadConfig, type DepotPackageSourceName } from "./config.js";
 import { SteamToolsClient } from "./upstream.js";
 import { DepotBoxClient } from "./depotbox.js";
 import { RyuClient } from "./ryu.js";
-import { HubcapClient } from "./hubcap.js";
 import { GitHubClient } from "./github.js";
 import { MergedGamelistSource, MergedLuaSource, ProviderCooldown } from "./merged.js";
 import type { LuaSource } from "./depotbox.js";
@@ -18,6 +17,8 @@ import { ServiceCache } from "./serviceCache.js";
 import { EmuCache } from "./emuCache.js";
 import { DenuvoFixesCache } from "./denuvoFixesCache.js";
 import { LauncherIndex, steamStoreFacts } from "./launcherCheck.js";
+import { ProviderIndex } from "./providerIndex.js";
+import { registerSourcesRoute } from "./routes/sources.js";
 import { RepacksCache } from "./repacksCache.js";
 import { attachSession, clientKey, createAuthHook } from "./auth.js";
 import { DiscordClient, registerDiscordAuthRoutes } from "./discordAuth.js";
@@ -66,31 +67,25 @@ async function main(): Promise<void> {
   const client = new SteamToolsClient(config);
   const depotbox = new DepotBoxClient(config);
   const ryu = new RyuClient(config);
-  const hubcap = new HubcapClient(config);
   const github = new GitHubClient(config);
 
   // One global provider toggle (PROVIDER_SOURCES, ordered) governs the gamelist, Lua and depot. Each
   // active provider contributes what it can; a deactivated one (not in the list) never feeds any of
-  // them. Order = priority (index 0 wins on shared AppIDs / is tried first for Lua), except that a
-  // day-limited provider is always moved to the back and contributes no Lua at all.
-  const providerRegistry = { ryu, depotbox, steamtools: client, hubcap };
-  // Day-limited providers are moved to the back: last to be asked for a package, and lowest priority
-  // in the gamelist, where they only add the apps nobody else lists.
-  const activeProviders = orderedSources(config.providerSources).map((name) => ({
-    name,
-    source: providerRegistry[name],
-  }));
-  app.log.info({ providers: activeProviders.map((p) => p.name) }, "Active providers (gamelist / lua / depot).");
-  const gamelistSource = new MergedGamelistSource(activeProviders, app.log);
+  // them. Order = priority (index 0 wins on shared AppIDs / is tried first for Lua and packages).
+  const providerRegistry: Record<DepotPackageSourceName, LuaSource & { fetchGamelist(): Promise<string> }> = {
+    ryu,
+    depotbox,
+    steamtools: client,
+  };
+  const activeProviders = config.providerSources.map((name) => ({ name, source: providerRegistry[name] }));
+  app.log.info({ providers: config.providerSources }, "Active providers (gamelist / lua / depot).");
+  // Which apps each provider lists, for the app's source picker; filled by the gamelist merge.
+  const providerIndex = new ProviderIndex(join(config.dataDir, "provider-index.json"), app.log);
+  await providerIndex.load();
+  const gamelistSource = new MergedGamelistSource(activeProviders, app.log, providerIndex);
   // Shared, so a provider that rate limits Lua requests is also left alone for depot packages.
   const cooldown = new ProviderCooldown();
-  // Hubcap has no Lua endpoint of its own — its unlock only comes inside the manifest ZIP, and
-  // fetching that to answer a Lua request would spend a day's allowance on it.
-  const luaRegistry: Record<OrdinarySourceName, LuaSource> = { ryu, depotbox, steamtools: client };
-  const luaProviders = orderedSources(config.providerSources)
-    .filter((name): name is OrdinarySourceName => !isLastResort(name))
-    .map((name) => ({ name, source: luaRegistry[name] }));
-  const luaSource = new MergedLuaSource(luaProviders, app.log, cooldown);
+  const luaSource = new MergedLuaSource(activeProviders, app.log, cooldown);
   const cache = new GamelistCache(config, gamelistSource, app.log);
   const serviceCache = new ServiceCache(config, github, app.log);
   const emuCache = new EmuCache(config, github, app.log);
@@ -120,11 +115,11 @@ async function main(): Promise<void> {
   // App info comes from SteamTools alone and spends its quota, so it exists only while SteamTools is on.
   if (config.providerSources.includes("steamtools")) registerAppInfoRoute(app, config, client, authHook);
   registerSchemaRoute(app, config, fileCache, authHook);
-  registerDepotRoutes(app, providerRegistry, config.providerSources, fileCache, authHook, cooldown, {
+  registerDepotRoutes(app, { ryu, depotbox, steamtools: client }, config.providerSources, fileCache, authHook, cooldown, {
     rateMax: config.depotRateMax,
     rateWindowMs: config.depotRateWindowSeconds * 1000,
-    lastResortPerClientDaily: config.hubcapPerClientDaily,
   });
+  registerSourcesRoute(app, config.providerSources, providerIndex, authHook);
   registerDiscordAuthRoutes(app, config, new DiscordClient(config), loginAuthHook);
 
   if (!config.requireAuth) {

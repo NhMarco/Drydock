@@ -1,15 +1,15 @@
-// Combines the two upstreams (steamtools + DepotBox) so they fill each other's gaps. Which one is
-// primary is decided by the caller (server.ts) via constructor order; the secondary only supplies
-// what the primary is missing.
+// Combines the active providers so they fill each other's gaps. Their priority is decided by the
+// caller (server.ts) via constructor order; a later one only supplies what an earlier one is missing.
 //
-//   * MergedGamelistSource  — unions both catalogs by AppID (the primary's entry wins; the secondary
-//     adds any AppID the primary does not list). Tolerant: if one upstream is down, the other still
-//     serves.
-//   * MergedLuaSource       — tries the primary first; if it errors or returns something that is not
-//     a real Lua unlock, it falls back to the secondary.
+//   * MergedGamelistSource  — unions the catalogs by AppID (the first provider's entry wins). Tolerant:
+//     if one upstream is down, the others still serve. It also records which apps each provider lists
+//     (`ProviderIndex`), for the app's source picker.
+//   * MergedLuaSource       — tries the providers in order; if one errors or returns something that is
+//     not a real Lua unlock, it falls back to the next. Or asks only the one the user picked.
 
 import type { FastifyBaseLogger } from "fastify";
 import type { GamelistSource, LuaSource } from "./depotbox.js";
+import { buildListing, type ProviderIndex } from "./providerIndex.js";
 import { UpstreamError, type LuaResult } from "./upstream.js";
 
 export interface RawGame {
@@ -87,6 +87,7 @@ export class MergedGamelistSource implements GamelistSource {
   constructor(
     private readonly sources: NamedGamelistSource[],
     private readonly log: FastifyBaseLogger,
+    private readonly index: ProviderIndex | null = null,
   ) {}
 
   /**
@@ -114,7 +115,10 @@ export class MergedGamelistSource implements GamelistSource {
         let count = 0;
         {
           const raw = await named.source.fetchGamelist();
-          for (const game of parseGames(raw)) {
+          const games = parseGames(raw);
+          const listing = this.index ? buildListing(named.name, games) : null;
+          if (listing) this.index?.set(named.name, listing);
+          for (const game of games) {
             const appid = toAppId(game.appid);
             if (!appid) continue;
             // A provider without tags (DepotBox) keeps the tags a lower-priority one had, so the
@@ -140,6 +144,7 @@ export class MergedGamelistSource implements GamelistSource {
     }
 
     if (byId.size === 0) throw new UpstreamError(502, "No usable games returned by active providers.");
+    await this.index?.save();
     this.log.info({ sources: counts, total: byId.size }, "Merged gamelist from active providers.");
     return [...byId.values()];
   }
@@ -162,12 +167,19 @@ export class MergedLuaSource implements LuaSource {
     private readonly cooldown: ProviderCooldown = new ProviderCooldown(),
   ) {}
 
-  async fetchLua(appid: string): Promise<LuaResult> {
-    if (this.sources.length === 0) {
+  /** The providers asked, in order. */
+  names(): string[] {
+    return this.sources.map((source) => source.name);
+  }
+
+  /** The Lua from the first provider that has one — or only from `only`, the one the user picked. */
+  async fetchLua(appid: string, only?: string): Promise<LuaResult> {
+    const sources = only === undefined ? this.sources : this.sources.filter((source) => source.name === only);
+    if (sources.length === 0) {
       throw new UpstreamError(404, `No lua sources are enabled for AppID ${appid}.`);
     }
     let lastError: unknown = null;
-    for (const [index, { name, source }] of this.sources.entries()) {
+    for (const [index, { name, source }] of sources.entries()) {
       if (this.cooldown.isCooling(name)) {
         lastError = moreTelling(lastError, new UpstreamError(429, `${name} is rate limited.`));
         continue;

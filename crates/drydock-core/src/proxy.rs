@@ -98,7 +98,16 @@ impl ProxyClient {
 
     /// Downloads the single `.lua` unlock file for `app_id`.
     pub fn download_lua(&self, app_id: u32) -> Result<Vec<u8>, ProxyError> {
-        let response = self.send(self.signed_get(&format!("/v1/lua/{app_id}"))?)?;
+        self.download_lua_from(app_id, None)
+    }
+
+    /// [`Self::download_lua`] from the one provider the user picked, or the proxy's choice.
+    pub fn download_lua_from(&self, app_id: u32, source: Option<&str>) -> Result<Vec<u8>, ProxyError> {
+        let path = match source {
+            Some(source) => format!("/v1/lua/{app_id}?source={source}"),
+            None => format!("/v1/lua/{app_id}"),
+        };
+        let response = self.send(self.signed_get(&path)?)?;
         let bytes = read_capped(response, MAXIMUM_LUA_BYTES)?;
         if bytes.is_empty() || !looks_like_lua(&bytes) {
             return Err(ProxyError::InvalidLua(app_id));
@@ -157,6 +166,19 @@ impl ProxyClient {
         read_capped(response, MAXIMUM_FIX_ZIP_BYTES)
     }
 
+    /// Which of the proxy's providers list `app_id` and how current their unlock is, in the order the
+    /// proxy tries them (`GET /v1/sources/:appid`) — for the source picker.
+    pub fn sources(&self, app_id: u32) -> Result<Vec<crate::sources::ProxySource>, ProxyError> {
+        #[derive(Deserialize)]
+        struct SourcesDto {
+            #[serde(default)]
+            sources: Vec<crate::sources::ProxySource>,
+        }
+        let response = self.send(self.signed_get(&format!("/v1/sources/{app_id}"))?)?;
+        let bytes = read_capped(response, MAXIMUM_MANIFEST_BYTES)?;
+        Ok(serde_json::from_slice::<SourcesDto>(&bytes)?.sources)
+    }
+
     /// Downloads the per-app depot package ZIP (all `<depot>_<manifest>.manifest` files plus the
     /// key-bearing `.lua`/`.key`) via the proxy. A `404` means no depot data exists for the app.
     pub fn depot_package(&self, app_id: u32) -> Result<Vec<u8>, ProxyError> {
@@ -167,15 +189,27 @@ impl ProxyClient {
     /// megabytes and the upstream builds it on demand, so this is the one request a user is likely
     /// to wait minutes for — it must not hold a download hostage when they press Pause.
     pub fn depot_package_cancellable(&self, app_id: u32, cancel: &AtomicBool) -> Result<Vec<u8>, ProxyError> {
+        self.depot_package_from(app_id, None, cancel)
+    }
+
+    /// [`Self::depot_package_cancellable`] from the one provider the user picked (`source`, a name
+    /// from [`Self::sources`]), or the proxy's choice when `None`.
+    pub fn depot_package_from(
+        &self,
+        app_id: u32,
+        source: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<u8>, ProxyError> {
         if cancel.load(Ordering::Relaxed) {
             return Err(ProxyError::Cancelled);
         }
+        let path = match source {
+            Some(source) => format!("/v1/depot/package/{app_id}?source={source}"),
+            None => format!("/v1/depot/package/{app_id}"),
+        };
         // The upstream packages the depot on demand, which can take minutes for a large title, so
         // override the client's default request timeout with a generous one.
-        let response = self
-            .signed_get(&format!("/v1/depot/package/{app_id}"))?
-            .timeout(Duration::from_secs(600))
-            .send()?;
+        let response = self.signed_get(&path)?.timeout(Duration::from_secs(600)).send()?;
         if response.status() == StatusCode::NOT_FOUND {
             return Err(ProxyError::DepotUnavailable(app_id));
         }

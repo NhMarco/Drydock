@@ -19,6 +19,9 @@ pub struct InstalledGame {
     /// Whether this is the cracked build a fix is made for (`crate::cracked`), not the latest one:
     /// a verify or repair has to keep to that build, and an update leaves it.
     pub cracked: bool,
+    /// The provider it was downloaded from when the user picked one (`DepotSource::key`), so a verify
+    /// checks it against the same build; empty for the proxy's choice.
+    pub source: String,
 }
 
 /// One depot download waiting in (or currently at the front of) the download queue. Persisted so an
@@ -31,6 +34,9 @@ pub struct QueuedDownload {
     pub name: String,
     /// The cracked build a fix is made for, instead of the latest one.
     pub cracked: bool,
+    /// The provider the user picked (`DepotSource::key`), so a resumed download keeps to it; empty for
+    /// the proxy's choice.
+    pub source: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -519,6 +525,7 @@ mod tests {
                 name: "CS".into(),
                 install_dir: "D:/Games/CS".into(),
                 cracked: false,
+                source: String::new(),
             },
         );
         good.save(&path).expect("save good");

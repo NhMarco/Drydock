@@ -55,6 +55,9 @@ pub enum DepotDownloadError {
     },
     #[error("download was cancelled")]
     Cancelled,
+    /// A source the user picked could not serve the package (Hubcap with their key, say).
+    #[error("{0}")]
+    Source(String),
 }
 
 /// The depot key(s) and parsed manifest(s) for one app, ready to download or verify.

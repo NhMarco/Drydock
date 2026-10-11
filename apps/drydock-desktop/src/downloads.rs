@@ -1,5 +1,5 @@
 //! Depot worker protocol and orchestration, independent of egui rendering.
-use drydock_core::{CdnClient, DepotData, DownloadProgress, ProxyClient, depot, fetch_install_dir};
+use drydock_core::{CdnClient, DownloadProgress, ProxyClient, depot, fetch_install_dir};
 
 /// How hard a depot job may push the network and the disk, from Settings.
 #[derive(Clone, Copy, Debug)]
@@ -47,6 +47,8 @@ pub(crate) struct DownloadJob {
     pub(crate) kind: DownloadKind,
     /// The build the game's fix is made for, rather than the latest.
     pub(crate) cracked: bool,
+    /// The provider the user picked, `None` for the proxy's choice.
+    pub(crate) source: Option<drydock_core::DepotSource>,
     pub(crate) cancel: Arc<AtomicBool>,
     /// `JOB_PREPARING` / `JOB_RUNNING` / `JOB_ABANDONED` — see those constants.
     pub(crate) state: Arc<AtomicU8>,
@@ -153,6 +155,8 @@ pub(crate) fn run_depot_job(
     name: &str,
     kind: DownloadKind,
     cracked: bool,
+    source: Option<drydock_core::DepotSource>,
+    hubcap_key: Option<String>,
     steam_root: Option<PathBuf>,
     installed_dir: Option<PathBuf>,
     games_directory: Option<PathBuf>,
@@ -212,8 +216,24 @@ pub(crate) fn run_depot_job(
             other => other.to_string(),
         })?
     } else {
-        step("Fetching the depot package…");
-        DepotData::fetch_cancellable(&proxy, app_id, cancel).map_err(|error| error.to_string())?
+        step(match source {
+            None => "Fetching the depot package…",
+            Some(drydock_core::DepotSource::DepotBox) => "Fetching the depot package from DepotBox…",
+            Some(drydock_core::DepotSource::SteamTools) => "Fetching the depot package from SteamTools…",
+            Some(drydock_core::DepotSource::Ryu) => "Fetching the depot package from Ryu…",
+            Some(drydock_core::DepotSource::Hubcap) => "Fetching the depot package from Hubcap Manifest…",
+        });
+        let hubcap = hubcap_key
+            .as_deref()
+            .map(drydock_core::HubcapClient::new)
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        drydock_core::sources::depot_data(&proxy, hubcap.as_ref(), app_id, source, cancel).map_err(
+            |error| match error {
+                drydock_core::DepotDownloadError::Cancelled => STOPPED_WHILE_PREPARING.to_owned(),
+                other => other.to_string(),
+            },
+        )?
     };
     stopped()?;
 
@@ -333,6 +353,7 @@ mod tests {
                 name: "Game".into(),
                 install_dir: "custom/game".into(),
                 cracked: false,
+                source: String::new(),
             },
         );
         settings.games_directory = "new/default".into();

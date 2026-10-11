@@ -16,8 +16,10 @@ pub(crate) mod file_transaction;
 pub mod fixes;
 pub mod game_folder;
 pub mod harden;
+pub mod hubcap;
 pub mod language;
 pub mod login;
+pub mod lua_clean;
 pub mod mfb;
 pub mod models;
 pub mod open_steam_tool;
@@ -32,6 +34,7 @@ pub mod safe_path;
 pub mod search;
 pub mod self_test;
 pub mod settings;
+pub mod sources;
 pub mod steam;
 pub mod steam_appinfo;
 pub mod steam_interfaces;
@@ -80,6 +83,7 @@ pub use game_folder::{
     resolve_game_root, scan_crack_files,
 };
 pub use harden::harden_dll_search;
+pub use hubcap::{HubcapClient, HubcapError, HubcapStatus, HubcapUsage};
 pub use language::{GameLanguageError, GameLanguageOptions, apply_language, read_language_options};
 pub use mfb::{
     DenuvoFix, FixEntry, FixList, RepositoryFile, SteamServiceManifest, SteamServicePackage,
@@ -95,10 +99,11 @@ pub use safe_path::{is_safe_path_segment, join_within, safe_segments};
 pub use search::{SearchIndex, SearchQuery, normalize as normalize_search};
 pub use self_test::{SelfTestError, SelfTestReport, run_self_test};
 pub use settings::{InstalledGame, LoadOutcome, QueuedDownload, Settings, SettingsError};
+pub use sources::{DepotSource, ProxySource};
 pub use steam::{SteamDiscovery, SteamError, discover_steam, is_valid_steam_directory, load_manifests};
 pub use steam_appinfo::{
-    SteamAppInfoError, fetch_install_dir, fetch_non_windows_depots, fetch_windows_arch,
-    fetch_windows_executables,
+    SteamAppInfoError, fetch_install_dir, fetch_non_windows_depots, fetch_public_build_time,
+    fetch_windows_arch, fetch_windows_executables,
 };
 pub use steam_process::{SteamProcessError, is_steam_running, restart_steam, start_steam, stop_steam};
 pub use steam_service::{

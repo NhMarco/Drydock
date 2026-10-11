@@ -224,7 +224,7 @@ test("while login is not required, the HMAC alone still works, and login reports
 
 // --- Limits -------------------------------------------------------------------------------------
 
-test("one client cannot spend the whole day-limited allowance", async () => {
+test("a chosen source is the only provider asked, and an unknown one is refused", async () => {
   const { mkdtemp, rm } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
@@ -232,7 +232,6 @@ test("one client cannot spend the whole day-limited allowance", async () => {
   const { FileCache } = await import("./fileCache.js");
   const { ProviderCooldown } = await import("./merged.js");
   const { registerDepotRoutes } = await import("./routes/depot.js");
-  const { UpstreamError } = await import("./upstream.js");
 
   // A package as the size check reads it: local file headers naming a manifest.
   const header = Buffer.alloc(30);
@@ -241,35 +240,33 @@ test("one client cannot spend the whole day-limited allowance", async () => {
   const zip = Buffer.concat([header, Buffer.from("1_2.manifest"), Buffer.from("content")]);
   const raw = () => ({ stream: Readable.from([zip]), contentLength: zip.length, contentType: "application/zip" });
 
-  const dir = await mkdtemp(join(tmpdir(), "drydock-limits-"));
-  const server = Fastify({ trustProxy: "loopback,linklocal,uniquelocal" });
+  const dir = await mkdtemp(join(tmpdir(), "drydock-sources-"));
+  const server = Fastify();
   const log = { info() {}, warn() {}, error() {} } as never;
   try {
-    let hubcapCalls = 0;
+    const asked: string[] = [];
     const upstreams = {
-      ryu: { downloadDepotPackage: async () => { throw new UpstreamError(404, "not here"); } },
-      hubcap: {
-        downloadDepotPackage: async () => { hubcapCalls += 1; return raw(); },
-        hasAllowance: async () => true,
-      },
+      depotbox: { downloadDepotPackage: async () => { asked.push("depotbox"); return raw(); } },
+      ryu: { downloadDepotPackage: async () => { asked.push("ryu"); return raw(); } },
+      steamtools: { downloadManifestZip: async () => { asked.push("steamtools"); return raw(); } },
     } as never;
-    registerDepotRoutes(server, upstreams, ["ryu", "hubcap"], new FileCache(dir, 60_000, log), async () => {}, new ProviderCooldown(), {
-      rateMax: 100,
-      rateWindowMs: 60_000,
-      lastResortPerClientDaily: 1,
-    });
-    const from = (ip: string, appid: number) =>
-      server.inject({ url: `/v1/depot/package/${appid}`, remoteAddress: "172.18.0.2", headers: { "x-forwarded-for": ip } });
+    registerDepotRoutes(server, upstreams, ["depotbox", "ryu"], new FileCache(dir, 60_000, log), async () => {}, new ProviderCooldown());
+    const get = (url: string) => server.inject({ url });
 
-    assert.equal((await from("203.0.113.1", 70)).statusCode, 200);
-    // The same client's next day-limited fetch is refused…
-    assert.notEqual((await from("203.0.113.1", 71)).statusCode, 200);
-    // …while another client still gets its share, and a package already fetched costs nothing.
-    assert.equal((await from("203.0.113.2", 71)).statusCode, 200);
-    assert.equal((await from("203.0.113.1", 70)).statusCode, 200);
-    assert.equal(hubcapCalls, 2);
+    const automatic = await get("/v1/depot/package/70");
+    assert.equal(automatic.statusCode, 200);
+    assert.equal(automatic.headers["x-depot-source"], "depotbox");
+    const chosen = await get("/v1/depot/package/70?source=ryu");
+    assert.equal(chosen.statusCode, 200);
+    assert.equal(chosen.headers["x-depot-source"], "ryu", "a picked provider is not answered from another's cache");
+    assert.deepEqual(asked, ["depotbox", "ryu"]);
+    // Not enabled on this proxy, or no provider at all: refused before anything is asked.
+    assert.equal((await get("/v1/depot/package/70?source=steamtools")).statusCode, 400);
+    assert.equal((await get("/v1/depot/package/70?source=hubcap")).statusCode, 400);
+    assert.deepEqual(asked, ["depotbox", "ryu"]);
   } finally {
     await server.close();
     await rm(dir, { recursive: true, force: true });
   }
 });
+

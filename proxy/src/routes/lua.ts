@@ -5,6 +5,7 @@
 import type { FastifyInstance, preHandlerHookHandler } from "fastify";
 import type { Config } from "../config.js";
 import type { LuaSource } from "../depotbox.js";
+import type { LuaResult } from "../upstream.js";
 import { UpstreamError } from "../upstream.js";
 import { sanitizeLua } from "../luaSanitize.js";
 import { cleanLua } from "../luaClean.js";
@@ -18,10 +19,16 @@ interface CachedLua {
 // AppIDs are numeric and bounded; reject anything else before it reaches upstream.
 const APPID_PATTERN = /^[1-9][0-9]{0,7}$/;
 
+/** A Lua source the user can also pick a single provider of (`?source=`), as `MergedLuaSource`. */
+interface ChoosableLuaSource extends LuaSource {
+  names?: () => string[];
+  fetchLua(appid: string, only?: string): Promise<LuaResult>;
+}
+
 export function registerLuaRoute(
   app: FastifyInstance,
   config: Config,
-  client: LuaSource,
+  client: ChoosableLuaSource,
   authHook: preHandlerHookHandler,
 ): void {
   const cache = new Map<string, CachedLua>();
@@ -32,7 +39,7 @@ export function registerLuaRoute(
   }, 60_000);
   sweep.unref();
 
-  app.get<{ Params: { appid: string } }>(
+  app.get<{ Params: { appid: string }; Querystring: { source?: string } }>(
     "/v1/lua/:appid",
     {
       preHandler: authHook,
@@ -48,9 +55,15 @@ export function registerLuaRoute(
       if (!APPID_PATTERN.test(appid)) {
         return reply.code(400).send({ error: "invalid_appid" });
       }
+      // `source`: the provider the user picked in the app, asked alone and cached apart.
+      const chosen = req.query.source;
+      if (chosen !== undefined && !(client.names?.() ?? []).includes(chosen)) {
+        return reply.code(400).send({ error: "unknown_source" });
+      }
+      const key = chosen === undefined ? appid : `${appid}:${chosen}`;
 
       const now = Date.now();
-      const cached = cache.get(appid);
+      const cached = cache.get(key);
       if (cached && cached.expiresAt > now) {
         return reply
           .code(200)
@@ -60,7 +73,7 @@ export function registerLuaRoute(
       }
 
       try {
-        const result = await client.fetchLua(appid);
+        const result = await client.fetchLua(appid, chosen);
         // Drop broken keyless `addappid(<depotid>)` depot lines the upstream sometimes emits; they
         // make the whole unlock fail. Then the provider's comments go and Drydock's header goes on —
         // in that order, since the sanitizer reads commented-out `setManifestid` lines. The cached +
@@ -72,7 +85,7 @@ export function registerLuaRoute(
           req.log.info({ appid, removed }, "Stripped keyless addappid depot line(s) from upstream Lua.");
         }
         if (config.luaCacheTtlSeconds > 0) {
-          cache.set(appid, {
+          cache.set(key, {
             body,
             contentType: result.contentType,
             expiresAt: now + config.luaCacheTtlSeconds * 1000,

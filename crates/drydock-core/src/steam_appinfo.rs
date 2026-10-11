@@ -184,6 +184,27 @@ pub fn install_dir_name(json: &serde_json::Value, app_id: u32) -> Option<String>
     crate::safe_path::is_portable_path_segment(trimmed).then(|| trimmed.to_owned())
 }
 
+/// When the game's current public build went live, in Unix seconds — what a provider's unlock is
+/// measured against in the source picker. `None` when app-info does not say.
+pub fn fetch_public_build_time(app_id: u32) -> Result<Option<u64>, SteamAppInfoError> {
+    if app_id == 0 {
+        return Err(SteamAppInfoError::InvalidAppId);
+    }
+    let json = fetch_app_info(app_id)?;
+    Ok(public_build_time(&json, app_id))
+}
+
+/// Extracts `depots.branches.public.timeupdated` from a SteamCMD.net app-info document. Pure, for
+/// unit testing.
+#[must_use]
+pub fn public_build_time(json: &serde_json::Value, app_id: u32) -> Option<u64> {
+    let value = &json["data"][app_id.to_string()]["depots"]["branches"]["public"]["timeupdated"];
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+        .filter(|seconds| *seconds > 0)
+}
+
 #[derive(Debug, Error)]
 pub enum SteamAppInfoError {
     #[error("The selected app has no App ID")]
@@ -201,6 +222,16 @@ pub enum SteamAppInfoError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_public_build_time_is_read_from_its_branch() {
+        let json = serde_json::json!({ "data": { "730": { "depots": { "branches": {
+            "public": { "buildid": "20000000", "timeupdated": "1791486413" },
+            "beta": { "timeupdated": "1791999999" }
+        } } } } });
+        assert_eq!(public_build_time(&json, 730), Some(1_791_486_413));
+        assert_eq!(public_build_time(&json, 440), None);
+    }
 
     #[test]
     fn only_depots_of_another_os_are_named() {

@@ -240,6 +240,7 @@ fn consecutive_completed_jobs_register_their_actual_roots() {
             app_id: id,
             name: id.to_string(),
             cracked: false,
+            source: String::new(),
         });
     }
     for id in [1, 2] {
@@ -249,6 +250,7 @@ fn consecutive_completed_jobs_register_their_actual_roots() {
             &id.to_string(),
             std::path::Path::new("custom/game"),
             false,
+            "",
         );
     }
     assert!(settings.download_queue.is_empty());

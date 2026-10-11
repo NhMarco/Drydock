@@ -46,16 +46,19 @@ export class RyuClient implements GamelistSource, LuaSource {
     const list = raw;
     const games = list
       .map((entry) => {
-        const game = entry as { appid?: unknown; name?: unknown; tags?: unknown };
+        const game = entry as { appid?: unknown; name?: unknown; tags?: unknown; updated_date?: unknown };
         const appid = Number.parseInt(String(game.appid ?? ""), 10);
         if (!Number.isInteger(appid) || appid <= 0) return null;
         return {
           appid,
           name: String(game.name ?? ""),
           tags: Array.isArray(game.tags) ? game.tags : [],
+          // When Ryu last updated the unlock, for the app's source picker (providerIndex.ts); the
+          // served gamelist is compacted without it.
+          ...(typeof game.updated_date === "string" ? { updated_date: game.updated_date } : {}),
         };
       })
-      .filter((game): game is { appid: number; name: string; tags: unknown[] } => game !== null);
+      .filter((game) => game !== null);
     return JSON.stringify({ games });
   }
 
