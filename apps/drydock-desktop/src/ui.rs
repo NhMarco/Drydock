@@ -728,7 +728,7 @@ pub struct DrydockApp {
     /// Which crack the running emu job is, so one that needs the game's executable can run again.
     /// A crack waiting for its exe to be confirmed, and the lookup that finds it.
     crack_plan: Option<CrackPlan>,
-    crack_plan_receiver: Option<Receiver<CrackPlan>>,
+    crack_plan_receiver: Option<Receiver<Result<CrackPlan, String>>>,
     /// A step waiting for the user to pick the game's executable, asked for on the next frame.
     pending_exe_pick: Option<ExecutablePick>,
     status: String,
@@ -894,10 +894,37 @@ enum PickRetry {
 struct CrackPlan {
     app_id: u32,
     name: String,
-    /// The game folder the crack goes into.
-    root: PathBuf,
+    target: CrackTarget,
     /// The exe the crack goes next to, found or chosen; `None` until the user chooses one.
     exe: Option<GameExe>,
+}
+
+/// Where a confirmed crack goes.
+enum CrackTarget {
+    /// Into the installed game's folder; another exe is chosen with a file picker there.
+    Folder(PathBuf),
+    /// Into a ZIP, for a game that is not installed here: the exes come from its depot file list,
+    /// and the depot package already fetched for that is handed on to the crack.
+    Zip {
+        path: PathBuf,
+        exes: Vec<String>,
+        data: Box<DepotData>,
+    },
+}
+
+/// The `.exe` files in an app's depots, relative with forward slashes — the game folder as it would
+/// be installed, for a crack that has no installed folder to look in.
+fn depot_exes(data: &DepotData) -> Vec<String> {
+    let mut exes: Vec<String> = data
+        .manifests
+        .iter()
+        .flat_map(|manifest| manifest.files.iter())
+        .filter(|file| !file.is_directory() && file.path.to_ascii_lowercase().ends_with(".exe"))
+        .map(|file| file.path.replace('\\', "/"))
+        .collect();
+    exes.sort();
+    exes.dedup();
+    exes
 }
 
 /// Why the crack goes next to this exe, for the confirmation dialog.
@@ -5672,12 +5699,45 @@ impl DrydockApp {
         std::thread::spawn(move || {
             let listed = fetch_windows_executables(app_id).unwrap_or_default();
             let exe = find_game_exe(&exes_under(&root), &listed, picked.as_deref());
-            let _ = sender.send(CrackPlan {
+            let _ = sender.send(Ok(CrackPlan {
                 app_id,
                 name,
-                root,
+                target: CrackTarget::Folder(root),
                 exe,
-            });
+            }));
+        });
+    }
+
+    /// [`Self::prepare_crack`] for a ZIP: with no installed game to look in, the exes come from the
+    /// game's depot file list (the package the crack needs anyway), and the user confirms one of them.
+    fn prepare_zip_crack(&mut self, app_id: u32, name: String, path: PathBuf, picked: Option<String>) {
+        if self.emu_receiver.is_some() || self.crack_plan_receiver.is_some() {
+            self.status = "A crack job is already running.".into();
+            self.status_error = true;
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        self.crack_plan_receiver = Some(receiver);
+        self.busy_label = Some(format!("Reading the game files of {name} from its depots…"));
+        std::thread::spawn(move || {
+            let result = (|| {
+                let proxy = ProxyClient::new().map_err(|error| error.to_string())?;
+                let data = DepotData::fetch(&proxy, app_id).map_err(|error| error.to_string())?;
+                let listed = fetch_windows_executables(app_id).unwrap_or_default();
+                let exes = depot_exes(&data);
+                let exe = find_game_exe(&exes, &listed, picked.as_deref());
+                Ok(CrackPlan {
+                    app_id,
+                    name,
+                    target: CrackTarget::Zip {
+                        path,
+                        exes,
+                        data: Box::new(data),
+                    },
+                    exe,
+                })
+            })();
+            let _ = sender.send(result);
         });
     }
 
@@ -5686,10 +5746,16 @@ impl DrydockApp {
             return;
         };
         match receiver.try_recv() {
-            Ok(plan) => {
+            Ok(result) => {
                 self.crack_plan_receiver = None;
                 self.busy_label = None;
-                self.crack_plan = Some(plan);
+                match result {
+                    Ok(plan) => self.crack_plan = Some(plan),
+                    Err(error) => {
+                        self.status = format!("The crack could not be prepared: {error}");
+                        self.status_error = true;
+                    }
+                }
             }
             Err(TryRecvError::Disconnected) => {
                 self.crack_plan_receiver = None;
@@ -5704,12 +5770,13 @@ impl DrydockApp {
     /// Confirms the exe the crack goes next to, with why it was taken, and lets the user choose
     /// another. The choice is remembered for the game.
     fn crack_exe_window(&mut self, context: &egui::Context) {
-        let Some(plan) = self.crack_plan.as_ref() else {
+        let Some(plan) = self.crack_plan.as_mut() else {
             return;
         };
         let mut confirm = false;
         let mut choose = false;
         let mut cancel = false;
+        let zip = matches!(plan.target, CrackTarget::Zip { .. });
         let response = egui::Modal::new(egui::Id::new("crack_exe"))
             .backdrop_color(scrim(170))
             .frame(dialog_frame())
@@ -5724,9 +5791,13 @@ impl DrydockApp {
                 );
                 ui.add(egui::Label::new(RichText::new(&plan.name).font(strong_font(20.0)).color(TEXT)).wrap());
                 ui.label(
-                    RichText::new("The crack's files go next to the game's own exe:")
-                        .size(11.5)
-                        .color(MUTED),
+                    RichText::new(if zip {
+                        "In the ZIP, the crack's files go next to the game's own exe:"
+                    } else {
+                        "The crack's files go next to the game's own exe:"
+                    })
+                    .size(11.5)
+                    .color(MUTED),
                 );
                 egui::Frame::new()
                     .fill(INPUT_FILL)
@@ -5766,22 +5837,68 @@ impl DrydockApp {
                             }
                         }
                     });
-                ui.label(
-                    RichText::new(format!("In {}", plan.root.display()))
-                        .size(10.5)
-                        .color(MUTED),
-                );
+                match &plan.target {
+                    CrackTarget::Folder(root) => {
+                        ui.label(
+                            RichText::new(format!("In {}", root.display()))
+                                .size(10.5)
+                                .color(MUTED),
+                        );
+                    }
+                    CrackTarget::Zip { path, exes, .. } => {
+                        ui.label(
+                            RichText::new(format!("ZIP: {}", path.display()))
+                                .size(10.5)
+                                .color(MUTED),
+                        );
+                        // Another exe from the game's depots: no installed folder to pick a file in.
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new("Or choose another exe from the game's depots:")
+                                .size(11.0)
+                                .color(MUTED),
+                        );
+                        let current = plan.exe.as_ref().map(|exe| exe.relative.clone());
+                        let mut picked = None;
+                        egui::ComboBox::from_id_salt("crack_zip_exe")
+                            .width(ui.available_width())
+                            .selected_text(
+                                current
+                                    .as_deref()
+                                    .map_or_else(|| "Choose the game's exe".to_owned(), |exe| exe.replace('/', "\\")),
+                            )
+                            .show_ui(ui, |ui| {
+                                for exe in exes {
+                                    if ui
+                                        .selectable_label(current.as_deref() == Some(exe), exe.replace('/', "\\"))
+                                        .clicked()
+                                    {
+                                        picked = Some(exe.clone());
+                                    }
+                                }
+                            });
+                        if let Some(relative) = picked.filter(|exe| current.as_ref() != Some(exe)) {
+                            plan.exe = Some(GameExe {
+                                relative,
+                                reason: ExeReason::Picked,
+                            });
+                        }
+                    }
+                }
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    choose = ui
-                        .add(ghost_button("CHOOSE ANOTHER EXE…").min_size(Vec2::new(0.0, 34.0)))
-                        .on_hover_text("Pick the game's .exe in its folder yourself")
-                        .clicked();
+                    if !zip {
+                        choose = ui
+                            .add(ghost_button("CHOOSE ANOTHER EXE…").min_size(Vec2::new(0.0, 34.0)))
+                            .on_hover_text("Pick the game's .exe in its folder yourself")
+                            .clicked();
+                    }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         confirm = ui
                             .add_enabled(
                                 plan.exe.is_some(),
-                                success_button("CRACK").min_size(Vec2::new(110.0, 34.0)),
+                                success_button(if zip { "SAVE ZIP" } else { "CRACK" })
+                                    .min_size(Vec2::new(110.0, 34.0)),
                             )
                             .clicked();
                         ui.add_space(8.0);
@@ -5804,12 +5921,11 @@ impl DrydockApp {
                 // A failed save is reported, but the choice still counts for this session.
                 let _ = self.persist_settings();
             }
-            self.run_crack(
-                plan.app_id,
-                &plan.name,
-                EmuOutput::Deploy(plan.root),
-                Some(exe.relative),
-            );
+            let (output, data) = match plan.target {
+                CrackTarget::Folder(root) => (EmuOutput::Deploy(root), None),
+                CrackTarget::Zip { path, data, .. } => (EmuOutput::Zip(path), Some(*data)),
+            };
+            self.run_crack(plan.app_id, &plan.name, output, Some(exe.relative), data);
         } else if cancel || response.should_close() {
             self.crack_plan = None;
         }
@@ -5820,12 +5936,16 @@ impl DrydockApp {
         let Some(plan) = self.crack_plan.as_mut() else {
             return;
         };
+        let CrackTarget::Folder(root) = &plan.target else {
+            return;
+        };
+        let root = root.clone();
         let start = plan
             .exe
             .as_ref()
-            .map(|exe| drydock_core::join_within(&plan.root, &exe.relative))
+            .map(|exe| drydock_core::join_within(&root, &exe.relative))
             .and_then(|path| path.parent().map(Path::to_path_buf))
-            .unwrap_or_else(|| plan.root.clone());
+            .unwrap_or_else(|| root.clone());
         let Some(executable) = rfd::FileDialog::new()
             .set_title(format!("Select the game exe of {}", plan.name))
             .set_directory(start)
@@ -5834,7 +5954,7 @@ impl DrydockApp {
         else {
             return;
         };
-        match executable_relative_to(&plan.root, &executable) {
+        match executable_relative_to(&root, &executable) {
             Some(relative) => {
                 plan.exe = Some(GameExe {
                     relative,
@@ -5842,10 +5962,7 @@ impl DrydockApp {
                 });
             }
             None => {
-                self.status = format!(
-                    "Choose an exe inside {} — the game's folder.",
-                    plan.root.display()
-                );
+                self.status = format!("Choose an exe inside {} — the game's folder.", root.display());
                 self.status_error = true;
             }
         }
@@ -7827,8 +7944,8 @@ impl DrydockApp {
     }
 
     /// Spawns the crack job: resolve config + architecture, ensure the emu toolchain, deploy or zip.
-    /// The Tools cracker: a deploy into a folder confirms the game's exe first (`prepare_crack`); a
-    /// ZIP has no folder to look in, so its exe is read from the game's depot file list.
+    /// The Tools cracker: the game's exe is confirmed first — found in the folder for a deploy
+    /// (`prepare_crack`), in the game's depot file list for a ZIP (`prepare_zip_crack`).
     fn start_emu_crack(&mut self, output: EmuOutput) {
         let Ok(app_id) = self.emu_appid.trim().parse::<u32>() else {
             return;
@@ -7839,13 +7956,23 @@ impl DrydockApp {
                 let picked = self.settings.picked_executables.get(&app_id).cloned();
                 self.prepare_crack(app_id, name, folder, picked);
             }
-            zip @ EmuOutput::Zip(_) => self.run_crack(app_id, &name, zip, None),
+            EmuOutput::Zip(path) => {
+                let picked = self.settings.picked_executables.get(&app_id).cloned();
+                self.prepare_zip_crack(app_id, name, path, picked);
+            }
         }
     }
 
-    /// Runs the crack job. `exe` is the game's exe the user confirmed (relative to the folder) — set
-    /// for every deploy; a ZIP finds its own.
-    fn run_crack(&mut self, app_id: u32, name: &str, output: EmuOutput, exe: Option<String>) {
+    /// Runs the crack job for the game's exe the user confirmed (relative to the game folder), with
+    /// the depot package when it was fetched already.
+    fn run_crack(
+        &mut self,
+        app_id: u32,
+        name: &str,
+        output: EmuOutput,
+        exe: Option<String>,
+        data: Option<DepotData>,
+    ) {
         if self.emu_receiver.is_some() {
             return;
         }
@@ -7877,6 +8004,7 @@ impl DrydockApp {
                 &cache_dir,
                 exe.as_deref(),
                 picked.as_deref(),
+                data,
             ));
         });
     }
@@ -8655,7 +8783,7 @@ impl DrydockApp {
 #[cfg(feature = "screenshot")]
 impl DrydockApp {
     /// Ordered pages the screenshot harness walks through (see [`crate::screenshot`]).
-    pub const SCREENSHOT_PAGES: [&'static str; 26] = [
+    pub const SCREENSHOT_PAGES: [&'static str; 27] = [
         "home",
         "home-list",
         "new-releases",
@@ -8679,6 +8807,7 @@ impl DrydockApp {
         // Last: the dialogs stay open over whatever comes after them.
         "source-picker",
         "crack-exe",
+        "crack-zip",
         "about",
         "update",
         "login",
@@ -8695,7 +8824,7 @@ impl DrydockApp {
         if key != "source-picker" {
             self.source_picker = None;
         }
-        if key != "crack-exe" {
+        if !key.starts_with("crack-") {
             self.crack_plan = None;
         }
         if let Ok(mut open) = SCREENSHOT_OPEN_MENU.lock() {
@@ -8743,15 +8872,37 @@ impl DrydockApp {
             "crack-exe" => {
                 // An Unreal Engine game: Steam starts the starter, the crack goes beside the game.
                 self.crack_plan = Some(CrackPlan {
-                    app_id: 1_587_910,
+                    app_id: 2_254_990,
                     name: "Permafrost".into(),
-                    root: PathBuf::from(r"D:\Games\Permafrost"),
+                    target: CrackTarget::Folder(PathBuf::from(r"D:\Games\Permafrost")),
                     exe: Some(GameExe {
                         relative: "Permafrost/Binaries/Win64/Permafrost-Win64-Shipping.exe".into(),
                         reason: ExeReason::UnrealShipping {
                             launcher: "Permafrost.exe".into(),
                         },
                     }),
+                });
+            }
+            "crack-zip" => {
+                // The same game as a ZIP: its exes come from the depot file list.
+                let exes: Vec<String> = [
+                    "Engine/Binaries/ThirdParty/CEF3/Win64/UnrealCEFSubProcess.exe",
+                    "Engine/Binaries/Win64/CrashReportClient.exe",
+                    "Permafrost.exe",
+                    "Permafrost/Binaries/Win64/Permafrost-Win64-Shipping.exe",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+                self.crack_plan = Some(CrackPlan {
+                    app_id: 2_254_990,
+                    name: "Permafrost".into(),
+                    exe: find_game_exe(&exes, &["Permafrost.exe".to_owned()], None),
+                    target: CrackTarget::Zip {
+                        path: PathBuf::from(r"C:\Users\Player\Desktop\2254990_crack.zip"),
+                        exes,
+                        data: Box::default(),
+                    },
                 });
             }
             "source-picker" => {
@@ -11366,9 +11517,13 @@ fn build_emu_crack(
     cache_dir: &Path,
     exe: Option<&str>,
     picked: Option<&str>,
+    data: Option<DepotData>,
 ) -> Result<String, String> {
     let proxy = ProxyClient::new().map_err(|error| error.to_string())?;
-    let data = DepotData::fetch(&proxy, app_id).map_err(|error| error.to_string())?;
+    let data = match data {
+        Some(data) => data,
+        None => DepotData::fetch(&proxy, app_id).map_err(|error| error.to_string())?,
+    };
     // The game's exe gives the folder every file goes into (`Bin64\`) and the architecture. A deploy
     // gets the one the user confirmed; a ZIP reads it from the game's depot file list the same way
     // (`find_game_exe`, which sees through an Unreal Engine starter), else takes Steam's first.
@@ -11376,18 +11531,15 @@ fn build_emu_crack(
         Some(exe) => Some(exe.to_owned()),
         None => {
             let listed = fetch_windows_executables(app_id).unwrap_or_default();
-            let files: Vec<String> = data
-                .manifests
-                .iter()
-                .flat_map(|manifest| manifest.files.iter())
-                .filter(|file| !file.is_directory() && file.path.to_ascii_lowercase().ends_with(".exe"))
-                .map(|file| file.path.replace('\\', "/"))
-                .collect();
-            find_game_exe(&files, &listed, picked)
+            find_game_exe(&depot_exes(&data), &listed, picked)
                 .map(|game| game.relative)
                 .or_else(|| listed.first().cloned())
         }
     };
+    // Says in the result which exe the files were placed for.
+    let exe_note = exe.as_deref().map_or_else(String::new, |exe| {
+        format!(" Placed for {}.", exe.replace('/', "\\"))
+    });
     let prefix = exe
         .as_deref()
         .and_then(|exe| {
@@ -11595,7 +11747,7 @@ fn build_emu_crack(
             };
             Ok(format!(
                 "Cracked App {app_id} ({}) into {folder_name} — {config_count} configs + \
-                 {dll_count} DLLs{extras_note}, {achievements_count} achievement(s).{backup_note}\
+                 {dll_count} DLLs{extras_note}, {achievements_count} achievement(s).{exe_note}{backup_note}\
                  {interfaces_note}{steam_api_note}",
                 arch.folder(),
             ))
@@ -11606,7 +11758,7 @@ fn build_emu_crack(
             Ok(format!(
                 "Crack ZIP for App {app_id} ({}) saved to {} — {config_count} config files + \
                  {dll_count} DLLs{extras_note}. {} depot(s), {} DLC(s), {achievements_count} achievement(s).\
-                 {interfaces_note}",
+                 {exe_note}{interfaces_note}",
                 arch.folder(),
                 zip_path.display(),
                 depots.len(),
