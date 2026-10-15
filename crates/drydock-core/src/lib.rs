@@ -14,6 +14,7 @@ pub mod emu_template;
 pub mod emu_toolchain;
 pub(crate) mod file_transaction;
 pub mod fixes;
+pub mod game_exe;
 pub mod game_folder;
 pub mod harden;
 pub mod hubcap;
@@ -78,6 +79,7 @@ pub use emu_toolchain::{
     load_dll_files, overlay_sound_bytes, toolchain_dlls, toolchain_ready,
 };
 pub use fixes::{FixError, FixStatus, apply_denuvo_fix, fix_status};
+pub use game_exe::{ExeReason, GameExe, exes_under, find_game_exe};
 pub use game_folder::{
     CRACK_ARTIFACT_NAMES, back_up_before_overwrite, executable_relative_to, launch_executables, remove_paths,
     resolve_game_root, scan_crack_files,
