@@ -1,168 +1,140 @@
 # Drydock
 
-A native desktop tool for managing a Steam game library — installs, depot downloads, per-game
-configuration and a local emulator toolchain — backed by a proxy you can run yourself.
+Drydock is a native desktop app for browsing, downloading, and managing Steam games on Windows
+and Linux. It also includes tools for game activation, fixes, and language settings.
 
-Written in Rust. No account credentials are ever handled: Drydock never asks for, stores or
-transmits a Steam login.
+## Download
 
+**[Get the latest release](https://github.com/NhMarco/Drydock/releases/latest)** or download your app directly:
+
+| System | Processor | Download |
+| --- | --- | --- |
+| Windows | Intel / AMD 64-bit | [Drydock-windows-x64.exe](https://github.com/NhMarco/Drydock/releases/latest/download/Drydock-windows-x64.exe) |
+| Windows | ARM64 | [Drydock-windows-arm64.exe](https://github.com/NhMarco/Drydock/releases/latest/download/Drydock-windows-arm64.exe) |
+| Linux | Intel / AMD 64-bit | [Drydock-linux-x64](https://github.com/NhMarco/Drydock/releases/latest/download/Drydock-linux-x64) |
+| Linux | ARM64 | [Drydock-linux-arm64](https://github.com/NhMarco/Drydock/releases/latest/download/Drydock-linux-arm64) |
+
+Most Intel and AMD PCs use **x64**. Choose **ARM64** for an ARM device.
+On the release page, these files are under **Assets**. The **Source code** archives are for developers.
+No installer or Rust installation is needed to use the app.
+
+### Windows
+
+Double-click the downloaded `.exe` and approve the administrator prompt.
+
+### Linux
+
+Open a terminal in the folder containing the download, make it executable, and run it:
+
+```bash
+chmod +x Drydock-linux-x64
+./Drydock-linux-x64
 ```
-apps/drydock-desktop   egui/eframe desktop shell        → binary: Drydock
-crates/drydock-core    portable core: all logic, I/O, networking, crypto
-proxy/                 Fastify service in front of the upstream APIs (deployed separately)
-```
 
-Drydock can also be built under another name and look: a white-label build is this repository plus
-one `brand/` folder, and stays current with a plain `git pull`. See
-[docs/branding.md](docs/branding.md).
+For ARM64, use `Drydock-linux-arm64` in both commands.
 
-## What it does
+Drydock checks for app updates on startup and asks before installing them. You can also download
+a newer version from the [releases page](https://github.com/NhMarco/Drydock/releases).
 
-- **Library** — discovers games installed by Steam and by Drydock, grouped and searchable, with
-  per-category actions (install, verify, update, uninstall, launch).
-- **Depot downloads** — a parallel, resumable download engine that verifies every chunk against its
-  manifest checksum and repairs damaged installs in place.
-- **Store** — browse featured, new releases and Denuvo-tracked titles, filtered against the
-  available catalog.
-- **Emulator toolchain** — generates a complete local configuration (DLCs, languages, achievements
-  with mirrored icons) and deploys the matching binaries for the detected architecture.
-- **Self-updating** — every start looks for a SHA-256-verified release (Windows and Linux, x64 and
-  ARM64) and asks before installing it.
+<details>
+<summary>Verify a download (optional)</summary>
 
-## Install
+Each app has a matching `.sha256` checksum file under the release's **Assets**. Download both
+files to the same folder.
 
-Download the binary for your platform from the
-[releases page](https://github.com/NhMarco/Drydock/releases) along with its `.sha256` file, verify
-it, and run it. There is no installer; the executable is self-contained.
+On Windows, run this in PowerShell and compare the hash with the one in the `.sha256` file:
 
 ```powershell
 Get-FileHash .\Drydock-windows-x64.exe -Algorithm SHA256
 ```
 
-Per-user data lives in `%LOCALAPPDATA%\Drydock` on Windows and `$XDG_DATA_HOME/Drydock` elsewhere
-(a white-label build uses its own name there).
-Regenerable caches sit in a `cache/` subfolder and can be deleted at any time.
-
-## Build from source
-
-Requires Rust 1.95 or newer.
-
-```powershell
-cargo run -p drydock-desktop
-```
-
-A fresh clone builds and starts with no configuration at all. It reports the proxy as unconfigured
-and the local features — library, emulator toolchain, folder detection — still work. Point it at a
-proxy to enable the rest.
-
-## Configuration
-
-Every value a deployment can change is resolved by `drydock-core::config` from two layers,
-**highest priority first**:
-
-| Layer | Where | Use it for |
-| --- | --- | --- |
-| 1. Environment variable | the process environment | scripting, CI, development |
-| 2. Build-time default | `build.rs`, from an env var or a git-ignored `*.secret` file | what official release builds ship with |
-
-A blank value at one layer falls through to the next rather than blanking out what is below it.
-
-| Variable | Meaning |
-| --- | --- |
-| `DRYDOCK_PROXY_BASE_URL` | Proxy origin, e.g. `https://proxy.example` — origin only, no path or trailing slash |
-| `DRYDOCK_HMAC_SECRET` | Shared secret; must match one of the proxy's `DRYDOCK_HMAC_SECRET` values |
-| `DRYDOCK_UPDATE_REPOSITORY` | `owner/repo` the self-updater checks. Set this if you fork and publish your own releases |
-| `DRYDOCK_GITHUB_TOKEN` | Rarely needed — see below |
-| `DRYDOCK_RELEASE_VERSION` | Version the binary reports. The release workflow sets it from the git tag |
-
-**Drydock needs no GitHub token.** The client's only GitHub traffic is the self-updater asking the
-Releases API for the latest version, which works anonymously against a public repository.
-`DRYDOCK_GITHUB_TOKEN` exists for two edge cases: hitting the anonymous rate limit (60 requests per
-hour per IP), or pointing the updater at a *private* release repository. The token that reads the
-payload repository belongs to the proxy, not to the client — it never ships in the binary.
-
-To see what actually resolved and which layer it came from — secrets are redacted, so the output is
-safe to paste into an issue:
-
-```powershell
-cargo run -p drydock-desktop -- --config
-```
-
-### Running your own proxy
-
-The proxy is a self-contained Fastify service in [`proxy/`](proxy/). It holds the upstream API keys
-so they never ship inside the client, and it verifies an HMAC signature on every request.
+On Linux, put both files in the same folder and run:
 
 ```bash
-cd proxy
-cp .env.example .env          # fill in the upstream keys
-openssl rand -hex 32          # generate DRYDOCK_HMAC_SECRET
-docker compose up -d --build
+sha256sum -c Drydock-linux-x64.sha256
 ```
 
-Build Drydock with the same secret and your proxy's URL (below), or set the environment variables
-when you run it. [`proxy/README.md`](proxy/README.md) documents the endpoints and the
-request-signing scheme.
+Use the corresponding filenames for ARM64.
 
-To bake your own defaults into a binary instead:
+</details>
 
-```powershell
-$env:DRYDOCK_PROXY_BASE_URL = "https://proxy.example"
-$env:DRYDOCK_HMAC_SECRET    = "…"
-cargo build -p drydock-desktop --release
-```
+## First launch
+
+1. Sign in with Discord in your browser if prompted. Drydock does not ask for your Steam password.
+2. In **Settings**, check the **Steam folder**. If it was not detected, choose it with **Browse**,
+   then select **Save and Reload**.
+3. Set a **Games folder** for new downloads and save it, or leave it empty to use Steam's library.
+4. Browse **Store** or search by game name or Steam App ID. Open a game to see its available actions.
+
+To use **Add to Steam**, install the **Steam Service** from Settings first. The in-app **Help**
+page walks through activation and fixes. These features depend on the game's available files;
+the Steam Service and emulator tools use Windows binaries.
+
+## What you can do
+
+- **Library:** find installed games, launch them, and manage updates, verification, and removal.
+- **Downloads:** queue games, pause and resume transfers, and repair missing or damaged files.
+- **Activation and fixes:** generate activation requests, enter response codes, and apply available game fixes.
+- **Tools:** change supported game languages and generate Steam emulator configurations.
+
+## Help and app data
+
+If the server cannot be reached, **Continue Offline** lets you access installed games while online
+features are unavailable. For bugs, [open an issue](https://github.com/NhMarco/Drydock/issues) with
+your app version, operating system, and steps to reproduce the problem.
+
+Settings and app data are stored in `%LOCALAPPDATA%\Drydock` on Windows and
+`$XDG_DATA_HOME/Drydock` (usually `~/.local/share/Drydock`) on Linux. Crash reports are saved
+as `crash.log` in that folder.
 
 ## Development
 
-```powershell
+The desktop app uses Rust and egui/eframe. The core logic lives in `crates/drydock-core`,
+the UI in `apps/drydock-desktop`, and the separately deployed TypeScript proxy in `proxy/`.
+
+### Build and run
+
+Requires **Rust 1.95+**. Windows builds need the MSVC C++ build tools and Windows SDK.
+On Ubuntu/Debian, install the Linux build dependencies:
+
+```bash
+sudo apt-get install libgl1-mesa-dev libwayland-dev libx11-dev libxkbcommon-dev libxi-dev pkg-config
+```
+
+From the repository root, use `cargo run -p drydock-desktop` for development, or build a release executable:
+
+```bash
+cargo build --locked --release -p drydock-desktop
+```
+
+The built app is `target/release/Drydock.exe` on Windows or `target/release/Drydock` on Linux.
+
+Local builds start without proxy configuration. To enable features that use the proxy, set
+`DRYDOCK_PROXY_BASE_URL` and `DRYDOCK_HMAC_SECRET` in the environment when building or running.
+See the [proxy setup guide](proxy/README.md) for hosting and configuration; proxy development
+requires Node.js 24+.
+
+### Checks
+
+```bash
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo run -p drydock-desktop -- --self-test
 ```
 
-Clippy runs with `-D warnings`; `rustfmt.toml` sets `max_width = 110`. New logic belongs in
-`drydock-core` with tests beside it rather than in the UI layer.
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) covers the module layout and the conventions that are
-not obvious from the code.
+### Publishing a release
 
-On Windows the full release gate additionally waits for the GUI-subsystem executable and validates
-its exit code, output, version, size and SHA-256:
+Maintainers publish releases by pushing a `vMAJOR.MINOR.PATCH` tag on a commit contained in `main`.
+The [release workflow](.github/workflows/release.yml) validates the code, builds and self-tests
+the selected Windows and Linux targets, and publishes the executables and `.sha256` files to
+GitHub Releases. The app version comes from the tag; a push to `main` alone does not publish a release.
 
-```powershell
-.\tools\verify-release.ps1 -ExpectedVersion 1.0.0
-```
+More documentation:
 
-### Diagnostic flags
+- [Architecture and development](docs/ARCHITECTURE.md)
+- [Custom branding](docs/branding.md)
+- [Changelog](CHANGELOG.md)
+- [Security reporting](SECURITY.md)
 
-| Flag | Purpose |
-| --- | --- |
-| `--self-test` | Headless integrity check; the release gate |
-| `--config` | Print the resolved configuration and each value's source |
-| `--version` | Print the version this binary reports |
-| `--check-update` | Full download + verify + stage, without applying |
-
-## Build targets
-
-Each operating system and CPU architecture gets its own native executable; there is no single format
-that runs unchanged on Windows and Linux.
-
-- `x86_64-pc-windows-msvc`
-- `aarch64-pc-windows-msvc`
-- `x86_64-unknown-linux-gnu`
-- `aarch64-unknown-linux-gnu`
-
-GitHub Actions builds and validates all four on native x64/ARM64 runners. A tag matching
-`vMAJOR.MINOR.PATCH` publishes a release with one standalone executable and `.sha256` per target. The
-tag version is compiled into every official binary and verified before publishing, and each packaged
-binary must pass its own headless `--self-test` on the native runner before it is uploaded.
-
-## Security
-
-The client ships no upstream API key and no GitHub token — only a proxy address and a shared signing
-secret. Report security issues privately rather than opening a public issue; see
-[SECURITY.md](SECURITY.md).
-
-## License
-
-[GPL-2.0-only](LICENSE).
+Licensed under [GPL-2.0-only](LICENSE).
