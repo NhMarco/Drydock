@@ -22,6 +22,9 @@ No installer or Rust installation is needed to use the app.
 
 Double-click the downloaded `.exe` and approve the administrator prompt.
 
+If Windows shows **"Windows protected your PC"**, select **More info**, then **Run anyway**. This
+appears because the app is not code-signed.
+
 ### Linux
 
 Open a terminal in the folder containing the download, make it executable, and run it:
@@ -72,69 +75,30 @@ the Steam Service and emulator tools use Windows binaries.
 
 ## What you can do
 
+- **Store:** browse featured games, new releases and Denuvo titles as a grid or a list.
+- **Add to Steam or download:** choose where a game comes from (DepotBox, SteamTools or Ryu) and see
+  how up to date each source is. With your own Hubcap Manifest API key (in **Settings**), Hubcap is a
+  choice too.
 - **Library:** find installed games, launch them, and manage updates, verification, and removal.
 - **Downloads:** queue games, pause and resume transfers, and repair missing or damaged files.
-- **Activation and fixes:** generate activation requests, enter response codes, and apply available game fixes.
+- **Activation and fixes:** generate activation requests, enter response codes, apply available game
+  fixes, or get the version a fix is made for.
 - **Tools:** change supported game languages and generate Steam emulator configurations.
 
 ## Help and app data
 
 If the server cannot be reached, **Continue Offline** lets you access installed games while online
 features are unavailable. For bugs, [open an issue](https://github.com/NhMarco/Drydock/issues) with
-your app version, operating system, and steps to reproduce the problem.
+your app version, operating system, and steps to reproduce the problem. Please report security issues
+privately instead ([how](SECURITY.md)).
 
 Settings and app data are stored in `%LOCALAPPDATA%\Drydock` on Windows and
 `$XDG_DATA_HOME/Drydock` (usually `~/.local/share/Drydock`) on Linux. Crash reports are saved
 as `crash.log` in that folder.
 
-## Development
+## For developers
 
-The desktop app uses Rust and egui/eframe. The core logic lives in `crates/drydock-core`,
-the UI in `apps/drydock-desktop`, and the separately deployed TypeScript proxy in `proxy/`.
-
-### Build and run
-
-Requires **Rust 1.95+**. Windows builds need the MSVC C++ build tools and Windows SDK.
-On Ubuntu/Debian, install the Linux build dependencies:
-
-```bash
-sudo apt-get install libgl1-mesa-dev libwayland-dev libx11-dev libxkbcommon-dev libxi-dev pkg-config
-```
-
-From the repository root, use `cargo run -p drydock-desktop` for development, or build a release executable:
-
-```bash
-cargo build --locked --release -p drydock-desktop
-```
-
-The built app is `target/release/Drydock.exe` on Windows or `target/release/Drydock` on Linux.
-
-Local builds start without proxy configuration. To enable features that use the proxy, set
-`DRYDOCK_PROXY_BASE_URL` and `DRYDOCK_HMAC_SECRET` in the environment when building or running.
-See the [proxy setup guide](proxy/README.md) for hosting and configuration; proxy development
-requires Node.js 24+.
-
-### Checks
-
-```bash
-cargo fmt --all --check
-cargo test --workspace --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo run -p drydock-desktop -- --self-test
-```
-
-### Publishing a release
-
-Maintainers publish releases by pushing a `vMAJOR.MINOR.PATCH` tag on a commit contained in `main`.
-The [release workflow](.github/workflows/release.yml) validates the code, builds and self-tests
-the selected Windows and Linux targets, and publishes the executables and `.sha256` files to
-GitHub Releases. The app version comes from the tag; a push to `main` alone does not publish a release.
-
-More documentation:
-
-- [Architecture and development](docs/ARCHITECTURE.md)
-- [Custom branding](docs/branding.md)
-- [Changelog](CHANGELOG.md)
-- [Security reporting](SECURITY.md)
+Building from source, configuration, running your own proxy and publishing releases are covered in
+the [developer guide](docs/DEVELOPMENT.md).
 
 Licensed under [GPL-2.0-only](LICENSE).

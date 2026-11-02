@@ -1,6 +1,7 @@
 # Architecture
 
-How Drydock is put together, and the conventions that are not obvious from reading the code.
+How Drydock is put together, and the conventions that are not obvious from reading the code. Building,
+configuring and releasing it is in the [developer guide](DEVELOPMENT.md).
 
 ## Layout
 
