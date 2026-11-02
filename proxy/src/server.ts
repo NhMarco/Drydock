@@ -115,7 +115,7 @@ async function main(): Promise<void> {
   // App info comes from SteamTools alone and spends its quota, so it exists only while SteamTools is on.
   if (config.providerSources.includes("steamtools")) registerAppInfoRoute(app, config, client, authHook);
   registerSchemaRoute(app, config, fileCache, authHook);
-  registerDepotRoutes(app, { ryu, depotbox, steamtools: client }, config.providerSources, fileCache, authHook, cooldown, {
+  registerDepotRoutes(app, { ryu, depotbox, steamtools: client, luas: luaSource }, config.providerSources, fileCache, authHook, cooldown, {
     rateMax: config.depotRateMax,
     rateWindowMs: config.depotRateWindowSeconds * 1000,
   });

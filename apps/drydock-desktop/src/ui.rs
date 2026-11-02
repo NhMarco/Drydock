@@ -4305,10 +4305,10 @@ impl DrydockApp {
             egui::pos2(rect.right() - 26.0, rect.bottom() - 20.0),
         );
         let stage_label = if is_verify {
-            if verify_finished.is_some() {
-                "Complete"
-            } else {
-                "Files are being verified…"
+            match &verify_finished {
+                Some(Ok(_)) => "Complete",
+                Some(Err(_)) => "Verify failed",
+                None => "Files are being verified…",
             }
         } else if stopping {
             "Pausing…"

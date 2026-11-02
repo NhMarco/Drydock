@@ -14,18 +14,21 @@
 // naming which upstream served it and `X-Cache` saying whether it came from the cache.
 //
 // The `.lua` in a package loses the provider's comments and gets Drydock's header (luaClean.ts)
-// before it is cached, so every client gets the same clean file whichever provider served it.
+// before it is cached, so every client gets the same clean file whichever provider served it. A depot
+// key in it that does not decrypt its manifest is replaced by another provider's that does
+// (packageKeys.ts).
 
 import { Readable } from "node:stream";
 import type { FastifyInstance, FastifyBaseLogger, FastifyReply, preHandlerHookHandler } from "fastify";
 import type { DepotPackageSourceName } from "../config.js";
-import { UpstreamError, type SteamToolsClient } from "../upstream.js";
+import { UpstreamError, type LuaResult, type SteamToolsClient } from "../upstream.js";
 import type { DepotBoxClient, RawStream } from "../depotbox.js";
 import type { RyuClient } from "../ryu.js";
 import type { CacheHit, FileCache } from "../fileCache.js";
 import type { ProviderCooldown } from "../merged.js";
 import { MAXIMUM_PACKAGE_BYTES, requireZip } from "../packageCheck.js";
 import { cleanPackageLuas } from "../luaClean.js";
+import { repairPackageKeys, type AlternativeLua } from "../packageKeys.js";
 
 const APPID_PATTERN = /^[0-9]{1,10}$/;
 
@@ -56,6 +59,8 @@ export interface DepotUpstreams {
   ryu: RyuClient;
   depotbox: DepotBoxClient;
   steamtools: SteamToolsClient;
+  /** The providers' Luas, asked for a depot key when a package's own does not fit its manifest. */
+  luas?: { names(): string[]; fetchLua(appid: string, only?: string): Promise<LuaResult> };
 }
 
 export function registerDepotRoutes(
@@ -76,6 +81,44 @@ export function registerDepotRoutes(
   };
   const sources: PackageSource[] = enabledSources.map((name) => ({ name, fetch: factories[name] }));
   app.log.info({ sources: enabledSources }, "Depot package sources enabled.");
+
+  // The package with every depot key that does not decrypt its manifest replaced by one from another
+  // provider's Lua that does. Those Luas are only fetched when a key is wrong, which is rare.
+  const withWorkingKeys = async (
+    zip: Buffer,
+    appid: string,
+    served: string,
+    log: FastifyBaseLogger,
+  ): Promise<Buffer> => {
+    const luas = upstreams.luas;
+    if (!luas) return zip;
+    const others = async (): Promise<AlternativeLua[]> => {
+      const found = await Promise.all(
+        luas
+          .names()
+          .filter((name) => name !== served)
+          .map(async (name) => {
+            try {
+              return { source: name, lua: (await luas.fetchLua(appid, name)).body };
+            } catch {
+              return null;
+            }
+          }),
+      );
+      return found.filter((lua): lua is AlternativeLua => lua !== null);
+    };
+    try {
+      const { zip: fixed, repaired, unrepaired } = await repairPackageKeys(zip, others);
+      if (repaired.length > 0) log.info({ appid, served, repaired }, "Replaced depot keys that did not fit.");
+      if (unrepaired.length > 0) {
+        log.warn({ appid, served, depots: unrepaired }, "No provider has a depot key that fits these manifests.");
+      }
+      return fixed ?? zip;
+    } catch (error) {
+      log.warn({ appid, err: error }, "Could not check the package's depot keys; serving it as it is.");
+      return zip;
+    }
+  };
 
   app.get<{ Params: { appid: string }; Querystring: { source?: string } }>(
     "/v1/depot/package/:appid",
@@ -136,10 +179,12 @@ export function registerDepotRoutes(
               MAXIMUM_PACKAGE_BYTES,
               true,
             );
-            // Read whole (requireZip bounds it) so the Lua inside can be cleaned before caching.
+            // Read whole (requireZip bounds it) so the Lua inside can be cleaned and its keys
+            // checked before caching.
             const cleaned = cleanPackageLuas(await collect(stream), appid);
+            const checked = await withWorkingKeys(cleaned, appid, candidate.name, req.log);
             source = candidate.name;
-            return Readable.from([cleaned]);
+            return Readable.from([checked]);
           } catch (error) {
             cooldown.noteFailure(candidate.name, error);
             lastError = error;

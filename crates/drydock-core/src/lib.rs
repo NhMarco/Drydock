@@ -68,7 +68,7 @@ pub use denuvo::{
 };
 pub use depot::{
     CdnClient, DepotData, DepotDownloadError, DepotManifest, DownloadOutcome, DownloadProgress,
-    DownloadStage, VerifyOutcome,
+    DownloadStage, VerifyOutcome, depot_list,
 };
 pub use download_queue::QueueEffect;
 pub use emu_template::{

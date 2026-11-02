@@ -35,6 +35,12 @@ pub enum DepotDownloadError {
     Manifest(#[from] ManifestError),
     #[error("no depot key was provided for depot {0}")]
     MissingKey(u32),
+    /// Every manifest in the package belongs to a depot whose key does not decrypt it.
+    #[error(
+        "the source's depot key for depot {} does not fit its manifest, so it cannot be downloaded —          another source may have the right one",
+        depot_list(.0)
+    )]
+    WrongKey(Vec<u32>),
     #[error(transparent)]
     Cdn(#[from] CdnError),
     #[error("filesystem error at {path}: {source}")]
@@ -81,6 +87,54 @@ pub struct DepotData {
     /// with the pins commented out and, for at least one observed title, fewer DLC ownership lines.
     /// Installing that leaves Steam unpinned and the cached manifests unused.
     pub lua: Option<(String, Vec<u8>)>,
+    /// Depots left out because the key the package has for them does not decrypt their manifest.
+    ///
+    /// Providers now and then ship a wrong key for one depot — often the line above's, copied down.
+    /// Nothing of such a depot can be downloaded, verified or used by Steam, so it is set aside
+    /// rather than failing the whole package, and the job says which depots it skipped.
+    pub undecryptable: Vec<u32>,
+}
+
+/// `1, 2 and 3` for a list of depots.
+#[must_use]
+pub fn depot_list(depots: &[u32]) -> String {
+    let names: Vec<String> = depots.iter().map(u32::to_string).collect();
+    match names.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// Decrypts the file names of each manifest with its depot's key, and sets aside the manifests
+/// whose key does not decrypt them (see [`DepotData::undecryptable`]), with their raw blobs. A
+/// manifest without any key keeps its encrypted names; the download reports that key as missing.
+pub(crate) fn decrypt_manifests(
+    manifests: Vec<DepotManifest>,
+    keys: &DepotKeys,
+    raw: &mut BTreeMap<String, Vec<u8>>,
+) -> (Vec<DepotManifest>, Vec<u32>) {
+    let mut readable = Vec::with_capacity(manifests.len());
+    let mut undecryptable = Vec::new();
+    for mut manifest in manifests {
+        let fits = match keys.get(manifest.depot_id) {
+            Some(key) => manifest.decrypt_filenames(key).is_ok(),
+            None => true,
+        };
+        if fits {
+            readable.push(manifest);
+        } else {
+            raw.remove(&format!(
+                "{}_{}.manifest",
+                manifest.depot_id, manifest.manifest_gid
+            ));
+            if !undecryptable.contains(&manifest.depot_id) {
+                undecryptable.push(manifest.depot_id);
+            }
+        }
+    }
+    undecryptable.sort_unstable();
+    (readable, undecryptable)
 }
 
 impl DepotData {
@@ -142,22 +196,24 @@ impl DepotData {
             }
         }
 
-        let mut manifests = Vec::new();
+        let mut parsed = Vec::new();
         let mut stored: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         for bytes in &raw_manifests {
-            let mut manifest = DepotManifest::parse(bytes)?;
+            let manifest = DepotManifest::parse(bytes)?;
             // Record the untouched blob under Steam depotcache naming before decrypting names.
             stored.insert(
                 format!("{}_{}.manifest", manifest.depot_id, manifest.manifest_gid),
                 bytes.clone(),
             );
-            if let Some(key) = keys.get(manifest.depot_id) {
-                manifest.decrypt_filenames(key)?;
-            }
-            manifests.push(manifest);
+            parsed.push(manifest);
         }
+        let (manifests, undecryptable) = decrypt_manifests(parsed, &keys, &mut stored);
         if manifests.is_empty() {
-            return Err(DepotDownloadError::Unavailable(app_id));
+            return Err(if undecryptable.is_empty() {
+                DepotDownloadError::Unavailable(app_id)
+            } else {
+                DepotDownloadError::WrongKey(undecryptable)
+            });
         }
         Ok(Self {
             app_id,
@@ -165,6 +221,7 @@ impl DepotData {
             manifests,
             raw_manifests: stored,
             lua,
+            undecryptable,
         })
     }
 
@@ -204,6 +261,7 @@ impl DepotData {
         let before = self.manifests.len();
         self.manifests
             .retain(|manifest| !unwanted.contains(&manifest.depot_id));
+        self.undecryptable.retain(|depot| !unwanted.contains(depot));
         self.raw_manifests.retain(|name, _| {
             name.split('_')
                 .next()
@@ -1315,6 +1373,70 @@ mod tests {
         assert_eq!(name, "4242.lua", "it is installed under the app's own name");
         assert_eq!(bytes, lua, "and byte-for-byte as shipped");
         assert!(data.raw_manifests.contains_key("9_123.manifest"));
+    }
+
+    /// A manifest for `depot_id` whose one file name is encrypted with `key`.
+    fn encrypted_manifest(depot_id: u32, key: &[u8; 32]) -> Vec<u8> {
+        use base64::Engine as _;
+        let name = crate::depot::crypto::symmetric_encrypt(b"game.exe", key, &[5; 16]);
+        crate::depot::manifest::tests::build_manifest(
+            depot_id,
+            1,
+            true,
+            &[FileEntry {
+                path: base64::engine::general_purpose::STANDARD.encode(name),
+                size: 10,
+                flags: 0,
+                chunks: vec![],
+            }],
+        )
+    }
+
+    fn key_line(depot_id: u32, key: &[u8; 32]) -> String {
+        let hex: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
+        format!(
+            "addappid({depot_id}, 1, \"{hex}\")
+"
+        )
+    }
+
+    #[test]
+    fn a_depot_whose_key_does_not_fit_is_set_aside_not_the_package() {
+        // As observed: the provider copied depot 11's key onto depot 12.
+        let lua = key_line(11, &[1; 32]) + &key_line(12, &[1; 32]);
+        let zip = package_zip(&[
+            ("10.lua", lua.into_bytes()),
+            ("11_1.manifest", encrypted_manifest(11, &[1; 32])),
+            ("12_1.manifest", encrypted_manifest(12, &[2; 32])),
+        ]);
+        let data = DepotData::parse_package(10, zip).expect("the rest of the package still parses");
+        assert_eq!(data.manifest_depots(), vec![11]);
+        assert_eq!(data.manifests[0].files[0].path, "game.exe");
+        assert_eq!(data.undecryptable, vec![12]);
+        assert!(data.raw_manifests.contains_key("11_1.manifest"));
+        assert!(
+            !data.raw_manifests.contains_key("12_1.manifest"),
+            "Steam can't use it either"
+        );
+    }
+
+    #[test]
+    fn a_package_no_key_fits_says_so() {
+        let zip = package_zip(&[
+            ("10.lua", key_line(12, &[1; 32]).into_bytes()),
+            ("12_1.manifest", encrypted_manifest(12, &[2; 32])),
+        ]);
+        let error = DepotData::parse_package(10, zip).expect_err("nothing is left");
+        assert!(matches!(&error, DepotDownloadError::WrongKey(depots) if depots == &[12]));
+        assert!(error.to_string().contains("depot 12 does not fit"), "{error}");
+    }
+
+    #[test]
+    fn depots_are_listed_in_words() {
+        assert_eq!(depot_list(&[]), "");
+        assert_eq!(depot_list(&[7]), "7");
+        assert_eq!(depot_list(&[7, 8]), "7 and 8");
+        assert_eq!(depot_list(&[7, 8, 9]), "7, 8 and 9");
     }
 
     #[test]

@@ -108,6 +108,14 @@ function readEntry(entry: Entry): Buffer | null {
 }
 
 /**
+ * The entries of `zip` with their bytes (null for one this cannot read), or null when it is not an
+ * archive this reads.
+ */
+export function readZipEntries(zip: Buffer): { name: string; bytes: Buffer | null }[] | null {
+  return readEntries(zip)?.entries.map((entry) => ({ name: entry.name, bytes: readEntry(entry) })) ?? null;
+}
+
+/**
  * `zip` with each `.lua` entry replaced by `transform(name, text)`, or null when nothing changed or
  * the archive is not one this can rewrite safely — the caller then keeps the original.
  */

@@ -249,6 +249,19 @@ pub(crate) fn run_depot_job(
     }
     stopped()?;
 
+    // A depot whose key does not decrypt its manifest was set aside when the package was read. When
+    // that was the game itself, there is nothing left worth downloading or verifying.
+    let skipped = if data.undecryptable.is_empty() {
+        String::new()
+    } else {
+        let depots = drydock_core::depot_list(&data.undecryptable);
+        if data.has_no_content() {
+            return Err(drydock_core::DepotDownloadError::WrongKey(data.undecryptable.clone()).to_string());
+        }
+        let plural = if data.undecryptable.len() == 1 { "" } else { "s" };
+        format!(" · Skipped depot{plural} {depots}: the source's key does not fit")
+    };
+
     // Refuse to "succeed" on a package that has no game content. Some upstream builds ship only the
     // shared redistributables (Visual C++, DirectX, …) with keys for the real content depots but no
     // manifest for them — downloading that would leave the game unplayable while claiming it
@@ -295,7 +308,7 @@ pub(crate) fn run_depot_job(
                 name.to_owned()
             };
             Ok(format!(
-                "Downloaded {what} — {} files, {}",
+                "Downloaded {what} — {} files, {}{skipped}",
                 outcome.files_written,
                 human_bytes(outcome.bytes_written)
             ))
@@ -307,7 +320,7 @@ pub(crate) fn run_depot_job(
             let _ = sender.send(DownloadUpdate::Verified(outcome.is_complete()));
             if outcome.is_complete() {
                 Ok(format!(
-                    "{name} verified — all {} chunks OK",
+                    "{name} verified — all {} chunks OK{skipped}",
                     outcome.total_chunks
                 ))
             } else {
@@ -318,7 +331,7 @@ pub(crate) fn run_depot_job(
                     "press Download to fix"
                 };
                 Ok(format!(
-                    "{name}: {} of {} chunks and {} files need repair — {repair}",
+                    "{name}: {} of {} chunks and {} files need repair — {repair}{skipped}",
                     outcome.bad_chunks, outcome.total_chunks, outcome.bad_files
                 ))
             }

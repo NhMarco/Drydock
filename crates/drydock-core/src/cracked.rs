@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use thiserror::Error;
 
-use crate::depot::download::is_shared_redistributable_depot;
+use crate::depot::download::{decrypt_manifests, is_shared_redistributable_depot};
 use crate::depot::manifest::ManifestError;
 use crate::depot::{DepotData, DepotDownloadError, DepotKeys, DepotManifest};
 use crate::mfb::{DenuvoFix, RepositoryFile};
@@ -158,27 +158,32 @@ fn build_depot_data(
             pinned: pins.len(),
         });
     }
-    let mut manifests = Vec::with_capacity(raw.len());
+    let mut parsed = Vec::with_capacity(raw.len());
     for (name, bytes) in &raw {
-        let mut manifest = DepotManifest::parse(bytes)?;
+        let manifest = DepotManifest::parse(bytes)?;
         if pins.get(&manifest.depot_id) != Some(&manifest.manifest_gid)
             || manifest_name(manifest.depot_id, manifest.manifest_gid) != *name
         {
             return Err(CrackedBuildError::WrongManifest(name.clone()));
         }
-        let key = keys
-            .get(manifest.depot_id)
-            .ok_or(CrackedBuildError::MissingKey(manifest.depot_id))?;
-        manifest.decrypt_filenames(key)?;
-        manifests.push(manifest);
+        if keys.get(manifest.depot_id).is_none() {
+            return Err(CrackedBuildError::MissingKey(manifest.depot_id));
+        }
+        parsed.push(manifest);
     }
+    let mut raw = raw;
+    let (manifests, undecryptable) = decrypt_manifests(parsed, &keys, &mut raw);
     let data = DepotData {
         app_id,
         keys,
         manifests,
         raw_manifests: raw,
         lua: Some((format!("{app_id}.lua"), lua)),
+        undecryptable,
     };
+    if data.has_no_content() && !data.undecryptable.is_empty() {
+        return Err(DepotDownloadError::WrongKey(data.undecryptable).into());
+    }
     if data.has_no_content() {
         return Err(CrackedBuildError::BuildUnavailable {
             missing: pins.len(),

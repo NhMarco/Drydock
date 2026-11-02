@@ -18,7 +18,9 @@ pub mod manifest;
 pub mod verify;
 
 pub use cdn::{CdnClient, CdnError, ContentServer};
-pub use download::{DepotData, DepotDownloadError, DownloadOutcome, DownloadProgress, DownloadStage};
+pub use download::{
+    DepotData, DepotDownloadError, DownloadOutcome, DownloadProgress, DownloadStage, depot_list,
+};
 pub use keys::DepotKeys;
 pub use manifest::{ChunkEntry, DepotManifest, FileEntry};
 pub use verify::{MAXIMUM_VERIFY_THREADS, VerifyOutcome, verify, verify_threads};
