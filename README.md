@@ -71,7 +71,10 @@ Use the corresponding filenames for ARM64.
 
 To use **Add to Steam**, install the **Steam Service** from Settings first. The in-app **Help**
 page walks through activation and fixes. These features depend on the game's available files;
-the Steam Service and emulator tools use Windows binaries.
+the emulator tools use Windows binaries.
+
+On Linux, **Add to Steam** is not available: Steam on Linux does not load the Steam Service, so
+download games in Drydock instead.
 
 ## What you can do
 

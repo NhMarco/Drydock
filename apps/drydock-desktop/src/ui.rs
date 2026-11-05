@@ -36,7 +36,9 @@ use drydock_core::{
     save_denuvo_appids, scan_crack_files, service_status, start_steam, stop_steam, toolchain_dlls,
     uninstall_service,
 };
-use drydock_core::{ExeReason, GameExe, HubcapClient, HubcapUsage, exes_under, find_game_exe};
+use drydock_core::{
+    ExeReason, GameExe, HubcapClient, HubcapUsage, STEAM_SERVICE_SUPPORTED, exes_under, find_game_exe,
+};
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke, Vec2};
 
 // The palette comes from the product being built (`brand.rs`); these names are what the rest of the
@@ -3160,8 +3162,12 @@ impl DrydockApp {
         }
     }
 
-    /// Refreshes the Steam Service status in the background (remote manifest + local files).
+    /// Refreshes the Steam Service status in the background (remote manifest + local files). Not on a
+    /// platform the service cannot run on, where checking would only download its Windows DLLs.
     fn refresh_service_status(&mut self) {
+        if !STEAM_SERVICE_SUPPORTED {
+            return;
+        }
         let Some(root) = self.steam.root.clone() else {
             return;
         };
@@ -4630,7 +4636,12 @@ impl DrydockApp {
             ));
         }
 
-        match self.service_status.as_ref().map(|status| status.state) {
+        match self
+            .service_status
+            .as_ref()
+            .map(|status| status.state)
+            .filter(|_| STEAM_SERVICE_SUPPORTED)
+        {
             Some(SteamServiceState::NotInstalled) => errors.push(Notification::warn(
                 "Steam Service not installed",
                 "Install it in Settings to enable Add to Steam.",
@@ -5150,10 +5161,11 @@ impl DrydockApp {
                     {
                         add_game_requested = true;
                     }
-                    if ui
-                        .add(ghost_button("＋  ADD YOUR OWN LUA / MANIFESTS"))
-                        .on_hover_text(OWN_UNLOCK_HOVER)
-                        .clicked()
+                    if STEAM_SERVICE_SUPPORTED
+                        && ui
+                            .add(ghost_button("＋  ADD YOUR OWN LUA / MANIFESTS"))
+                            .on_hover_text(OWN_UNLOCK_HOVER)
+                            .clicked()
                     {
                         add_own_requested = true;
                     }
@@ -5211,16 +5223,18 @@ impl DrydockApp {
                             {
                                 add_game_requested = true;
                             }
-                            ui.add_space(4.0);
-                            if ui
-                                .add(
-                                    ghost_button("＋  ADD YOUR OWN LUA / MANIFESTS")
-                                        .min_size(Vec2::new(add_w, 34.0)),
-                                )
-                                .on_hover_text(OWN_UNLOCK_HOVER)
-                                .clicked()
-                            {
-                                add_own_requested = true;
+                            if STEAM_SERVICE_SUPPORTED {
+                                ui.add_space(4.0);
+                                if ui
+                                    .add(
+                                        ghost_button("＋  ADD YOUR OWN LUA / MANIFESTS")
+                                            .min_size(Vec2::new(add_w, 34.0)),
+                                    )
+                                    .on_hover_text(OWN_UNLOCK_HOVER)
+                                    .clicked()
+                                {
+                                    add_own_requested = true;
+                                }
                             }
                             ui.add_space(6.0);
                             egui::ScrollArea::vertical()
@@ -6327,6 +6341,7 @@ impl DrydockApp {
                 Some(SteamServiceState::Current)
             ),
             busy: self.service_receiver.is_some(),
+            steam_supported: STEAM_SERVICE_SUPPORTED,
         }
     }
 
@@ -7451,13 +7466,18 @@ impl DrydockApp {
 
             // The Steam Service controls (install / reinstall / uninstall / restart Steam) live here.
             ui.add_space(16.0);
-            let service_action = steam_service_card(
-                ui,
-                &self.steam,
-                self.service_status.as_ref(),
-                self.service_receiver.is_some(),
-                self.background_action.is_none(),
-            );
+            let service_action = if STEAM_SERVICE_SUPPORTED {
+                steam_service_card(
+                    ui,
+                    &self.steam,
+                    self.service_status.as_ref(),
+                    self.service_receiver.is_some(),
+                    self.background_action.is_none(),
+                )
+            } else {
+                steam_service_unsupported_card(ui);
+                SteamServiceCardAction::None
+            };
             match service_action {
                 SteamServiceCardAction::Install | SteamServiceCardAction::Reinstall => {
                     self.install_steam_service();
@@ -7774,7 +7794,22 @@ impl DrydockApp {
             if index > 0 {
                 ui.add_space(16.0);
             }
-            guide_stage(ui, index + 1, stage, stage_subtitle, steps, &mut step);
+            // Where the Steam Service cannot run, its step goes and the cracked version comes from
+            // the Download menu alone.
+            let steps: Vec<GuideStep> = steps
+                .iter()
+                .copied()
+                .filter_map(|entry| match entry.0 {
+                    _ if STEAM_SERVICE_SUPPORTED => Some(entry),
+                    "Install the Steam Service" => None,
+                    "Get the cracked version" => Some((
+                        entry.0,
+                        "On the game's page, choose Download cracked version from the Download menu to let {product} fetch it.",
+                    )),
+                    _ => Some(entry),
+                })
+                .collect();
+            guide_stage(ui, index + 1, stage, stage_subtitle, &steps, &mut step);
         }
     }
 
@@ -11094,12 +11129,16 @@ enum LibraryAction {
 /// everything here is the secondary set — maintenance, removal and the store link. Pure, so the
 /// composition can be checked without a frame.
 type LibraryMenuEntry = (&'static str, &'static str, LibraryAction);
+///
+/// `steam` is whether the Steam Service can run here ([`STEAM_SERVICE_SUPPORTED`]): without it there
+/// is no unlock to update, though a Lua left from before can still be removed.
 fn library_menu(
     source: LibrarySource,
     app_id: u32,
     has_lua: bool,
     has_fix: bool,
     cracked: bool,
+    steam: bool,
 ) -> (LibraryMenuEntry, Vec<LibraryMenuEntry>) {
     let store_page = (
         "STORE PAGE",
@@ -11158,11 +11197,22 @@ fn library_menu(
     match source {
         // Uninstalling a Steam game is done in Steam; here its Lua is updated or removed.
         LibrarySource::Available | LibrarySource::SteamInstalled => {
-            let rest = remove_lua.into_iter().chain([store_page]);
-            match fix {
-                Some(fix) if fix_leads => (fix, [update_lua].into_iter().chain(rest).collect()),
-                fix => (update_lua, fix.into_iter().chain(rest).collect()),
+            let update_lua = steam.then_some(update_lua);
+            let mut entries: Vec<LibraryMenuEntry> = if fix_leads || update_lua.is_none() {
+                fix.into_iter().chain(update_lua).collect()
+            } else {
+                update_lua.into_iter().chain(fix).collect()
+            };
+            // Removing never leads: with nothing else to offer, the store page does.
+            if entries.is_empty() {
+                entries.push(store_page);
+                entries.extend(remove_lua);
+            } else {
+                entries.extend(remove_lua);
+                entries.push(store_page);
             }
+            let main = entries.remove(0);
+            (main, entries)
         }
         LibrarySource::DrydockInstalled => {
             let verify = (
@@ -11434,6 +11484,7 @@ fn library_overview(
                             entry.has_lua,
                             entry.has_fix,
                             entry.cracked,
+                            STEAM_SERVICE_SUPPORTED,
                         );
                         let items: Vec<MenuItem> = entries
                             .iter()
@@ -12091,6 +12142,33 @@ impl Notification {
     }
 }
 
+/// The Steam Service card where the service cannot run (see [`STEAM_SERVICE_SUPPORTED`]): says why
+/// there is nothing to install, and what to do instead.
+fn steam_service_unsupported_card(ui: &mut egui::Ui) {
+    egui::Frame::new()
+        .fill(SURFACE)
+        .stroke(Stroke::new(1.0, BORDER))
+        .corner_radius(12)
+        .inner_margin(14)
+        .show(ui, |ui| {
+            section_label(ui, "STEAM SERVICE");
+            ui.add_space(6.0);
+            status_pill(ui, "WINDOWS ONLY", MUTED);
+            ui.add_space(6.0);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(branded!(
+                        "Steam on Linux never loads the Steam Service, so games can't be added to Steam \
+                         here. Download them in {product} instead."
+                    ))
+                    .size(10.0)
+                    .color(MUTED),
+                )
+                .wrap(),
+            );
+        });
+}
+
 fn steam_service_card(
     ui: &mut egui::Ui,
     steam: &SteamDiscovery,
@@ -12715,6 +12793,8 @@ struct DetailsState {
     service_current: bool,
     /// A Steam Service background operation is in progress.
     busy: bool,
+    /// The Steam Service can run on this platform at all ([`STEAM_SERVICE_SUPPORTED`]).
+    steam_supported: bool,
 }
 
 /// The Add-to-Steam split button's main action: label and hover text. Adding and updating are the
@@ -12853,7 +12933,8 @@ fn steam_button_row(
     // adding (or, once added, updating) the latest unlock is the primary action and everything else
     // hangs off the dropdown, so the row stays two controls wide however many repackers there are.
     let mut extras: Vec<(String, String, DetailsAction)> = Vec::new();
-    if state.is_added || state.service_current {
+    let can_add = state.steam_supported && (state.is_added || state.service_current);
+    if can_add {
         extras.extend(
             add_to_steam_extras(state.is_added, has_denuvo)
                 .into_iter()
@@ -12868,13 +12949,25 @@ fn steam_button_row(
         .map(|(label, hover, _)| MenuItem { label, hover })
         .collect();
 
-    if state.is_added || state.service_current {
+    if can_add {
         let (main_label, main_hover) = add_to_steam_main(state.is_added);
         if let Some(index) = split_button(ui, "add_to_steam", main_label, main_hover, !state.busy, &items) {
             action = match index.checked_sub(1) {
                 None => DetailsAction::AddToSteam,
                 Some(extra) => extras[extra].2,
             };
+        }
+    } else if !state.steam_supported {
+        // Nothing on this platform reads an unlock, so the repack sources are all this menu has
+        // left: the first leads and the others ride in its dropdown.
+        if let Some(((label, hover, first), rest)) = extras.split_first() {
+            let items: Vec<MenuItem> = rest
+                .iter()
+                .map(|(label, hover, _)| MenuItem { label, hover })
+                .collect();
+            if let Some(index) = split_button(ui, "add_to_steam", label, hover, true, &items) {
+                action = index.checked_sub(1).map_or(*first, |extra| rest[extra].2);
+            }
         }
     } else if !items.is_empty() {
         // Without the Steam Service nothing can be added, so installing it becomes the main action —
@@ -13662,7 +13755,7 @@ mod ui_tests {
             ),
         ];
         for (source, has_lua, has_fix, cracked, expected) in cases {
-            let (main, extras) = library_menu(source, 7, has_lua, has_fix, cracked);
+            let (main, extras) = library_menu(source, 7, has_lua, has_fix, cracked, true);
             assert!(
                 source.group() == LibraryGroup::Downloaded
                     || !extras.iter().any(|entry| entry.0.contains("UNINSTALL")),
@@ -13679,6 +13772,35 @@ mod ui_tests {
                 .any(|entry| entry.0 == "UPDATE TO LATEST VERSION");
             assert_eq!(warns, cracked, "updating a cracked game says what it replaces");
         }
+    }
+
+    #[test]
+    fn without_the_steam_service_a_library_row_offers_no_unlock_to_update() {
+        use LibraryAction::*;
+        let actions = |source, has_lua, has_fix, cracked| {
+            let (main, extras) = library_menu(source, 7, has_lua, has_fix, cracked, false);
+            std::iter::once(main.2)
+                .chain(extras.iter().map(|entry| entry.2))
+                .collect::<Vec<_>>()
+        };
+        // A Lua left from before can still go, but removing it never leads.
+        assert_eq!(
+            actions(LibrarySource::SteamInstalled, true, false, false),
+            [Details(7), RemoveLua(7)]
+        );
+        assert_eq!(
+            actions(LibrarySource::SteamInstalled, false, true, false),
+            [ApplyFix(7), Details(7)]
+        );
+        assert_eq!(
+            actions(LibrarySource::SteamInstalled, true, true, true),
+            [ApplyFix(7), RemoveLua(7), Details(7)]
+        );
+        // A game downloaded into the app keeps everything; it never needed Steam.
+        assert_eq!(
+            library_menu(LibrarySource::DrydockInstalled, 7, true, true, false, false),
+            library_menu(LibrarySource::DrydockInstalled, 7, true, true, false, true)
+        );
     }
 
     #[test]

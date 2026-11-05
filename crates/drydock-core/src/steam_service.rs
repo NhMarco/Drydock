@@ -31,6 +31,15 @@ const PLUGIN_SUBDIR: [&str; 2] = ["config", "stplug-in"];
 /// Where Steam keeps the depot manifests it has already fetched, beside `steam.exe`.
 const DEPOTCACHE_SUBDIR: &str = "depotcache";
 
+/// Whether the Steam Service can work on this platform at all.
+///
+/// The service is OpenSteamTool: Windows DLLs that `steam.exe` loads in place of `dwmapi.dll` and
+/// `xinput1_4.dll`. The Linux client is a native `steamclient.so` that never loads them, and
+/// BetterSteamTools publishes no Linux build. Without the service nothing reads an unlock Lua, so
+/// installing it and adding games to Steam are offered on Windows only; downloading a game into the
+/// app works everywhere.
+pub const STEAM_SERVICE_SUPPORTED: bool = cfg!(windows);
+
 /// The install state of the Steam Service, mirrored from the C# enum.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SteamServiceState {
